@@ -35,13 +35,13 @@ list(REMOVE_DUPLICATES _alpha_recorder_obs_hint_paths)
 find_path(OBS_INCLUDE_DIR
     NAMES obs-module.h obs.h
     HINTS ${_alpha_recorder_obs_hint_paths}
-    PATH_SUFFIXES include libobs/include libobs
+    PATH_SUFFIXES include libobs/include libobs libobs/libobs
 )
 
 find_path(OBS_CONFIG_INCLUDE_DIR
-    NAMES obsconfig.h
+    NAMES obsconfig.h obs-config.h
     HINTS ${_alpha_recorder_obs_hint_paths}
-    PATH_SUFFIXES config build/config
+    PATH_SUFFIXES include libobs/include libobs libobs/libobs config build/config
 )
 
 find_library(OBS_LIBOBS_LIBRARY

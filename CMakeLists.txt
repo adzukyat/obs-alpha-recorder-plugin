@@ -20,6 +20,8 @@ include(CTest)
 include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
 find_package(OBS REQUIRED MODULE)
 
+set(alpha_recorder_obs_runtime_bin_dir "${OBS_ROOT}/bin/64bit")
+
 add_library(alpha_recorder_core STATIC
     src/core/pair_gate.cpp
     src/core/manifest_writer.cpp
@@ -50,6 +52,14 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     set_target_properties(alpha_recorder_plugin PROPERTIES
         OUTPUT_NAME "alpha_recorder"
         FOLDER "alpha_recorder/obs"
+    )
+
+    add_custom_command(TARGET alpha_recorder_plugin POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:alpha_recorder_plugin>"
+                "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_plugin>"
+        VERBATIM
     )
 endif()
 
@@ -112,6 +122,7 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
         )
         set_tests_properties(${host_test_name} PROPERTIES
             LABELS "e2e"
+            ENVIRONMENT_MODIFICATION "ALPHA_RECORDER_STAGE_DIR=set:${OBS_ROOT};PATH=path_list_prepend:${alpha_recorder_obs_runtime_bin_dir}"
         )
 
         add_test(NAME ${encoder_test_name}
@@ -122,6 +133,7 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
         set_tests_properties(${encoder_test_name} PROPERTIES
             LABELS "e2e"
             DEPENDS ${host_test_name}
+            ENVIRONMENT_MODIFICATION "ALPHA_RECORDER_STAGE_DIR=set:${OBS_ROOT}"
         )
     endfunction()
 
