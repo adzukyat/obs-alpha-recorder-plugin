@@ -94,22 +94,46 @@ Once OBS is available, configure and build the plugin:
 
 ```powershell
 cmake --preset windows-x64-msvc
-cmake --build --preset windows-x64-msvc-debug
+cmake --build --preset windows-x64-msvc-relwithdebinfo
 ```
 
-The build produces these executables and libraries under
-`out\build\windows-x64-msvc`:
+The RelWithDebInfo build produces these executables and libraries under
+`out\build\windows-x64-msvc\bin\RelWithDebInfo`:
 
 - `alpha_recorder.dll`
+- `alpha_recorder_frontend.dll`
 - `alpha_recorder_e2e_host.exe`
 - `alpha_recorder_test_encoder.exe`
 - `alpha_recorder_unit_pair_gate.exe`
 - `alpha_recorder_unit_sidecar_writer.exe`
 
-The build also copies the plugin DLL into the OBS tree so the host process can
-load it later:
+The build also copies both plugin DLLs into the OBS tree so the host process can
+load them later:
 
 - `${OBS_ROOT}\obs-plugins\64bit\alpha_recorder.dll`
+- `${OBS_ROOT}\obs-plugins\64bit\alpha_recorder_frontend.dll`
+
+### Install into a stock OBS release
+
+If you want to copy the plugin into an existing OBS release, stage the
+RelWithDebInfo output and copy both module DLLs from the staged plugin
+directory.
+
+```powershell
+pwsh .\tools\stage_obs_tree.ps1
+```
+
+The staging helper now defaults to RelWithDebInfo, so no extra configuration
+flag is needed.
+
+Copy these files from `out\stage\obs\obs-plugins\64bit` into your OBS
+installation's `obs-plugins\64bit` folder:
+
+- `alpha_recorder.dll`
+- `alpha_recorder_frontend.dll`
+
+Do not use Debug output for a stock OBS install. The frontend module depends on
+debug Qt and debug CRT DLLs that are not shipped with a normal OBS release.
 
 ## 5. Run the unit tests
 
@@ -117,7 +141,7 @@ The unit tests cover the core pair gate and sidecar writer logic. Run them with
 CTest:
 
 ```powershell
-ctest --test-dir .\out\build\windows-x64-msvc -C Debug -L unit --output-on-failure
+ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L unit --output-on-failure
 ```
 
 Use this step to confirm the basic library logic before moving on to E2E.
@@ -127,7 +151,7 @@ Use this step to confirm the basic library logic before moving on to E2E.
 The recommended way to exercise the plugin end to end is the wrapper script:
 
 ```powershell
-pwsh .\tools\run_e2e.ps1
+pwsh .\tools\run_e2e.ps1 -Configuration RelWithDebInfo
 ```
 
 That script stages the OBS tree if needed, prepends the staged `bin\64bit`
@@ -137,7 +161,7 @@ then runs the `e2e` CTest label.
 If you already have a staged tree and want to run CTest directly, use:
 
 ```powershell
-ctest --test-dir .\out\build\windows-x64-msvc -C Debug -L e2e --output-on-failure
+ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L e2e --output-on-failure
 ```
 
 If you want to debug the flow manually, run the host and verifier yourself. This
@@ -145,7 +169,7 @@ is useful when you want to inspect the files between the two steps or attach a
 debugger to the host process.
 
 ```powershell
-.\out\build\windows-x64-msvc\bin\Debug\alpha_recorder_e2e_host.exe `
+.\out\build\windows-x64-msvc\bin\RelWithDebInfo\alpha_recorder_e2e_host.exe `
     --scenario .\tests\e2e\scenarios\basic_pair.scenario `
     --stage-dir .\deps\obs\obs-build\rundir\RelWithDebInfo `
     --artifact-root .\out\artifacts\alpha_recorder
@@ -154,7 +178,7 @@ debugger to the host process.
 After the host completes, run the verifier against the same artifact root:
 
 ```powershell
-.\out\build\windows-x64-msvc\bin\Debug\alpha_recorder_test_encoder.exe `
+.\out\build\windows-x64-msvc\bin\RelWithDebInfo\alpha_recorder_test_encoder.exe `
     --scenario .\tests\e2e\scenarios\basic_pair.scenario `
     --artifact-root .\out\artifacts\alpha_recorder
 ```
@@ -219,8 +243,8 @@ start call fails and the output never begins.
 
 After a successful run, the most important locations are:
 
-- build outputs: `out\build\windows-x64-msvc\bin\Debug`
-- staged OBS plugin: `${OBS_ROOT}\obs-plugins\64bit`
+- build outputs: `out\build\windows-x64-msvc\bin\RelWithDebInfo`
+- staged OBS plugin DLLs: `out\stage\obs\obs-plugins\64bit`
 - E2E artifacts:
   `out\build\windows-x64-msvc\Testing\Temporary\alpha_recorder_e2e`
 
@@ -236,8 +260,9 @@ The CMake configure step could not locate a valid OBS developer tree. Make sure
 
 ### `stage dir is missing the alpha_recorder plugin`
 
-The plugin DLL was not copied into the OBS tree yet. Re-run the build so the
-post-build copy step can stage `alpha_recorder.dll`.
+The plugin DLLs were not copied into the OBS tree yet. Re-run the RelWithDebInfo
+build so the post-build copy step can stage `alpha_recorder.dll` and
+`alpha_recorder_frontend.dll`.
 
 ### `C:\Program Files\obs-studio` does not work
 
@@ -263,8 +288,8 @@ If you just want the shortest successful path, run these commands in order:
 git submodule update --init --recursive
 pwsh .\tools\bootstrap_obs.ps1 -BuildFromSource
 cmake --preset windows-x64-msvc
-cmake --build --preset windows-x64-msvc-debug
-pwsh .\tools\run_e2e.ps1
+cmake --build --preset windows-x64-msvc-relwithdebinfo
+pwsh .\tools\run_e2e.ps1 -Configuration RelWithDebInfo
 ```
 
 If all five commands succeed, the plugin is ready and the full start-to-finish

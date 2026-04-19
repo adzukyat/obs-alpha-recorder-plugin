@@ -49,18 +49,24 @@ tree, pass its root to `-ObsRoot` to validate it and write
 
 ```powershell
 cmake --preset windows-x64-msvc
-cmake --build --preset windows-x64-msvc-debug
+cmake --build --preset windows-x64-msvc-relwithdebinfo
 ```
 
 The default preset fails fast if `OBS_ROOT` does not resolve to a real developer
 tree.
+
+To install into a stock OBS release, run `pwsh .\tools\stage_obs_tree.ps1` and
+copy both `alpha_recorder.dll` and `alpha_recorder_frontend.dll` from
+`out\stage\obs\obs-plugins\64bit` into OBS's `obs-plugins\64bit` directory. Use
+the RelWithDebInfo output; Debug builds depend on debug Qt and debug CRT DLLs
+that a normal OBS install does not ship.
 
 ## Test
 
 Unit tests are regular CTest executables.
 
 ```powershell
-ctest --test-dir .\out\build\windows-x64-msvc -C Debug -L unit --output-on-failure
+ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L unit --output-on-failure
 ```
 
 E2E tests are deterministic CTest executables. The host loads the real OBS
@@ -68,14 +74,14 @@ output module, produces RGB raw and alpha sidecar artifacts, and the verifier
 parses those files rather than checking file existence alone.
 
 ```powershell
-ctest --test-dir .\out\build\windows-x64-msvc -C Debug -L e2e --output-on-failure
+ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L e2e --output-on-failure
 ```
 
 The E2E host starts libobs, loads the staged `alpha_recorder_output` module, and
 the verifier checks the generated RGB, sidecar, and manifest artifacts.
 
-`tools/run_e2e.ps1` stages the OBS tree and prepends the staged `bin/64bit`
-directory to PATH before running CTest.
+`tools/run_e2e.ps1 -Configuration RelWithDebInfo` stages the OBS tree and
+prepends the staged `bin/64bit` directory to PATH before running CTest.
 
 ## OBS/libobs resolution
 

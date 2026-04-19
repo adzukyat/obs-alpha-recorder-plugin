@@ -2,7 +2,7 @@ param(
     [string]$ObsRoot = $env:OBS_ROOT,
     [string]$BuildDir = (Join-Path $PSScriptRoot "..\out\build\windows-x64-msvc"),
     [string]$StageDir = (Join-Path $PSScriptRoot "..\out\stage\obs"),
-    [string]$Configuration = 'Debug',
+    [string]$Configuration = 'RelWithDebInfo',
     [string]$PluginName = 'alpha_recorder'
 )
 
