@@ -49,6 +49,7 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     alpha_recorder_apply_warnings(alpha_recorder_plugin)
     target_link_libraries(alpha_recorder_plugin PRIVATE alpha_recorder_core OBS::libobs)
     target_include_directories(alpha_recorder_plugin PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+
     set_target_properties(alpha_recorder_plugin PROPERTIES
         OUTPUT_NAME "alpha_recorder"
         FOLDER "alpha_recorder/obs"
@@ -61,6 +62,41 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
                 "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_plugin>"
         VERBATIM
     )
+
+    if(TARGET OBS::frontend-api)
+        if(NOT Qt6_DIR)
+            set(_alpha_recorder_obs_qt6_cache "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-build/CMakeCache.txt")
+            if(EXISTS "${_alpha_recorder_obs_qt6_cache}")
+                file(STRINGS "${_alpha_recorder_obs_qt6_cache}" _alpha_recorder_qt6_dir_line REGEX "^Qt6_DIR:PATH=" LIMIT_COUNT 1)
+                if(_alpha_recorder_qt6_dir_line)
+                    string(REGEX REPLACE "^Qt6_DIR:PATH=" "" Qt6_DIR "${_alpha_recorder_qt6_dir_line}")
+                    set(Qt6_DIR "${Qt6_DIR}" CACHE PATH "Qt6 package location from the pinned OBS build tree" FORCE)
+                endif()
+            endif()
+        endif()
+
+        find_package(Qt6 REQUIRED COMPONENTS Widgets)
+
+        add_library(alpha_recorder_frontend MODULE
+            src/obs/frontend_ui.cpp
+        )
+        alpha_recorder_setup_target(alpha_recorder_frontend)
+        alpha_recorder_apply_warnings(alpha_recorder_frontend)
+        target_include_directories(alpha_recorder_frontend PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+        target_link_libraries(alpha_recorder_frontend PRIVATE alpha_recorder_core OBS::libobs OBS::frontend-api Qt6::Widgets)
+        set_target_properties(alpha_recorder_frontend PROPERTIES
+            OUTPUT_NAME "alpha_recorder_frontend"
+            FOLDER "alpha_recorder/obs"
+        )
+
+        add_custom_command(TARGET alpha_recorder_frontend POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:alpha_recorder_frontend>"
+                    "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_frontend>"
+            VERBATIM
+        )
+    endif()
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
@@ -87,6 +123,18 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
     )
     add_test(NAME alpha_recorder.unit.sidecar_writer COMMAND alpha_recorder_unit_sidecar_writer)
     set_tests_properties(alpha_recorder.unit.sidecar_writer PROPERTIES LABELS "unit")
+
+    add_executable(alpha_recorder_unit_e2e_scenario
+        tests/unit/e2e_scenario_test.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_e2e_scenario)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_e2e_scenario)
+    target_link_libraries(alpha_recorder_unit_e2e_scenario PRIVATE alpha_recorder_core)
+    set_target_properties(alpha_recorder_unit_e2e_scenario PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.e2e_scenario COMMAND alpha_recorder_unit_e2e_scenario)
+    set_tests_properties(alpha_recorder.unit.e2e_scenario PROPERTIES LABELS "unit")
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
@@ -147,6 +195,13 @@ install(TARGETS alpha_recorder_core
 
 if(TARGET alpha_recorder_plugin)
     install(TARGETS alpha_recorder_plugin
+        RUNTIME DESTINATION obs-plugins/64bit
+        LIBRARY DESTINATION obs-plugins/64bit
+    )
+endif()
+
+if(TARGET alpha_recorder_frontend)
+    install(TARGETS alpha_recorder_frontend
         RUNTIME DESTINATION obs-plugins/64bit
         LIBRARY DESTINATION obs-plugins/64bit
     )

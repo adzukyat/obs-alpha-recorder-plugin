@@ -105,12 +105,28 @@ $obsDataTargetDir = Join-Path $StageDir 'data'
 
 New-Item -ItemType Directory -Path $pluginTargetDir, $obsBinTargetDir, $obsDataTargetDir -Force | Out-Null
 
-$pluginPath = Resolve-PluginPath -BuildDir $BuildDir -Configuration $Configuration -PluginName $PluginName
-if ($null -eq $pluginPath) {
-    throw "Failed to locate $PluginName.dll in the build tree: $BuildDir"
-}
+$pluginNames = @($PluginName, 'alpha_recorder_frontend')
+$mainPluginPath = $null
+$frontendPluginPath = $null
+foreach ($currentPluginName in $pluginNames) {
+    $currentPluginPath = Resolve-PluginPath -BuildDir $BuildDir -Configuration $Configuration -PluginName $currentPluginName
+    if ($null -eq $currentPluginPath) {
+        if ($currentPluginName -eq $PluginName) {
+            throw "Failed to locate $PluginName.dll in the build tree: $BuildDir"
+        }
 
-Copy-Item -LiteralPath $pluginPath -Destination $pluginTargetDir -Force
+        continue
+    }
+
+    Copy-Item -LiteralPath $currentPluginPath -Destination $pluginTargetDir -Force
+
+    if ($currentPluginName -eq $PluginName) {
+        $mainPluginPath = $currentPluginPath
+    }
+    else {
+        $frontendPluginPath = $currentPluginPath
+    }
+}
 
 $obsBinSource = Join-Path $ObsRoot 'bin\64bit'
 $obsDataSource = Join-Path $ObsRoot 'data'
@@ -127,12 +143,13 @@ Copy-Item -Path (Join-Path $obsBinSource '*') -Destination $obsBinTargetDir -Rec
 Copy-Item -Path (Join-Path $obsDataSource '*') -Destination $obsDataTargetDir -Recurse -Force
 
 $manifest = [pscustomobject]@{
-    obsRoot       = $ObsRoot
-    buildDir      = $BuildDir
-    stageDir      = $StageDir
-    configuration = $Configuration
-    pluginPath    = $pluginPath
-    timestamp     = (Get-Date).ToString('o')
+    obsRoot            = $ObsRoot
+    buildDir           = $BuildDir
+    stageDir           = $StageDir
+    configuration      = $Configuration
+    pluginPath         = $mainPluginPath
+    frontendPluginPath = $frontendPluginPath
+    timestamp          = (Get-Date).ToString('o')
 }
 
 $manifestPath = Join-Path $StageDir 'stage.manifest.json'
