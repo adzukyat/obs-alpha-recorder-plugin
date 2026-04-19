@@ -1,0 +1,8 @@
+# Backpressure scenario that should drop the final attempted pair.
+name=drop_backpressure
+expected_pair_count=2
+expected_drop_count=1
+output_root=drop_backpressure
+rgb_artifact=rgb.raw
+alpha_sidecar=alpha.sidecar
+alpha_manifest=alpha.manifest.json

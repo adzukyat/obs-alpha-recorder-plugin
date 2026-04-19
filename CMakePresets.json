@@ -1,0 +1,49 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-x64-msvc",
+      "displayName": "Windows x64 MSVC",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+        "ALPHA_RECORDER_BUILD_OBS_PLUGIN": "ON",
+        "ALPHA_RECORDER_BUILD_UNIT_TESTS": "ON",
+        "ALPHA_RECORDER_BUILD_E2E_TESTS": "ON",
+        "OBS_ROOT": "$env{OBS_ROOT}"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-x64-msvc-debug",
+      "configurePreset": "windows-x64-msvc",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-x64-msvc-relwithdebinfo",
+      "configurePreset": "windows-x64-msvc",
+      "configuration": "RelWithDebInfo"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-x64-msvc-debug",
+      "configurePreset": "windows-x64-msvc",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

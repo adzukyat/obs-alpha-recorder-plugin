@@ -1,0 +1,158 @@
+cmake_minimum_required(VERSION 3.24)
+
+project(alpha_recorder_plugin
+    VERSION 0.1.0
+    DESCRIPTION "OBS native plugin scaffold for pair-based RGBA recording"
+    LANGUAGES CXX
+)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+include(ProjectOptions)
+include(Warnings)
+include(FetchDeps)
+
+alpha_recorder_set_project_options()
+alpha_recorder_fetch_test_deps()
+
+include(CTest)
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
+find_package(OBS QUIET MODULE)
+
+add_library(alpha_recorder_core STATIC
+    src/core/pair_gate.cpp
+    src/core/manifest_writer.cpp
+    src/core/sidecar_writer.cpp
+    src/core/e2e_scenario.cpp
+)
+alpha_recorder_setup_target(alpha_recorder_core)
+alpha_recorder_apply_warnings(alpha_recorder_core)
+target_include_directories(alpha_recorder_core
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+set_target_properties(alpha_recorder_core PROPERTIES
+    OUTPUT_NAME "alpha_recorder_core"
+    FOLDER "alpha_recorder/core"
+)
+
+if(OBS_FOUND AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
+    add_library(alpha_recorder_plugin MODULE
+        src/obs/plugin.cpp
+        src/obs/obs_output_bridge.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_plugin)
+    alpha_recorder_apply_warnings(alpha_recorder_plugin)
+    target_link_libraries(alpha_recorder_plugin PRIVATE alpha_recorder_core OBS::libobs)
+    target_include_directories(alpha_recorder_plugin PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    set_target_properties(alpha_recorder_plugin PROPERTIES
+        OUTPUT_NAME "alpha_recorder"
+        FOLDER "alpha_recorder/obs"
+    )
+else()
+    message(STATUS "OBS/libobs was not found or plugin build is disabled; set OBS_ROOT or create deps/obs/obs-root.cmake to enable the OBS module wrapper. The test-only E2E module export will still build for repo-local tests.")
+endif()
+
+if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
+    add_executable(alpha_recorder_unit_pair_gate
+        tests/unit/pair_gate_test.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_pair_gate)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_pair_gate)
+    target_link_libraries(alpha_recorder_unit_pair_gate PRIVATE alpha_recorder_core)
+    set_target_properties(alpha_recorder_unit_pair_gate PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.pair_gate COMMAND alpha_recorder_unit_pair_gate)
+    set_tests_properties(alpha_recorder.unit.pair_gate PROPERTIES LABELS "unit")
+
+    add_executable(alpha_recorder_unit_sidecar_writer
+        tests/unit/sidecar_writer_test.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_sidecar_writer)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_sidecar_writer)
+    target_link_libraries(alpha_recorder_unit_sidecar_writer PRIVATE alpha_recorder_core)
+    set_target_properties(alpha_recorder_unit_sidecar_writer PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.sidecar_writer COMMAND alpha_recorder_unit_sidecar_writer)
+    set_tests_properties(alpha_recorder.unit.sidecar_writer PROPERTIES LABELS "unit")
+endif()
+
+if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
+    add_library(alpha_recorder_e2e_module MODULE
+        src/obs/obs_output_bridge.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_e2e_module)
+    alpha_recorder_apply_warnings(alpha_recorder_e2e_module)
+    target_compile_definitions(alpha_recorder_e2e_module PRIVATE ALPHA_RECORDER_BUILD_E2E_MODULE)
+    target_link_libraries(alpha_recorder_e2e_module PRIVATE alpha_recorder_core)
+    set_target_properties(alpha_recorder_e2e_module PROPERTIES
+        OUTPUT_NAME "alpha_recorder_e2e"
+        FOLDER "alpha_recorder/tests/e2e"
+    )
+
+    add_executable(alpha_recorder_e2e_host
+        tests/e2e/host/main.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_e2e_host)
+    alpha_recorder_apply_warnings(alpha_recorder_e2e_host)
+    target_link_libraries(alpha_recorder_e2e_host PRIVATE alpha_recorder_core)
+    set_target_properties(alpha_recorder_e2e_host PROPERTIES
+        FOLDER "alpha_recorder/tests/e2e"
+    )
+    add_executable(alpha_recorder_test_encoder
+        tests/e2e/test_encoder/main.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_test_encoder)
+    alpha_recorder_apply_warnings(alpha_recorder_test_encoder)
+    target_link_libraries(alpha_recorder_test_encoder PRIVATE alpha_recorder_core)
+    set_target_properties(alpha_recorder_test_encoder PROPERTIES
+        FOLDER "alpha_recorder/tests/e2e"
+    )
+
+    set(alpha_recorder_e2e_artifact_root "${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/alpha_recorder_e2e")
+
+    function(alpha_recorder_add_e2e_scenario scenario_name scenario_path)
+        set(host_test_name "alpha_recorder.e2e.${scenario_name}.host")
+        set(encoder_test_name "alpha_recorder.e2e.${scenario_name}.test_encoder")
+
+        add_test(NAME ${host_test_name}
+            COMMAND alpha_recorder_e2e_host
+                --scenario "${scenario_path}"
+                --artifact-root "${alpha_recorder_e2e_artifact_root}"
+                --module "$<TARGET_FILE:alpha_recorder_e2e_module>"
+        )
+        set_tests_properties(${host_test_name} PROPERTIES
+            LABELS "e2e"
+        )
+
+        add_test(NAME ${encoder_test_name}
+            COMMAND alpha_recorder_test_encoder
+                --scenario "${scenario_path}"
+                --artifact-root "${alpha_recorder_e2e_artifact_root}"
+        )
+        set_tests_properties(${encoder_test_name} PROPERTIES
+            LABELS "e2e"
+            DEPENDS ${host_test_name}
+        )
+    endfunction()
+
+    alpha_recorder_add_e2e_scenario(happy_path "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/basic_pair.scenario")
+    alpha_recorder_add_e2e_scenario(drop_backpressure "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/drop_backpressure.scenario")
+endif()
+
+install(TARGETS alpha_recorder_core
+    ARCHIVE DESTINATION lib
+)
+
+if(TARGET alpha_recorder_plugin)
+    install(TARGETS alpha_recorder_plugin
+        RUNTIME DESTINATION obs-plugins/64bit
+        LIBRARY DESTINATION obs-plugins/64bit
+    )
+endif()
+
+install(DIRECTORY include/ DESTINATION include)

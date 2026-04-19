@@ -1,0 +1,8 @@
+# Happy-path scenario that should accept every attempted pair.
+name=happy_path
+expected_pair_count=2
+expected_drop_count=0
+output_root=happy_path
+rgb_artifact=rgb.raw
+alpha_sidecar=alpha.sidecar
+alpha_manifest=alpha.manifest.json
