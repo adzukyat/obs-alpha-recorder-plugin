@@ -18,8 +18,8 @@ serialization.
 
 ### `src/obs`
 
-The OBS module wrapper. This is where libobs entry points and OBS-facing glue
-belong once the recording pipeline is implemented.
+The OBS module wrapper. This is where the libobs entry points and the real
+output registration live.
 
 ### `tests/unit`
 
@@ -28,9 +28,10 @@ under CTest.
 
 ### `tests/e2e`
 
-The deterministic repo-local E2E harness lives here. The host loads the E2E
-module DLL, the module export writes real RGB, sidecar, and manifest artifacts,
-and the verifier checks those files end to end.
+The deterministic E2E harness lives here. The host starts libobs, loads the
+staged `alpha_recorder_output` module through the OBS module boundary, and the
+module writes real RGB, sidecar, and manifest artifacts that the verifier checks
+end to end.
 
 ### `tools`
 
@@ -52,6 +53,14 @@ The project is an OBS native plugin, not a standalone recorder. The core library
 exists only to isolate pair handling and sidecar concerns from the OBS module
 wrapper.
 
-The plugin target is enabled when a valid OBS root is supplied. Until then, the
-rest of the tree remains buildable so the scaffold stays usable while the
-dependency is being acquired or staged.
+The OBS module and E2E harness are only enabled when a valid OBS developer tree
+is supplied. If `OBS_ROOT` does not point at a real tree with libobs headers,
+import libraries, `bin/64bit`, and `data`, configuration fails instead of
+silently falling back to a substitute path.
+
+`tools/bootstrap_obs.ps1` can validate an existing staged developer tree or
+fetch, build, and stage the pinned OBS tag into
+`deps/obs/obs-build/rundir/RelWithDebInfo` before writing the
+`deps/obs/obs-root.cmake` fragment consumed by CMake. The source checkout stays
+in `deps/obs/obs-studio`, the build tree stays in `deps/obs/obs-build`, and the
+staged runtime/developer tree lives under the build tree's `rundir` prefix.

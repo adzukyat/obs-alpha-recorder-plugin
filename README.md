@@ -4,28 +4,44 @@ This repository is the scaffold for an OBS native plugin that will eventually
 record paired RGB and alpha data and write the alpha sidecar beside the main
 video stream.
 
+The OBS module target and the E2E harness both require a real OBS developer
+tree. `OBS_ROOT` must point to a tree with libobs headers, import libraries,
+`bin/64bit`, and `data`. The OBS source checkout is tracked as a git submodule
+at `deps/obs/obs-studio`; when bootstrapped from source, that staged developer
+tree lives under `deps/obs/obs-build/rundir/RelWithDebInfo` alongside the
+pinned source and build trees.
+
 The current tree is intentionally minimal. It provides:
 
 - a core static library for pair gating and sidecar writer scaffolding
-- an OBS module target that is enabled when libobs is discoverable
+- an OBS module target that registers a real libobs output
 - unit test executables registered with CTest
 - deterministic E2E executables and PowerShell staging helpers
 - CMake presets for Windows x64 MSVC
 
 ## Build
 
-The preferred path is to point CMake at an OBS install or staged tree that
-contains libobs headers and libraries.
+The preferred path is to point CMake at a real OBS developer tree that
+contains libobs headers, libraries, runtime DLLs, and plugin directories.
 
-1. Provide the OBS root directly:
+1. Initialize the OBS source submodule:
 
 ```powershell
-pwsh .\tools\bootstrap_obs.ps1 -ObsRoot D:\obs\install
+git submodule update --init --recursive
 ```
 
-If you want the OBS source checkout as the acquisition path, add `-CloneSource`.
-Build and install OBS separately, then point `OBS_ROOT` at the resulting install
-or staged tree.
+2. Produce a real OBS developer tree from source:
+
+```powershell
+pwsh .\tools\bootstrap_obs.ps1 -BuildFromSource
+```
+
+If you already have an OBS source checkout, use `-BuildFromSource` to stage it
+into the OBS build tree's runtime prefix without recloning. If you want the
+bootstrap script to refresh the submodule checkout from the pinned OBS tag,
+`-CloneSource` is still available. If you already have a real OBS developer
+tree, pass its root to `-ObsRoot` to validate it and write
+`deps/obs/obs-root.cmake`.
 
 2. Configure and build:
 
@@ -34,10 +50,8 @@ cmake --preset windows-x64-msvc
 cmake --build --preset windows-x64-msvc-debug
 ```
 
-If OBS is not available yet, the core library and repo-local E2E tests still
-configure. The real OBS module wrapper target is skipped until an OBS root is
-supplied, but the test-only E2E module export still builds so the scenario flow
-can run without a full libobs startup.
+The default preset fails fast if `OBS_ROOT` does not resolve to a real
+developer tree.
 
 ## Test
 
@@ -47,16 +61,19 @@ Unit tests are regular CTest executables.
 ctest --test-dir .\out\build\windows-x64-msvc -C Debug -L unit --output-on-failure
 ```
 
-E2E tests are deterministic CTest executables. The host loads the test-only E2E
-module DLL, produces RGB raw and alpha sidecar artifacts, and the verifier
+E2E tests are deterministic CTest executables. The host loads the real OBS
+output module, produces RGB raw and alpha sidecar artifacts, and the verifier
 parses those files rather than checking file existence alone.
 
 ```powershell
 ctest --test-dir .\out\build\windows-x64-msvc -C Debug -L e2e --output-on-failure
 ```
 
-`tools/run_e2e.ps1` remains a convenience wrapper when you want the OBS tree
-staged first.
+The E2E host starts libobs, loads the staged `alpha_recorder_output` module,
+and the verifier checks the generated RGB, sidecar, and manifest artifacts.
+
+`tools/run_e2e.ps1` stages the OBS tree and prepends the staged `bin/64bit`
+directory to PATH before running CTest.
 
 ## OBS/libobs resolution
 
@@ -74,9 +91,8 @@ Implemented in the core library and E2E harness:
 - alpha sidecar container writing with LZ4-compressed payload blocks and index
   entries
 - manifest/session summary serialization
-- deterministic repo-local E2E scenarios that validate the RGB raw artifact,
-  alpha sidecar, and manifest content through a DLL boundary
+- deterministic E2E scenarios that validate the RGB raw artifact, alpha
+  sidecar, and manifest content through the OBS module boundary
 
-The actual OBS plugin target still depends on libobs discovery. When OBS is
-unavailable, the test-only E2E module export is used so the repository can still
-run meaningful end-to-end checks.
+The test-only E2E module export has been removed. The OBS module now registers
+an output through libobs, and the E2E host starts that output directly.

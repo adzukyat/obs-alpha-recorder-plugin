@@ -4,15 +4,54 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <vector>
 
-#include <windows.h>
+#ifdef _WIN32
+#include <Windows.h>
+#endif
 
-#include "alpha_recorder/e2e_module.hpp"
+#include <obs.h>
+
 #include "alpha_recorder/e2e_scenario.hpp"
 
 namespace
 {
+
+#ifdef _WIN32
+    LRESULT CALLBACK hidden_window_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        switch (message)
+        {
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+
+        default:
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+        }
+    }
+
+    HWND create_hidden_window()
+    {
+        const HINSTANCE instance = GetModuleHandleW(nullptr);
+
+        WNDCLASSW window_class = {};
+        window_class.lpszClassName = L"alpha_recorder_e2e";
+        window_class.hInstance = instance;
+        window_class.lpfnWndProc = hidden_window_proc;
+
+        if (!RegisterClassW(&window_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        {
+            return nullptr;
+        }
+
+        return CreateWindowExW(0, window_class.lpszClassName, L"alpha_recorder_e2e", WS_OVERLAPPEDWINDOW,
+                               CW_USEDEFAULT, CW_USEDEFAULT, 1280, 720, nullptr, nullptr, instance, nullptr);
+    }
+#endif
 
     std::filesystem::path read_argument(int argc, char **argv, std::string_view name)
     {
@@ -28,28 +67,6 @@ namespace
         return {};
     }
 
-    std::filesystem::path read_environment_path(const char *name)
-    {
-        size_t required_size = 0;
-        if (getenv_s(&required_size, nullptr, 0, name) != 0 || required_size == 0U)
-        {
-            return {};
-        }
-
-        std::string value(required_size, '\0');
-        if (getenv_s(&required_size, value.data(), value.size(), name) != 0 || required_size == 0U)
-        {
-            return {};
-        }
-
-        if (!value.empty() && value.back() == '\0')
-        {
-            value.pop_back();
-        }
-
-        return std::filesystem::path{value};
-    }
-
     std::filesystem::path resolve_artifact_root(int argc, char **argv)
     {
         const std::filesystem::path cli_root = read_argument(argc, argv, "--artifact-root");
@@ -58,13 +75,19 @@ namespace
             return cli_root;
         }
 
-        const std::filesystem::path env_root = read_environment_path("ALPHA_RECORDER_E2E_ARTIFACT_ROOT");
+        const char *artifact_root_env = std::getenv("ALPHA_RECORDER_E2E_ARTIFACT_ROOT");
+        const std::filesystem::path env_root = (artifact_root_env != nullptr && *artifact_root_env != '\0')
+                                                   ? std::filesystem::path{artifact_root_env}
+                                                   : std::filesystem::path{};
         if (!env_root.empty())
         {
             return env_root;
         }
 
-        const std::filesystem::path stage_root = read_environment_path("ALPHA_RECORDER_STAGE_DIR");
+        const char *stage_root_env = std::getenv("ALPHA_RECORDER_STAGE_DIR");
+        const std::filesystem::path stage_root = (stage_root_env != nullptr && *stage_root_env != '\0')
+                                                     ? std::filesystem::path{stage_root_env}
+                                                     : std::filesystem::path{};
         if (!stage_root.empty())
         {
             return stage_root / "e2e";
@@ -80,84 +103,181 @@ namespace
         return std::filesystem::current_path() / "alpha_recorder_e2e";
     }
 
-    std::filesystem::path resolve_module_path(int argc, char **argv)
+    std::filesystem::path resolve_stage_dir(int argc, char **argv)
     {
-        const std::filesystem::path cli_module = read_argument(argc, argv, "--module");
-        if (!cli_module.empty())
+        const std::filesystem::path cli_stage_dir = read_argument(argc, argv, "--stage-dir");
+        if (!cli_stage_dir.empty())
         {
-            return cli_module;
+            return cli_stage_dir;
         }
 
-        const std::filesystem::path env_module = read_environment_path("ALPHA_RECORDER_E2E_MODULE");
-        if (!env_module.empty())
+        const char *stage_dir_env = std::getenv("ALPHA_RECORDER_STAGE_DIR");
+        if (stage_dir_env != nullptr && *stage_dir_env != '\0')
         {
-            return env_module;
+            return std::filesystem::path{stage_dir_env};
         }
 
         return {};
     }
 
-    struct ModuleHandle
+    bool initialize_obs(const std::filesystem::path &stage_dir, std::string &error_message)
     {
-        HMODULE handle = nullptr;
+        const std::filesystem::path bin_dir = stage_dir / "bin" / "64bit";
+        const std::filesystem::path plugin_dir = stage_dir / "obs-plugins" / "64bit";
+        const std::filesystem::path data_dir = stage_dir / "data";
 
-        ~ModuleHandle()
+        if (!std::filesystem::exists(bin_dir))
         {
-            if (handle != nullptr)
-            {
-                FreeLibrary(handle);
-            }
-        }
-    };
-
-    bool load_module(const std::filesystem::path &module_path, ModuleHandle &module, std::string &error_message)
-    {
-        std::wstring module_wide = module_path.wstring();
-        module.handle = LoadLibraryW(module_wide.c_str());
-        if (module.handle == nullptr)
-        {
-            error_message.assign("failed to load E2E module: ");
-            error_message.append(module_path.generic_string());
+            error_message.assign("stage dir is missing the OBS runtime bin directory: ");
+            error_message.append(bin_dir.generic_string());
             return false;
         }
 
+        if (!std::filesystem::exists(plugin_dir))
+        {
+            error_message.assign("stage dir is missing the OBS plugin directory: ");
+            error_message.append(plugin_dir.generic_string());
+            return false;
+        }
+
+        if (!std::filesystem::exists(data_dir))
+        {
+            error_message.assign("stage dir is missing the OBS data directory: ");
+            error_message.append(data_dir.generic_string());
+            return false;
+        }
+
+        const std::filesystem::path module_config_path = stage_dir / "module-config";
+        std::error_code directory_error;
+        std::filesystem::create_directories(module_config_path, directory_error);
+        if (directory_error)
+        {
+            error_message.assign("failed to create the OBS module config directory: ");
+            error_message.append(module_config_path.generic_string());
+            return false;
+        }
+
+        const std::string module_config_text = module_config_path.generic_string();
+        if (!obs_startup("en-US", module_config_text.c_str(), nullptr))
+        {
+            error_message.assign("failed to initialize OBS");
+            return false;
+        }
+
+#ifdef _WIN32
+        const std::wstring bin_dir_text = bin_dir.wstring();
+        if (SetCurrentDirectoryW(bin_dir_text.c_str()) == 0)
+        {
+            error_message.assign("failed to set the working directory to the staged OBS bin directory");
+            return false;
+        }
+
+        if (SetDllDirectoryW(bin_dir_text.c_str()) == 0)
+        {
+            error_message.assign("failed to add the OBS runtime bin directory to the DLL search path");
+            obs_shutdown();
+            return false;
+        }
+#endif
+
+        obs_video_info video_info = {};
+        video_info.adapter = 0;
+        video_info.base_width = 1280;
+        video_info.base_height = 720;
+        video_info.output_width = 1280;
+        video_info.output_height = 720;
+        video_info.fps_num = 30000;
+        video_info.fps_den = 1001;
+        video_info.graphics_module = "libobs-opengl.dll";
+        video_info.output_format = VIDEO_FORMAT_RGBA;
+
+        if (obs_reset_video(&video_info) != OBS_VIDEO_SUCCESS)
+        {
+            error_message.assign("failed to initialize the OBS video subsystem");
+            obs_shutdown();
+            return false;
+        }
+
+        obs_audio_info audio_info = {};
+        audio_info.samples_per_sec = 48000;
+        audio_info.speakers = SPEAKERS_STEREO;
+
+        if (!obs_reset_audio(&audio_info))
+        {
+            error_message.assign("failed to initialize the OBS audio subsystem");
+            obs_shutdown();
+            return false;
+        }
+
+        const std::filesystem::path plugin_path = plugin_dir / "alpha_recorder.dll";
+        if (!std::filesystem::exists(plugin_path))
+        {
+            error_message.assign("stage dir is missing the alpha_recorder plugin: ");
+            error_message.append(plugin_path.generic_string());
+            obs_shutdown();
+            return false;
+        }
+
+        obs_module_t *module = nullptr;
+        const std::string plugin_path_text = plugin_path.generic_string();
+        const std::string data_path_text = (data_dir / "obs-plugins" / "%module%").generic_string();
+
+        const int open_code = obs_open_module(&module, plugin_path_text.c_str(), data_path_text.c_str());
+        if (open_code != MODULE_SUCCESS)
+        {
+            error_message.assign("failed to open the alpha_recorder module: ");
+            error_message.append(plugin_path.generic_string());
+            obs_shutdown();
+            return false;
+        }
+
+        if (!obs_init_module(module))
+        {
+            error_message.assign("failed to initialize the alpha_recorder module");
+            obs_shutdown();
+            return false;
+        }
+
+        obs_post_load_modules();
         return true;
     }
 
-    bool run_module(const std::filesystem::path &module_path,
-                    const std::filesystem::path &scenario_path,
-                    const std::filesystem::path &artifact_root,
-                    alpha_recorder::e2e::E2ERunResult &result,
-                    std::string &error_message)
+    bool start_output(const std::filesystem::path &scenario_path,
+                      const std::filesystem::path &artifact_root,
+                      std::string &error_message)
     {
-        ModuleHandle module;
-        if (!load_module(module_path, module, error_message))
+        obs_data_t *settings = obs_data_create();
+        obs_data_set_string(settings, "scenario_path", scenario_path.generic_string().c_str());
+        obs_data_set_string(settings, "artifact_root", artifact_root.generic_string().c_str());
+
+        obs_output_t *output = obs_output_create("alpha_recorder_output", "alpha_recorder_e2e", settings, nullptr);
+        obs_data_release(settings);
+
+        if (output == nullptr)
         {
+            error_message.assign("failed to create the alpha_recorder output");
             return false;
         }
 
-        const std::string scenario_path_text = scenario_path.string();
-        const std::string artifact_root_text = artifact_root.string();
-        std::vector<char> module_error(512U, '\0');
-
-        const alpha_recorder::e2e::E2ERunFunction run_function = reinterpret_cast<alpha_recorder::e2e::E2ERunFunction>(GetProcAddress(module.handle, alpha_recorder::e2e::e2e_run_symbol_name));
-        if (run_function == nullptr)
+        const bool started = obs_output_start(output);
+        if (!started)
         {
-            error_message.assign("failed to resolve E2E module export: ");
-            error_message.append(alpha_recorder::e2e::e2e_run_symbol_name);
-            return false;
-        }
-
-        if (!run_function(scenario_path_text.c_str(), artifact_root_text.c_str(), &result, module_error.data(), module_error.size()))
-        {
-            error_message.assign(module_error.data());
-            if (error_message.empty())
+            const char *last_error = obs_output_get_last_error(output);
+            if (last_error != nullptr && *last_error != '\0')
             {
-                error_message.assign("E2E module export returned failure without an error message");
+                error_message.assign(last_error);
             }
+            else
+            {
+                error_message.assign("alpha_recorder output failed to start");
+            }
+
+            obs_output_release(output);
             return false;
         }
 
+        obs_output_stop(output);
+        obs_output_release(output);
         return true;
     }
 
@@ -178,6 +298,15 @@ int main(int argc, char **argv)
         return 2;
     }
 
+#ifdef _WIN32
+    const HWND hidden_window = create_hidden_window();
+    if (hidden_window == nullptr)
+    {
+        std::cerr << "failed to create hidden OBS test window\n";
+        return 2;
+    }
+#endif
+
     alpha_recorder::e2e::E2EScenario scenario;
     std::string scenario_error;
     if (!alpha_recorder::e2e::load_scenario(scenario_path, scenario, scenario_error))
@@ -186,10 +315,10 @@ int main(int argc, char **argv)
         return 3;
     }
 
-    const std::filesystem::path module_path = resolve_module_path(argc, argv);
-    if (module_path.empty())
+    const std::filesystem::path stage_dir = resolve_stage_dir(argc, argv);
+    if (stage_dir.empty())
     {
-        std::cerr << "missing required --module argument or ALPHA_RECORDER_E2E_MODULE environment variable\n";
+        std::cerr << "missing required --stage-dir argument or ALPHA_RECORDER_STAGE_DIR environment variable\n";
         return 4;
     }
 
@@ -202,28 +331,31 @@ int main(int argc, char **argv)
         return 5;
     }
 
+    std::string obs_error;
+    if (!initialize_obs(stage_dir, obs_error))
+    {
+        std::cerr << obs_error << '\n';
+        return 5;
+    }
+
     const std::filesystem::path output_root = alpha_recorder::e2e::resolve_output_root(artifact_root, scenario);
     std::error_code remove_error;
     std::filesystem::remove_all(output_root, remove_error);
     if (remove_error)
     {
         std::cerr << "failed to clear output root: " << output_root.string() << '\n';
+        obs_shutdown();
         return 6;
     }
 
-    alpha_recorder::e2e::E2ERunResult result;
-    std::string module_error;
-    if (!run_module(module_path, scenario_path, output_root, result, module_error))
+    if (!start_output(scenario_path, output_root, obs_error))
     {
-        std::cerr << module_error << '\n';
+        std::cerr << obs_error << '\n';
+        obs_shutdown();
+#ifdef _WIN32
+        DestroyWindow(hidden_window);
+#endif
         return 7;
-    }
-
-    const std::uint64_t attempted = alpha_recorder::e2e::attempted_pair_count(scenario);
-    if (result.attempted_pairs != attempted || result.accepted_pairs != scenario.expected_pair_count || result.dropped_pairs != scenario.expected_drop_count)
-    {
-        std::cerr << "module result counts do not match the scenario expectations\n";
-        return 8;
     }
 
     const std::filesystem::path rgb_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.rgb_artifact);
@@ -233,11 +365,16 @@ int main(int argc, char **argv)
     if (!std::filesystem::exists(rgb_path) || !std::filesystem::exists(sidecar_path) || !std::filesystem::exists(manifest_path))
     {
         std::cerr << "host did not find the expected artifacts under " << output_root.string() << '\n';
-        return 9;
+        obs_shutdown();
+#ifdef _WIN32
+        DestroyWindow(hidden_window);
+#endif
+        return 8;
     }
+
+    obs_shutdown();
 
     std::cout << "e2e host scenario passed: " << scenario.name << "\n";
     std::cout << "  output root: " << output_root.string() << '\n';
-    std::cout << "  accepted pairs: " << result.accepted_pairs << ", dropped pairs: " << result.dropped_pairs << '\n';
     return 0;
 }

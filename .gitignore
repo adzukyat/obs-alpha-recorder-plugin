@@ -1,1 +1,10 @@
-out/
+# Root build output
+/out/
+
+# OBS source checkout build/install outputs
+/deps/obs/obs-build/
+/deps/obs/obs-install/
+
+# Generated OBS bootstrap metadata
+/deps/obs/obs-root.cmake
+/deps/obs/obs-source.manifest.json

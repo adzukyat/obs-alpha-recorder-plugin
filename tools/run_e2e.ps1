@@ -9,6 +9,22 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Resolve-RepoPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path $BasePath $Path))
+}
+
 function Resolve-CtestPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -63,6 +79,12 @@ function Resolve-CtestPath {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $scenarioDir = Join-Path $repoRoot 'tests\e2e\scenarios'
 
+$BuildDir = Resolve-RepoPath -Path $BuildDir -BasePath $repoRoot
+$StageDir = Resolve-RepoPath -Path $StageDir -BasePath $repoRoot
+if (-not [string]::IsNullOrWhiteSpace($ObsRoot)) {
+    $ObsRoot = Resolve-RepoPath -Path $ObsRoot -BasePath $repoRoot
+}
+
 if(-not $SkipStage) {
     & (Join-Path $PSScriptRoot 'stage_obs_tree.ps1') `
         -BuildDir $BuildDir `
@@ -71,13 +93,20 @@ if(-not $SkipStage) {
         -Configuration $Configuration
 }
 
+$stagePluginPath = Join-Path (Join-Path $StageDir 'obs-plugins\64bit') 'alpha_recorder.dll'
+if (-not (Test-Path -LiteralPath $stagePluginPath)) {
+    throw "Expected staged plugin DLL is missing: $stagePluginPath"
+}
+
+$stageBinPath = Join-Path $StageDir 'bin\64bit'
+if (-not (Test-Path -LiteralPath $stageBinPath)) {
+    throw "Expected staged OBS runtime bin directory is missing: $stageBinPath"
+}
+
+$env:PATH = "$stageBinPath;$env:PATH"
+
 $env:ALPHA_RECORDER_STAGE_DIR = $StageDir
 $env:ALPHA_RECORDER_SCENARIO_DIR = $scenarioDir
-
-if(-not [string]::IsNullOrWhiteSpace($ObsRoot)) {
-    $env:ALPHA_RECORDER_OBS_ROOT = $ObsRoot
-    $env:OBS_ROOT = $ObsRoot
-}
 
 $ctestArgs = @(
     '--test-dir', $BuildDir,

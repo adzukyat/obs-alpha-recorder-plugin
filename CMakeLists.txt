@@ -18,7 +18,7 @@ alpha_recorder_fetch_test_deps()
 include(CTest)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
-find_package(OBS QUIET MODULE)
+find_package(OBS REQUIRED MODULE)
 
 add_library(alpha_recorder_core STATIC
     src/core/pair_gate.cpp
@@ -38,7 +38,7 @@ set_target_properties(alpha_recorder_core PROPERTIES
     FOLDER "alpha_recorder/core"
 )
 
-if(OBS_FOUND AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
+if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     add_library(alpha_recorder_plugin MODULE
         src/obs/plugin.cpp
         src/obs/obs_output_bridge.cpp
@@ -51,8 +51,6 @@ if(OBS_FOUND AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
         OUTPUT_NAME "alpha_recorder"
         FOLDER "alpha_recorder/obs"
     )
-else()
-    message(STATUS "OBS/libobs was not found or plugin build is disabled; set OBS_ROOT or create deps/obs/obs-root.cmake to enable the OBS module wrapper. The test-only E2E module export will still build for repo-local tests.")
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
@@ -82,24 +80,12 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
-    add_library(alpha_recorder_e2e_module MODULE
-        src/obs/obs_output_bridge.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_e2e_module)
-    alpha_recorder_apply_warnings(alpha_recorder_e2e_module)
-    target_compile_definitions(alpha_recorder_e2e_module PRIVATE ALPHA_RECORDER_BUILD_E2E_MODULE)
-    target_link_libraries(alpha_recorder_e2e_module PRIVATE alpha_recorder_core)
-    set_target_properties(alpha_recorder_e2e_module PROPERTIES
-        OUTPUT_NAME "alpha_recorder_e2e"
-        FOLDER "alpha_recorder/tests/e2e"
-    )
-
     add_executable(alpha_recorder_e2e_host
         tests/e2e/host/main.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_e2e_host)
     alpha_recorder_apply_warnings(alpha_recorder_e2e_host)
-    target_link_libraries(alpha_recorder_e2e_host PRIVATE alpha_recorder_core)
+    target_link_libraries(alpha_recorder_e2e_host PRIVATE alpha_recorder_core OBS::libobs)
     set_target_properties(alpha_recorder_e2e_host PROPERTIES
         FOLDER "alpha_recorder/tests/e2e"
     )
@@ -123,7 +109,6 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
             COMMAND alpha_recorder_e2e_host
                 --scenario "${scenario_path}"
                 --artifact-root "${alpha_recorder_e2e_artifact_root}"
-                --module "$<TARGET_FILE:alpha_recorder_e2e_module>"
         )
         set_tests_properties(${host_test_name} PROPERTIES
             LABELS "e2e"

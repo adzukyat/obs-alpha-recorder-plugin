@@ -3,7 +3,7 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <cstring>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -11,38 +11,24 @@
 #include <string_view>
 #include <system_error>
 
-#include "alpha_recorder/e2e_module.hpp"
+#include <obs-module.h>
+
 #include "alpha_recorder/e2e_scenario.hpp"
 #include "alpha_recorder/pair_gate.hpp"
 #include "alpha_recorder/sidecar_writer.hpp"
 
-#if defined(_WIN32) && defined(ALPHA_RECORDER_BUILD_E2E_MODULE)
-#define ALPHA_RECORDER_E2E_EXPORT __declspec(dllexport)
-#else
-#define ALPHA_RECORDER_E2E_EXPORT
-#endif
-
 namespace
 {
 
-    void copy_error_message(char *error_message, std::size_t error_message_size, std::string_view message) noexcept
+    struct AlphaRecorderOutputContext
     {
-        if (error_message == nullptr || error_message_size == 0U)
-        {
-            return;
-        }
+        obs_output_t *output = nullptr;
+        std::filesystem::path scenario_path{};
+        std::filesystem::path artifact_root{};
+    };
 
-        const std::size_t copy_size = std::min<std::size_t>(error_message_size - 1U, message.size());
-        std::memcpy(error_message, message.data(), copy_size);
-        error_message[copy_size] = '\0';
-    }
-
-    std::string run_e2e_impl(const std::filesystem::path &scenario_path,
-                             const std::filesystem::path &output_root,
-                             alpha_recorder::e2e::E2ERunResult &result)
+    std::string run_e2e_impl(const std::filesystem::path &scenario_path, const std::filesystem::path &output_root)
     {
-        result = {};
-
         alpha_recorder::e2e::E2EScenario scenario;
         std::string parse_error;
         if (!alpha_recorder::e2e::load_scenario(scenario_path, scenario, parse_error))
@@ -136,6 +122,11 @@ namespace
             ++accepted_pairs;
         }
 
+        if (accepted_pairs != scenario.expected_pair_count || dropped_pairs != scenario.expected_drop_count)
+        {
+            return "accepted or dropped pair counts did not match the scenario expectations";
+        }
+
         rgb_stream.flush();
         if (!rgb_stream)
         {
@@ -173,10 +164,76 @@ namespace
             return "sidecar size in the summary did not match the on-disk file";
         }
 
-        result.attempted_pairs = attempted_pairs;
-        result.accepted_pairs = accepted_pairs;
-        result.dropped_pairs = dropped_pairs;
         return {};
+    }
+
+    const char *alpha_recorder_output_get_name(void *)
+    {
+        return "Alpha Recorder";
+    }
+
+    void *alpha_recorder_output_create(obs_data_t *settings, obs_output_t *output)
+    {
+        auto *context = new AlphaRecorderOutputContext{};
+        context->output = output;
+
+        if (settings != nullptr)
+        {
+            const char *scenario_path = obs_data_get_string(settings, "scenario_path");
+            if (scenario_path != nullptr && *scenario_path != '\0')
+            {
+                context->scenario_path = std::filesystem::path{scenario_path};
+            }
+
+            const char *artifact_root = obs_data_get_string(settings, "artifact_root");
+            if (artifact_root != nullptr && *artifact_root != '\0')
+            {
+                context->artifact_root = std::filesystem::path{artifact_root};
+            }
+        }
+
+        return context;
+    }
+
+    void alpha_recorder_output_destroy(void *data)
+    {
+        delete static_cast<AlphaRecorderOutputContext *>(data);
+    }
+
+    bool alpha_recorder_output_start(void *data)
+    {
+        auto *context = static_cast<AlphaRecorderOutputContext *>(data);
+        if (context == nullptr || context->output == nullptr)
+        {
+            return false;
+        }
+
+        if (context->scenario_path.empty())
+        {
+            obs_output_set_last_error(context->output, "scenario_path is required");
+            return false;
+        }
+
+        if (context->artifact_root.empty())
+        {
+            obs_output_set_last_error(context->output, "artifact_root is required");
+            return false;
+        }
+
+        const std::string error = run_e2e_impl(context->scenario_path, context->artifact_root);
+        if (!error.empty())
+        {
+            obs_output_set_last_error(context->output, error.c_str());
+            return false;
+        }
+
+        obs_output_set_last_error(context->output, nullptr);
+        return true;
+    }
+
+    void alpha_recorder_output_stop(void *data, uint64_t)
+    {
+        (void)data;
     }
 
 } // namespace
@@ -191,60 +248,27 @@ namespace alpha_recorder::obs
 
     std::string_view module_description() noexcept
     {
-        return "OBS module wrapper scaffold for alpha_recorder";
+        return "OBS output module for alpha_recorder";
     }
 
-    bool register_output_bridge() noexcept
+    bool register_output_module() noexcept
     {
-        return !project_version().empty();
+        obs_output_info info = {};
+        info.id = "alpha_recorder_output";
+        info.flags = 0;
+        info.get_name = alpha_recorder_output_get_name;
+        info.create = alpha_recorder_output_create;
+        info.destroy = alpha_recorder_output_destroy;
+        info.start = alpha_recorder_output_start;
+        info.stop = alpha_recorder_output_stop;
+
+        obs_register_output(&info);
+        return true;
     }
 
     bool initialize_module() noexcept
     {
-        return register_output_bridge();
+        return register_output_module();
     }
 
 } // namespace alpha_recorder::obs
-
-extern "C" ALPHA_RECORDER_E2E_EXPORT bool alpha_recorder_run_e2e(const char *scenario_path,
-                                                                 const char *output_root,
-                                                                 alpha_recorder::e2e::E2ERunResult *result,
-                                                                 char *error_message,
-                                                                 std::size_t error_message_size) noexcept
-{
-    try
-    {
-        if (result == nullptr)
-        {
-            copy_error_message(error_message, error_message_size, "result pointer must not be null");
-            return false;
-        }
-
-        if (scenario_path == nullptr || *scenario_path == '\0')
-        {
-            copy_error_message(error_message, error_message_size, "scenario_path must not be empty");
-            return false;
-        }
-
-        if (output_root == nullptr || *output_root == '\0')
-        {
-            copy_error_message(error_message, error_message_size, "output_root must not be empty");
-            return false;
-        }
-
-        const std::string error = run_e2e_impl(std::filesystem::path{scenario_path}, std::filesystem::path{output_root}, *result);
-        if (!error.empty())
-        {
-            copy_error_message(error_message, error_message_size, error);
-            return false;
-        }
-
-        copy_error_message(error_message, error_message_size, std::string_view{});
-        return true;
-    }
-    catch (...)
-    {
-        copy_error_message(error_message, error_message_size, "unexpected error while running the E2E module export");
-        return false;
-    }
-}

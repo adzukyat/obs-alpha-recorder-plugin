@@ -9,6 +9,22 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Resolve-RepoPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+
+    return [System.IO.Path]::GetFullPath((Join-Path $BasePath $Path))
+}
+
 function Resolve-PluginPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -64,8 +80,21 @@ function Get-ConfiguredObsRoot {
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $configPath = Join-Path $repoRoot 'deps\obs\obs-root.cmake'
 
+$BuildDir = Resolve-RepoPath -Path $BuildDir -BasePath $repoRoot
+$StageDir = Resolve-RepoPath -Path $StageDir -BasePath $repoRoot
+
 if ([string]::IsNullOrWhiteSpace($ObsRoot)) {
     $ObsRoot = Get-ConfiguredObsRoot -ConfigPath $configPath
+}
+
+if ([string]::IsNullOrWhiteSpace($ObsRoot)) {
+    throw 'An OBS developer tree is required. Set OBS_ROOT or write deps/obs/obs-root.cmake before staging.'
+}
+
+$ObsRoot = Resolve-RepoPath -Path $ObsRoot -BasePath $repoRoot
+
+if (-not (Test-Path -LiteralPath $ObsRoot)) {
+    throw "OBS root does not exist: $ObsRoot"
 }
 
 New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
@@ -77,22 +106,25 @@ $obsDataTargetDir = Join-Path $StageDir 'data'
 New-Item -ItemType Directory -Path $pluginTargetDir, $obsBinTargetDir, $obsDataTargetDir -Force | Out-Null
 
 $pluginPath = Resolve-PluginPath -BuildDir $BuildDir -Configuration $Configuration -PluginName $PluginName
-if ($null -ne $pluginPath) {
-    Copy-Item -LiteralPath $pluginPath -Destination $pluginTargetDir -Force
+if ($null -eq $pluginPath) {
+    throw "Failed to locate $PluginName.dll in the build tree: $BuildDir"
 }
 
-if (-not [string]::IsNullOrWhiteSpace($ObsRoot) -and (Test-Path -LiteralPath $ObsRoot)) {
-    $obsBinSource = Join-Path $ObsRoot 'bin\64bit'
-    $obsDataSource = Join-Path $ObsRoot 'data'
+Copy-Item -LiteralPath $pluginPath -Destination $pluginTargetDir -Force
 
-    if (Test-Path -LiteralPath $obsBinSource) {
-        Copy-Item -Path (Join-Path $obsBinSource '*') -Destination $obsBinTargetDir -Recurse -Force
-    }
+$obsBinSource = Join-Path $ObsRoot 'bin\64bit'
+$obsDataSource = Join-Path $ObsRoot 'data'
 
-    if (Test-Path -LiteralPath $obsDataSource) {
-        Copy-Item -Path (Join-Path $obsDataSource '*') -Destination $obsDataTargetDir -Recurse -Force
-    }
+if (-not (Test-Path -LiteralPath $obsBinSource)) {
+    throw "OBS root is missing bin\\64bit: $ObsRoot"
 }
+
+if (-not (Test-Path -LiteralPath $obsDataSource)) {
+    throw "OBS root is missing data: $ObsRoot"
+}
+
+Copy-Item -Path (Join-Path $obsBinSource '*') -Destination $obsBinTargetDir -Recurse -Force
+Copy-Item -Path (Join-Path $obsDataSource '*') -Destination $obsDataTargetDir -Recurse -Force
 
 $manifest = [pscustomobject]@{
     obsRoot       = $ObsRoot
