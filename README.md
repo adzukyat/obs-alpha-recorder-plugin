@@ -4,12 +4,14 @@ This repository is the scaffold for an OBS native plugin that will eventually
 record paired RGB and alpha data and write the alpha sidecar beside the main
 video stream.
 
+For a start-to-finish usage walkthrough, see [docs/usage.md](docs/usage.md).
+
 The OBS module target and the E2E harness both require a real OBS developer
 tree. `OBS_ROOT` must point to a tree with libobs headers, import libraries,
 `bin/64bit`, and `data`. The OBS source checkout is tracked as a git submodule
 at `deps/obs/obs-studio`; when bootstrapped from source, that staged developer
-tree lives under `deps/obs/obs-build/rundir/RelWithDebInfo` alongside the
-pinned source and build trees.
+tree lives under `deps/obs/obs-build/rundir/RelWithDebInfo` alongside the pinned
+source and build trees.
 
 The current tree is intentionally minimal. It provides:
 
@@ -21,8 +23,8 @@ The current tree is intentionally minimal. It provides:
 
 ## Build
 
-The preferred path is to point CMake at a real OBS developer tree that
-contains libobs headers, libraries, runtime DLLs, and plugin directories.
+The preferred path is to point CMake at a real OBS developer tree that contains
+libobs headers, libraries, runtime DLLs, and plugin directories.
 
 1. Initialize the OBS source submodule:
 
@@ -50,8 +52,8 @@ cmake --preset windows-x64-msvc
 cmake --build --preset windows-x64-msvc-debug
 ```
 
-The default preset fails fast if `OBS_ROOT` does not resolve to a real
-developer tree.
+The default preset fails fast if `OBS_ROOT` does not resolve to a real developer
+tree.
 
 ## Test
 
@@ -69,8 +71,8 @@ parses those files rather than checking file existence alone.
 ctest --test-dir .\out\build\windows-x64-msvc -C Debug -L e2e --output-on-failure
 ```
 
-The E2E host starts libobs, loads the staged `alpha_recorder_output` module,
-and the verifier checks the generated RGB, sidecar, and manifest artifacts.
+The E2E host starts libobs, loads the staged `alpha_recorder_output` module, and
+the verifier checks the generated RGB, sidecar, and manifest artifacts.
 
 `tools/run_e2e.ps1` stages the OBS tree and prepends the staged `bin/64bit`
 directory to PATH before running CTest.
@@ -91,8 +93,8 @@ Implemented in the core library and E2E harness:
 - alpha sidecar container writing with LZ4-compressed payload blocks and index
   entries
 - manifest/session summary serialization
-- deterministic E2E scenarios that validate the RGB raw artifact, alpha
-  sidecar, and manifest content through the OBS module boundary
+- deterministic E2E scenarios that validate the RGB raw artifact, alpha sidecar,
+  and manifest content through the OBS module boundary
 
 The test-only E2E module export has been removed. The OBS module now registers
 an output through libobs, and the E2E host starts that output directly.
