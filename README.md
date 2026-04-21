@@ -1,8 +1,19 @@
 # alpha_recorder_plugin
 
-This repository is the scaffold for an OBS native plugin that will eventually
-record paired RGB and alpha data and write the alpha sidecar beside the main
-video stream.
+`alpha_recorder` is an OBS native plugin that follows the normal OBS recording
+lifecycle. Enable it from Tools -> Alpha Recorder Settings, then use OBS Start
+Recording / Stop Recording as usual. When enabled, it writes a lossless alpha
+sidecar and manifest beside each recording. On stop, and whenever OBS signals
+`file_changed` for a split recording, it finalizes the current segment and
+exports it with the selected format.
+
+The supported export path is Apple ProRes 4444. Lossless HEVC is shown in the
+settings UI but disabled, and unsupported config values normalize back to the
+supported default. If export fails, the raw sidecar and manifest remain beside
+the recording for recovery.
+
+Scenario files live only under `tests/e2e/scenarios`. They are inputs for the
+deterministic E2E harness, not part of the shipping plugin path.
 
 For a start-to-finish usage walkthrough, see [docs/usage.md](docs/usage.md).
 
@@ -15,8 +26,8 @@ source and build trees.
 
 The current tree is intentionally minimal. It provides:
 
-- a core static library for pair gating and sidecar writer scaffolding
-- an OBS module target that registers a real libobs output
+- OBS recording lifecycle hooks plus a Tools menu settings dialog
+- a core static library for pair gating, sidecar writing, and manifest writing
 - unit test executables registered with CTest
 - deterministic E2E executables and PowerShell staging helpers
 - CMake presets for Windows x64 MSVC
@@ -69,16 +80,17 @@ Unit tests are regular CTest executables.
 ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L unit --output-on-failure
 ```
 
-E2E tests are deterministic CTest executables. The host loads the real OBS
-output module, produces RGB raw and alpha sidecar artifacts, and the verifier
-parses those files rather than checking file existence alone.
+E2E tests are deterministic CTest executables. The host loads the staged
+`alpha_recorder_e2e.dll` module, produces RGB raw and alpha sidecar artifacts,
+and the verifier parses those files rather than checking file existence alone.
+The scenario files under `tests/e2e/scenarios` are E2E-only inputs.
 
 ```powershell
 ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L e2e --output-on-failure
 ```
 
-The E2E host starts libobs, loads the staged `alpha_recorder_output` module, and
-the verifier checks the generated RGB, sidecar, and manifest artifacts.
+The E2E host starts libobs, loads the staged `alpha_recorder_e2e.dll` module,
+and the verifier checks the generated RGB, sidecar, and manifest artifacts.
 
 `tools/run_e2e.ps1 -Configuration RelWithDebInfo` stages the OBS tree and
 prepends the staged `bin/64bit` directory to PATH before running CTest.
@@ -93,14 +105,17 @@ prepends the staged `bin/64bit` directory to PATH before running CTest.
 
 ## Status
 
-Implemented in the core library and E2E harness:
+Implemented in the core library and live OBS workflow:
 
 - pair admission logic with all-or-nothing frame-pair acceptance
 - alpha sidecar container writing with LZ4-compressed payload blocks and index
   entries
-- manifest/session summary serialization
+- manifest/session summary serialization with atomic manifest replacement
+- OBS recording lifecycle hooks, settings persistence, and Tools menu
+  integration
 - deterministic E2E scenarios that validate the RGB raw artifact, alpha sidecar,
   and manifest content through the OBS module boundary
 
-The test-only E2E module export has been removed. The OBS module now registers
-an output through libobs, and the E2E host starts that output directly.
+The test-only scenario path remains confined to the E2E harness; the shipping
+plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder
+Settings.

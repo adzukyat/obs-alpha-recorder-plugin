@@ -10,6 +10,14 @@
 #include <system_error>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
+#include "alpha_recorder/manifest_writer.hpp"
 #include "alpha_recorder/sidecar_writer.hpp"
 
 namespace
@@ -334,11 +342,132 @@ int main()
     }
 
     const std::string manifest_text((std::istreambuf_iterator<char>(manifest_stream)), std::istreambuf_iterator<char>());
-    if (!contains_text(manifest_text, "\"schema\": \"alpha_recorder.session_summary.v1\"") || !contains_text(manifest_text, "\"project_name\": \"alpha_recorder\"") || !contains_text(manifest_text, "\"project_version\": \"0.1.0\"") || !contains_text(manifest_text, "\"pair_count\": 2") || !contains_text(manifest_text, "\"record_count\": 2") || !contains_text(manifest_text, "\"first_sequence\": 7") || !contains_text(manifest_text, "\"last_sequence\": 8") || !contains_text(manifest_text, "\"first_pts\": 1000") || !contains_text(manifest_text, "\"last_pts\": 1040") || !contains_text(manifest_text, sidecar_path.filename().generic_string()) || !contains_text(manifest_text, manifest_path.filename().generic_string()))
+    if (!contains_text(manifest_text, "\"schema\": \"alpha_recorder.session_summary.v1\"") || !contains_text(manifest_text, "\"project_name\": \"alpha_recorder\"") || !contains_text(manifest_text, "\"project_version\": \"0.1.0\"") || !contains_text(manifest_text, "\"finalization_format\": \"prores_4444\"") || !contains_text(manifest_text, "\"pair_count\": 2") || !contains_text(manifest_text, "\"record_count\": 2") || !contains_text(manifest_text, "\"first_sequence\": 7") || !contains_text(manifest_text, "\"last_sequence\": 8") || !contains_text(manifest_text, "\"first_pts\": 1000") || !contains_text(manifest_text, "\"last_pts\": 1040") || !contains_text(manifest_text, sidecar_path.filename().generic_string()) || !contains_text(manifest_text, manifest_path.filename().generic_string()))
     {
         std::cerr << "manifest content is missing expected session metadata\n";
         return 27;
     }
+
+    const std::string legacy_finalization_line = "  \"finalization_format\": \"prores_4444\",\n";
+    const std::size_t legacy_finalization_pos = manifest_text.find(legacy_finalization_line);
+    if (legacy_finalization_pos == std::string::npos)
+    {
+        std::cerr << "failed to locate the finalization format field for the legacy manifest check\n";
+        return 40;
+    }
+
+    const std::filesystem::path legacy_manifest_path = temp_root / "session.legacy.manifest.json";
+    std::string legacy_manifest_text = manifest_text;
+    legacy_manifest_text.erase(legacy_finalization_pos, legacy_finalization_line.size());
+
+    {
+        std::ofstream legacy_manifest_stream(legacy_manifest_path, std::ios::binary | std::ios::trunc);
+        if (!legacy_manifest_stream)
+        {
+            std::cerr << "failed to create the legacy manifest for compatibility testing\n";
+            return 41;
+        }
+
+        legacy_manifest_stream << legacy_manifest_text;
+    }
+
+    alpha_recorder::ManifestWriter legacy_manifest_reader;
+    alpha_recorder::AlphaSessionSummary legacy_summary;
+    std::string legacy_read_error;
+    if (!legacy_manifest_reader.read(legacy_manifest_path, legacy_summary, &legacy_read_error))
+    {
+        std::cerr << "legacy manifest should still be readable: " << legacy_read_error << "\n";
+        return 42;
+    }
+
+    if (legacy_summary.finalization_format != "prores_4444")
+    {
+        std::cerr << "legacy manifest should default the missing finalization format to prores_4444\n";
+        return 43;
+    }
+
+    alpha_recorder::AlphaSessionSummary overload_summary = summary;
+    overload_summary.manifest_path = temp_root / "session.overload.manifest.json";
+    overload_summary.finalization_format = "lossless_hevc";
+    overload_summary.overload_detected = true;
+
+    alpha_recorder::ManifestWriter manifest_writer;
+    if (!manifest_writer.write(overload_summary))
+    {
+        std::cerr << "failed to write a manifest with overload metadata\n";
+        return 28;
+    }
+
+    std::ifstream overload_manifest_stream(overload_summary.manifest_path);
+    if (!overload_manifest_stream)
+    {
+        std::cerr << "failed to open overload manifest for verification\n";
+        return 29;
+    }
+
+    const std::string overload_manifest_text((std::istreambuf_iterator<char>(overload_manifest_stream)), std::istreambuf_iterator<char>());
+    if (!contains_text(overload_manifest_text, "\"finalization_format\": \"lossless_hevc\"") || !contains_text(overload_manifest_text, "ERR_OVERLOAD"))
+    {
+        std::cerr << "overload manifest did not include the expected metadata\n";
+        return 30;
+    }
+
+#ifdef _WIN32
+    const std::filesystem::path locked_manifest_path = temp_root / "session.locked.manifest.json";
+    alpha_recorder::AlphaSessionSummary locked_summary = summary;
+    locked_summary.manifest_path = locked_manifest_path;
+    locked_summary.finalization_format = "prores_4444";
+
+    if (!manifest_writer.write(locked_summary))
+    {
+        std::cerr << "failed to write the locked baseline manifest\n";
+        return 31;
+    }
+
+    std::ifstream locked_manifest_stream(locked_manifest_path);
+    if (!locked_manifest_stream)
+    {
+        std::cerr << "failed to open the locked baseline manifest\n";
+        return 32;
+    }
+
+    const std::string locked_manifest_text((std::istreambuf_iterator<char>(locked_manifest_stream)), std::istreambuf_iterator<char>());
+
+    HANDLE locked_manifest_handle = CreateFileW(locked_manifest_path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (locked_manifest_handle == INVALID_HANDLE_VALUE)
+    {
+        std::cerr << "failed to lock the manifest file for the failure-safety check\n";
+        return 33;
+    }
+
+    alpha_recorder::AlphaSessionSummary locked_update_summary = locked_summary;
+    locked_update_summary.finalization_format = "lossless_hevc";
+    locked_update_summary.overload_detected = true;
+
+    if (manifest_writer.write(locked_update_summary))
+    {
+        CloseHandle(locked_manifest_handle);
+        std::cerr << "manifest rewrite should have failed while the file was locked\n";
+        return 34;
+    }
+
+    CloseHandle(locked_manifest_handle);
+
+    std::ifstream locked_manifest_verify_stream(locked_manifest_path);
+    if (!locked_manifest_verify_stream)
+    {
+        std::cerr << "failed to reopen the locked manifest after the failed rewrite\n";
+        return 35;
+    }
+
+    const std::string locked_manifest_verify_text((std::istreambuf_iterator<char>(locked_manifest_verify_stream)), std::istreambuf_iterator<char>());
+    if (locked_manifest_verify_text != locked_manifest_text)
+    {
+        std::cerr << "locked manifest contents changed after the failed rewrite\n";
+        return 36;
+    }
+#endif
 
     std::cout << "sidecar writer roundtrip test passed\n";
     return 0;

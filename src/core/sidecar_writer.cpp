@@ -165,27 +165,32 @@ namespace alpha_recorder
             if (!write_container_header(sidecar_stream_, header))
             {
                 sidecar_stream_.close();
+                finalized_ = false;
                 return false;
             }
 
             open_ = true;
+            finalized_ = false;
             return true;
         }
         catch (...)
         {
             sidecar_stream_.close();
             open_ = false;
+            finalized_ = false;
             return false;
         }
     }
 
-    void AlphaLosslessWriter::close() noexcept
+    bool AlphaLosslessWriter::close() noexcept
     {
         if (!sidecar_stream_.is_open())
         {
             open_ = false;
-            return;
+            return true;
         }
+
+        bool success = true;
 
         try
         {
@@ -205,7 +210,8 @@ namespace alpha_recorder
                 sidecar_stream_.close();
                 open_ = false;
                 index_entries_.clear();
-                return;
+                finalized_ = false;
+                return false;
             }
 
             sidecar_stream_.seekp(static_cast<std::streamoff>(index_offset), std::ios::beg);
@@ -214,7 +220,8 @@ namespace alpha_recorder
                 sidecar_stream_.close();
                 open_ = false;
                 index_entries_.clear();
-                return;
+                finalized_ = false;
+                return false;
             }
 
             for (const AlphaIndexEntry &entry : index_entries_)
@@ -224,7 +231,8 @@ namespace alpha_recorder
                     sidecar_stream_.close();
                     open_ = false;
                     index_entries_.clear();
-                    return;
+                    finalized_ = false;
+                    return false;
                 }
             }
 
@@ -234,7 +242,8 @@ namespace alpha_recorder
                 sidecar_stream_.close();
                 open_ = false;
                 index_entries_.clear();
-                return;
+                finalized_ = false;
+                return false;
             }
 
             summary_.sidecar_size_bytes = current_position(sidecar_stream_);
@@ -244,14 +253,19 @@ namespace alpha_recorder
             index_entries_.clear();
 
             ManifestWriter manifest_writer;
-            (void)manifest_writer.write(summary_);
+            success = manifest_writer.write(summary_);
+            finalized_ = success;
         }
         catch (...)
         {
             sidecar_stream_.close();
             open_ = false;
             index_entries_.clear();
+            finalized_ = false;
+            success = false;
         }
+
+        return success;
     }
 
     bool AlphaLosslessWriter::is_open() const noexcept
@@ -272,6 +286,21 @@ namespace alpha_recorder
     const AlphaSessionSummary &AlphaLosslessWriter::summary() const noexcept
     {
         return summary_;
+    }
+
+    bool AlphaLosslessWriter::finalized() const noexcept
+    {
+        return finalized_;
+    }
+
+    void AlphaLosslessWriter::set_finalization_format(std::string_view finalization_format) noexcept
+    {
+        summary_.finalization_format.assign(finalization_format.data(), finalization_format.size());
+    }
+
+    void AlphaLosslessWriter::mark_overload() noexcept
+    {
+        summary_.overload_detected = true;
     }
 
     bool AlphaLosslessWriter::write_pair(const FramePair &pair) noexcept
@@ -348,6 +377,8 @@ namespace alpha_recorder
             sidecar_stream_.close();
             open_ = false;
             index_entries_.clear();
+            finalized_ = false;
+            finalized_ = false;
             return false;
         }
     }
@@ -355,6 +386,55 @@ namespace alpha_recorder
     bool AlphaLosslessWriter::write_frame(const FramePair &pair) noexcept
     {
         return write_pair(pair);
+    }
+
+    std::vector<std::uint8_t> decode_lz4_literal_block(const std::vector<std::uint8_t> &input)
+    {
+        std::vector<std::uint8_t> output;
+        if (input.empty())
+        {
+            return output;
+        }
+
+        std::size_t cursor = 0;
+        while (cursor < input.size())
+        {
+            const std::uint8_t token = input[cursor++];
+            if ((token & 0x0FU) != 0U)
+            {
+                return {};
+            }
+
+            std::size_t literal_length = static_cast<std::size_t>(token >> 4U);
+            if (literal_length == 15U)
+            {
+                while (true)
+                {
+                    if (cursor >= input.size())
+                    {
+                        return {};
+                    }
+
+                    const std::uint8_t extra = input[cursor++];
+                    literal_length += extra;
+                    if (extra != 255U)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (cursor + literal_length > input.size())
+            {
+                return {};
+            }
+
+            output.insert(output.end(), input.begin() + static_cast<std::ptrdiff_t>(cursor),
+                          input.begin() + static_cast<std::ptrdiff_t>(cursor + literal_length));
+            cursor += literal_length;
+        }
+
+        return output;
     }
 
 } // namespace alpha_recorder

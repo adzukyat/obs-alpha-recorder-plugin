@@ -105,9 +105,10 @@ $obsDataTargetDir = Join-Path $StageDir 'data'
 
 New-Item -ItemType Directory -Path $pluginTargetDir, $obsBinTargetDir, $obsDataTargetDir -Force | Out-Null
 
-$pluginNames = @($PluginName, 'alpha_recorder_frontend')
+$pluginNames = @($PluginName, 'alpha_recorder_frontend', 'alpha_recorder_e2e')
 $mainPluginPath = $null
 $frontendPluginPath = $null
+$e2ePluginPath = $null
 foreach ($currentPluginName in $pluginNames) {
     $currentPluginPath = Resolve-PluginPath -BuildDir $BuildDir -Configuration $Configuration -PluginName $currentPluginName
     if ($null -eq $currentPluginPath) {
@@ -122,6 +123,9 @@ foreach ($currentPluginName in $pluginNames) {
 
     if ($currentPluginName -eq $PluginName) {
         $mainPluginPath = $currentPluginPath
+    }
+    elseif ($currentPluginName -eq 'alpha_recorder_e2e') {
+        $e2ePluginPath = $currentPluginPath
     }
     else {
         $frontendPluginPath = $currentPluginPath
@@ -149,6 +153,7 @@ $manifest = [pscustomobject]@{
     configuration      = $Configuration
     pluginPath         = $mainPluginPath
     frontendPluginPath = $frontendPluginPath
+    e2ePluginPath      = $e2ePluginPath
     timestamp          = (Get-Date).ToString('o')
 }
 

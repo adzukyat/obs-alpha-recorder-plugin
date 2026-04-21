@@ -209,7 +209,7 @@ namespace
             return false;
         }
 
-        const std::filesystem::path plugin_path = plugin_dir / "alpha_recorder.dll";
+        const std::filesystem::path plugin_path = plugin_dir / "alpha_recorder_e2e.dll";
         if (!std::filesystem::exists(plugin_path))
         {
             error_message.assign("stage dir is missing the alpha_recorder plugin: ");

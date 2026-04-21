@@ -1,3 +1,208 @@
+#if 0
+#include <obs-frontend-api.h>
+#include <obs-module.h>
+
+#include <util/config-file.h>
+
+#include <QAction>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QLabel>
+#include <QMainWindow>
+#include <QMessageBox>
+#include <QVBoxLayout>
+
+#include "alpha_recorder/plugin.hpp"
+
+OBS_DECLARE_MODULE()
+OBS_MODULE_USE_DEFAULT_LOCALE("alpha_recorder_frontend", "en-US")
+
+namespace
+{
+
+    using alpha_recorder::obs::FinalizationFormat;
+    using alpha_recorder::obs::Settings;
+
+    Settings load_settings()
+    {
+        Settings settings = alpha_recorder::obs::default_settings();
+
+        config_t *config = obs_frontend_get_user_config();
+        if (config == nullptr)
+        {
+            return settings;
+        }
+
+        settings.enabled = config_get_bool(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_enabled_key().data());
+
+        const char *stored_format = config_get_string(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data());
+        if (stored_format != nullptr)
+        {
+            FinalizationFormat parsed_format = settings.finalization_format;
+            if (alpha_recorder::obs::try_parse_finalization_format(std::string_view{stored_format}, parsed_format))
+            {
+                settings.finalization_format = parsed_format;
+            }
+        }
+
+        return settings;
+    }
+
+    bool save_settings(const Settings &settings, QString &error_message)
+    {
+        config_t *config = obs_frontend_get_user_config();
+        if (config == nullptr)
+        {
+            error_message = "OBS user configuration is unavailable.";
+            return false;
+        }
+
+        config_set_bool(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_enabled_key().data(), settings.enabled);
+        config_set_string(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data(), alpha_recorder::obs::finalization_format_config_value(settings.finalization_format).data());
+
+        if (config_save(config) != CONFIG_SUCCESS)
+        {
+            error_message = "Failed to save the OBS user configuration.";
+            return false;
+        }
+
+        return true;
+    }
+
+    class AlphaRecorderSettingsDialog : public QDialog
+    {
+    public:
+        explicit AlphaRecorderSettingsDialog(QWidget *parent)
+            : QDialog(parent)
+        {
+            const Settings settings = load_settings();
+
+            setWindowTitle("Alpha Recorder Settings");
+            setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+
+            auto *mainLayout = new QVBoxLayout(this);
+            mainLayout->setContentsMargins(12, 12, 12, 12);
+            mainLayout->setSpacing(10);
+
+            auto *introLabel = new QLabel("Configure whether alpha recording is enabled and which finalization format should be preferred.", this);
+            introLabel->setWordWrap(true);
+            mainLayout->addWidget(introLabel);
+
+            enabledCheckBox_ = new QCheckBox("Enabled", this);
+            enabledCheckBox_->setChecked(settings.enabled);
+            mainLayout->addWidget(enabledCheckBox_);
+
+            auto *formLayout = new QFormLayout();
+            formLayout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+            formLayout->setFormAlignment(Qt::AlignTop);
+            formLayout->setHorizontalSpacing(8);
+            formLayout->setVerticalSpacing(8);
+
+            finalizationFormatCombo_ = new QComboBox(this);
+            for (const auto &option : alpha_recorder::obs::finalization_format_options)
+            {
+                finalizationFormatCombo_->addItem(QString::fromUtf8(option.display_name.data(), static_cast<int>(option.display_name.size())), static_cast<int>(option.value));
+            }
+
+            select_finalization_format(settings.finalization_format);
+            formLayout->addRow("Finalization Format", finalizationFormatCombo_);
+            mainLayout->addLayout(formLayout);
+
+            auto *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+            connect(buttonBox, &QDialogButtonBox::accepted, this, &AlphaRecorderSettingsDialog::accept);
+            connect(buttonBox, &QDialogButtonBox::rejected, this, &AlphaRecorderSettingsDialog::reject);
+            mainLayout->addWidget(buttonBox);
+        }
+
+    protected:
+        void accept() override
+        {
+            QString errorMessage;
+            if (!save_settings(collect_settings(), errorMessage))
+            {
+                QMessageBox::critical(this, "Alpha Recorder Settings", errorMessage);
+                return;
+            }
+
+            QDialog::accept();
+        }
+
+    private:
+        Settings collect_settings() const
+        {
+            Settings settings = alpha_recorder::obs::default_settings();
+            settings.enabled = enabledCheckBox_->isChecked();
+
+            const int currentIndex = finalizationFormatCombo_->currentIndex();
+            if (currentIndex >= 0)
+            {
+                settings.finalization_format = static_cast<FinalizationFormat>(finalizationFormatCombo_->itemData(currentIndex).toInt());
+            }
+
+            return settings;
+        }
+
+        void select_finalization_format(FinalizationFormat format)
+        {
+            const int requestedValue = static_cast<int>(format);
+            for (int index = 0; index < finalizationFormatCombo_->count(); ++index)
+            {
+                if (finalizationFormatCombo_->itemData(index).toInt() == requestedValue)
+                {
+                    finalizationFormatCombo_->setCurrentIndex(index);
+                    return;
+                }
+            }
+
+            finalizationFormatCombo_->setCurrentIndex(0);
+        }
+
+        QCheckBox *enabledCheckBox_ = nullptr;
+        QComboBox *finalizationFormatCombo_ = nullptr;
+    };
+
+    QAction *settingsAction = nullptr;
+
+} // namespace
+
+extern "C" bool obs_module_load(void)
+{
+    return true;
+}
+
+extern "C" const char *obs_module_description(void)
+{
+    return "OBS settings dialog for alpha_recorder";
+}
+
+extern "C" void obs_module_post_load(void)
+{
+    settingsAction = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction("Alpha Recorder Settings"));
+    if (settingsAction == nullptr)
+    {
+        return;
+    }
+
+    QObject::connect(settingsAction, &QAction::triggered, settingsAction, []()
+                     {
+        QMainWindow *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+        AlphaRecorderSettingsDialog dialog(mainWindow);
+        dialog.exec(); });
+}
+
+extern "C" void obs_module_unload(void)
+{
+    if (settingsAction != nullptr)
+    {
+        settingsAction->disconnect();
+        settingsAction->setEnabled(false);
+        settingsAction = nullptr;
+    }
+}
+#endif
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
@@ -188,7 +393,7 @@ namespace
             startButton_->setDefault(true);
             startButton_->setAutoDefault(true);
 
-            buttonBox->addButton(QDialogButtonBox::Close);
+#include "alpha_recorder/plugin.hpp"
             connect(buttonBox, &QDialogButtonBox::accepted, this, &AlphaRecorderLauncherDialog::startRecorder);
             connect(buttonBox, &QDialogButtonBox::rejected, this, &AlphaRecorderLauncherDialog::reject);
 
@@ -196,18 +401,149 @@ namespace
             setLayout(mainLayout);
 
             resize(760, 420);
-
-            loadSettings();
-
-            connect(scenarioPathEdit_, &QLineEdit::textChanged, this, &AlphaRecorderLauncherDialog::refreshState);
+            using alpha_recorder::obs::FinalizationFormat;
+            using alpha_recorder::obs::Settings;
             connect(outputBaseEdit_, &QLineEdit::textChanged, this, &AlphaRecorderLauncherDialog::refreshState);
+            Settings load_settings()
+            {
+                Settings settings = alpha_recorder::obs::default_settings();
 
-            refreshState();
-        }
+                config_t *config = obs_frontend_get_user_config();
+                if (config == nullptr)
+                {
+                    return settings;
+                }
 
-        void saveCurrentSettings(bool flush)
-        {
-            config_t *config = obs_frontend_get_user_config();
+                settings.enabled = config_get_bool(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_enabled_key().data());
+
+                const char *stored_format = config_get_string(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data());
+                if (stored_format != nullptr)
+                {
+                    FinalizationFormat parsed_format = settings.finalization_format;
+                    if (alpha_recorder::obs::try_parse_finalization_format(std::string_view{stored_format}, parsed_format))
+                    {
+                        settings.finalization_format = parsed_format;
+                    }
+                }
+
+                return settings;
+            }
+
+            bool save_settings(const Settings &settings, QString &error_message)
+            {
+                config_t *config = obs_frontend_get_user_config();
+                if (config == nullptr)
+                {
+                    error_message = "OBS user configuration is unavailable.";
+                    return false;
+                }
+
+                config_set_bool(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_enabled_key().data(), settings.enabled);
+                config_set_string(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data(), alpha_recorder::obs::finalization_format_config_value(settings.finalization_format).data());
+
+                if (config_save(config) != CONFIG_SUCCESS)
+                {
+                    error_message = "Failed to save the OBS user configuration.";
+                    return false;
+                }
+
+                return true;
+            }
+
+            class AlphaRecorderSettingsDialog : public QDialog
+            {
+            public:
+                explicit AlphaRecorderSettingsDialog(QWidget *parent)
+                    : QDialog(parent)
+                {
+                    const Settings settings = load_settings();
+
+                    setWindowTitle("Alpha Recorder Settings");
+                    setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+
+                    auto *mainLayout = new QVBoxLayout(this);
+                    mainLayout->setContentsMargins(12, 12, 12, 12);
+                    mainLayout->setSpacing(10);
+
+                    auto *introLabel = new QLabel("Configure whether alpha recording is enabled and which finalization format should be preferred.", this);
+                    introLabel->setWordWrap(true);
+                    mainLayout->addWidget(introLabel);
+
+                    enabledCheckBox_ = new QCheckBox("Enabled", this);
+                    enabledCheckBox_->setChecked(settings.enabled);
+                    mainLayout->addWidget(enabledCheckBox_);
+
+                    auto *formLayout = new QFormLayout();
+                    formLayout->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                    formLayout->setFormAlignment(Qt::AlignTop);
+                    formLayout->setHorizontalSpacing(8);
+                    formLayout->setVerticalSpacing(8);
+
+                    finalizationFormatCombo_ = new QComboBox(this);
+                    for (const auto &option : alpha_recorder::obs::finalization_format_options)
+                    {
+                        finalizationFormatCombo_->addItem(QString::fromUtf8(option.display_name.data(), static_cast<int>(option.display_name.size())), static_cast<int>(option.value));
+                    }
+
+                    select_finalization_format(settings.finalization_format);
+                    formLayout->addRow("Finalization Format", finalizationFormatCombo_);
+                    mainLayout->addLayout(formLayout);
+
+                    auto *buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+                    connect(buttonBox, &QDialogButtonBox::accepted, this, &AlphaRecorderSettingsDialog::accept);
+                    connect(buttonBox, &QDialogButtonBox::rejected, this, &AlphaRecorderSettingsDialog::reject);
+                    mainLayout->addWidget(buttonBox);
+                }
+
+            protected:
+                void accept() override
+                {
+                    QString errorMessage;
+                    if (!save_settings(collect_settings(), errorMessage))
+                    {
+                        QMessageBox::critical(this, "Alpha Recorder Settings", errorMessage);
+                        return;
+                    }
+
+                    QDialog::accept();
+                }
+
+            private:
+                Settings collect_settings() const
+                {
+                    Settings settings = alpha_recorder::obs::default_settings();
+                    settings.enabled = enabledCheckBox_->isChecked();
+
+                    const int currentIndex = finalizationFormatCombo_->currentIndex();
+                    if (currentIndex >= 0)
+                    {
+                        settings.finalization_format = static_cast<FinalizationFormat>(finalizationFormatCombo_->itemData(currentIndex).toInt());
+                    }
+
+                    return settings;
+                }
+
+                void select_finalization_format(FinalizationFormat format)
+                {
+                    const int requestedValue = static_cast<int>(format);
+                    for (int index = 0; index < finalizationFormatCombo_->count(); ++index)
+                    {
+                        if (finalizationFormatCombo_->itemData(index).toInt() == requestedValue)
+                        {
+                            finalizationFormatCombo_->setCurrentIndex(index);
+                            return;
+                        }
+                    }
+
+                    finalizationFormatCombo_->setCurrentIndex(0);
+                }
+
+                QCheckBox *enabledCheckBox_ = nullptr;
+                QComboBox *finalizationFormatCombo_ = nullptr;
+            };
+
+            QAction *settingsAction = nullptr;
+
             if (config == nullptr)
             {
                 return;

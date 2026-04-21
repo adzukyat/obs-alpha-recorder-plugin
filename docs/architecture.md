@@ -1,7 +1,7 @@
 # Architecture
 
-This scaffold keeps the plugin split into clear layers so the later
-implementation can land without restructuring the build.
+This scaffold keeps the shipping OBS workflow and the E2E harness split into
+clear layers so the implementation can land without restructuring the build.
 
 ## Layers
 
@@ -18,8 +18,8 @@ serialization.
 
 ### `src/obs`
 
-The OBS module wrapper. This is where the libobs entry points and the real
-output registration live.
+The shipping OBS module wrapper. This is where the libobs entry points, the
+Tools -> Alpha Recorder Settings dialog, and the recording lifecycle hooks live.
 
 ### `tests/unit`
 
@@ -29,9 +29,10 @@ under CTest.
 ### `tests/e2e`
 
 The deterministic E2E harness lives here. The host starts libobs, loads the
-staged `alpha_recorder_output` module through the OBS module boundary, and the
-module writes real RGB, sidecar, and manifest artifacts that the verifier checks
-end to end.
+staged test module through the OBS boundary, and the harness writes RGB,
+sidecar, and manifest artifacts that the verifier checks end to end. The
+scenario files in this tree are test-only inputs and do not participate in the
+shipping path.
 
 ### `tools`
 
@@ -49,9 +50,10 @@ Project-wide build helpers:
 
 ## Build intent
 
-The project is an OBS native plugin, not a standalone recorder. The core library
-exists only to isolate pair handling and sidecar concerns from the OBS module
-wrapper.
+The project is an OBS native plugin, not a standalone recorder. The shipping
+workflow is OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder
+Settings. The core library exists only to isolate pair handling, sidecar
+writing, manifest writing, and export concerns from the OBS module wrapper.
 
 The OBS module and E2E harness are only enabled when a valid OBS developer tree
 is supplied. If `OBS_ROOT` does not point at a real tree with libobs headers,

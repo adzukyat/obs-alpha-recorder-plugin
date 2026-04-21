@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "alpha_recorder/frame_pair.hpp"
@@ -19,6 +20,11 @@ namespace alpha_recorder
     inline constexpr std::uint32_t alpha_record_flag_lz4_block = 1u;
     inline constexpr std::array<char, 8> alpha_container_magic{{'A', 'L', 'P', 'H', 'A', 'S', 'C', '1'}};
     inline constexpr std::array<char, 8> alpha_record_magic{{'A', 'L', 'P', 'H', 'A', 'R', 'C', '1'}};
+
+    [[nodiscard]] inline constexpr std::string_view alpha_overload_status_flag() noexcept
+    {
+        return "ERR_OVERLOAD";
+    }
 
     struct AlphaContainerHeader
     {
@@ -63,6 +69,7 @@ namespace alpha_recorder
     {
         std::string project_name{};
         std::string project_version{};
+        std::string finalization_format{"prores_4444"};
         std::filesystem::path sidecar_path{};
         std::filesystem::path manifest_path{};
         std::uint32_t container_format_version = alpha_container_format_version;
@@ -79,6 +86,7 @@ namespace alpha_recorder
         std::uint64_t index_offset = 0;
         std::uint64_t index_entry_count = 0;
         std::uint64_t sidecar_size_bytes = 0;
+        bool overload_detected = false;
     };
 
     class AlphaLosslessWriter
@@ -89,12 +97,16 @@ namespace alpha_recorder
 
         bool open(const std::filesystem::path &sidecar_path) noexcept;
         bool open(const std::filesystem::path &sidecar_path, const std::filesystem::path &manifest_path) noexcept;
-        void close() noexcept;
+        bool close() noexcept;
 
         [[nodiscard]] bool is_open() const noexcept;
         [[nodiscard]] const std::filesystem::path &path() const noexcept;
         [[nodiscard]] const std::filesystem::path &manifest_path() const noexcept;
         [[nodiscard]] const AlphaSessionSummary &summary() const noexcept;
+        [[nodiscard]] bool finalized() const noexcept;
+
+        void set_finalization_format(std::string_view finalization_format) noexcept;
+        void mark_overload() noexcept;
 
         bool write_pair(const FramePair &pair) noexcept;
         bool write_frame(const FramePair &pair) noexcept;
@@ -106,8 +118,11 @@ namespace alpha_recorder
         std::vector<AlphaIndexEntry> index_entries_{};
         std::ofstream sidecar_stream_{};
         bool open_ = false;
+        bool finalized_ = false;
     };
 
     using SidecarWriter = AlphaLosslessWriter;
+
+    [[nodiscard]] std::vector<std::uint8_t> decode_lz4_literal_block(const std::vector<std::uint8_t> &input);
 
 } // namespace alpha_recorder

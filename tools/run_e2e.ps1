@@ -32,14 +32,14 @@ function Resolve-CtestPath {
     )
 
     $cachePath = Join-Path $BuildDir 'CMakeCache.txt'
-    if(Test-Path -LiteralPath $cachePath) {
+    if (Test-Path -LiteralPath $cachePath) {
         $cacheContent = Get-Content -LiteralPath $cachePath -Raw
         $cacheMatch = [regex]::Match($cacheContent, '(?m)^CMAKE_COMMAND:INTERNAL=(.+)$')
-        if($cacheMatch.Success) {
+        if ($cacheMatch.Success) {
             $cmakePath = $cacheMatch.Groups[1].Value.Trim()
-            if(Test-Path -LiteralPath $cmakePath) {
+            if (Test-Path -LiteralPath $cmakePath) {
                 $ctestPath = Join-Path (Split-Path -Parent $cmakePath) 'ctest.exe'
-                if(Test-Path -LiteralPath $ctestPath) {
+                if (Test-Path -LiteralPath $ctestPath) {
                     return (Get-Item -LiteralPath $ctestPath).FullName
                 }
             }
@@ -47,28 +47,28 @@ function Resolve-CtestPath {
     }
 
     $ctestCommand = Get-Command ctest -ErrorAction SilentlyContinue
-    if($null -ne $ctestCommand) {
+    if ($null -ne $ctestCommand) {
         return $ctestCommand.Path
     }
 
     $cmakeCommand = Get-Command cmake -ErrorAction SilentlyContinue
-    if($null -ne $cmakeCommand) {
+    if ($null -ne $cmakeCommand) {
         $ctestPath = Join-Path (Split-Path -Parent $cmakeCommand.Path) 'ctest.exe'
-        if(Test-Path -LiteralPath $ctestPath) {
+        if (Test-Path -LiteralPath $ctestPath) {
             return (Get-Item -LiteralPath $ctestPath).FullName
         }
     }
 
-    foreach($programFiles in @(
-        [Environment]::GetFolderPath('ProgramFiles'),
-        [Environment]::GetFolderPath('ProgramFilesX86')
-    )) {
-        if([string]::IsNullOrWhiteSpace($programFiles)) {
+    foreach ($programFiles in @(
+            [Environment]::GetFolderPath('ProgramFiles'),
+            [Environment]::GetFolderPath('ProgramFilesX86')
+        )) {
+        if ([string]::IsNullOrWhiteSpace($programFiles)) {
             continue
         }
 
         $ctestPath = Join-Path $programFiles 'CMake\bin\ctest.exe'
-        if(Test-Path -LiteralPath $ctestPath) {
+        if (Test-Path -LiteralPath $ctestPath) {
             return (Get-Item -LiteralPath $ctestPath).FullName
         }
     }
@@ -85,7 +85,7 @@ if (-not [string]::IsNullOrWhiteSpace($ObsRoot)) {
     $ObsRoot = Resolve-RepoPath -Path $ObsRoot -BasePath $repoRoot
 }
 
-if(-not $SkipStage) {
+if (-not $SkipStage) {
     & (Join-Path $PSScriptRoot 'stage_obs_tree.ps1') `
         -BuildDir $BuildDir `
         -StageDir $StageDir `
@@ -93,9 +93,9 @@ if(-not $SkipStage) {
         -Configuration $Configuration
 }
 
-$stagePluginPath = Join-Path (Join-Path $StageDir 'obs-plugins\64bit') 'alpha_recorder.dll'
+$stagePluginPath = Join-Path (Join-Path $StageDir 'obs-plugins\64bit') 'alpha_recorder_e2e.dll'
 if (-not (Test-Path -LiteralPath $stagePluginPath)) {
-    throw "Expected staged plugin DLL is missing: $stagePluginPath"
+    throw "Expected staged e2e plugin DLL is missing: $stagePluginPath"
 }
 
 $stageBinPath = Join-Path $StageDir 'bin\64bit'

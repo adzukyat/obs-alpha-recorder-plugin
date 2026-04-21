@@ -1,25 +1,30 @@
 # Usage Guide
 
 This document walks through the plugin from a clean checkout to a verified run.
-It covers setup, build, validation, and the runtime contract exposed by the
-module.
+It covers setup, build, validation, and the shipping OBS workflow.
 
 ## What this plugin is
 
-`alpha_recorder` is an OBS output module, not a traditional UI plugin. It does
-not add a dock, menu item, or source filter. Instead, it registers an output
-named `alpha_recorder_output` that accepts a scenario file and an output
-directory, runs the scenario, and writes artifacts to disk.
+`alpha_recorder` is an OBS recording companion, not a scenario-driven test
+module. The shipping workflow is:
 
-The current module contract is intentionally narrow:
+- open Tools -> Alpha Recorder Settings
+- enable the plugin and choose a Finalization Format
+- use OBS Start Recording / Stop Recording as usual
 
-- `scenario_path` points to a scenario file
-- `artifact_root` points to a writable output directory
-- the module writes a raw RGB artifact, an alpha sidecar, and a manifest JSON
+Scenario files under `tests/e2e/scenarios` are E2E-only fixtures. They are not
+read by the shipping OBS workflow.
 
-If you want to use the plugin from another OBS-based application, you load the
-module, create `alpha_recorder_output`, set those two settings, and start the
-output.
+The runtime contract is intentionally narrow:
+
+- `enabled` is stored in OBS user config
+- the plugin writes `*.alpha.sidecar` and `*.alpha.manifest.json` beside the
+  recording
+- on stop, and whenever OBS signals `file_changed` for a split recording, the
+  plugin finalizes the sidecar and manifest, then exports the selected
+  finalization format when it is supported
+- if export fails, the raw sidecar and manifest remain on disk for manual
+  recovery
 
 ## 1. Prerequisites
 
@@ -188,56 +193,49 @@ The shipped scenarios are:
 - `tests/e2e/scenarios/basic_pair.scenario`
 - `tests/e2e/scenarios/drop_backpressure.scenario`
 
+These files are E2E-only and are not part of the shipping OBS recording path.
+
 The default E2E artifact root is under the build tree:
 
 - `out\build\windows-x64-msvc\Testing\Temporary\alpha_recorder_e2e\<scenario>`
 
 ## 7. Understand the output contract
 
-The output module is one-shot and scenario-driven. When it starts, it reads the
-scenario file, generates the artifacts, and writes them to the requested output
-directory.
+When Enabled is on, a normal OBS recording produces three related artifacts:
 
-The output set is always the same:
+- the main recording file that OBS already writes
+- `*.alpha.sidecar` for the alpha records
+- `*.alpha.manifest.json` for the session summary
 
-- `rgb.raw` for the raw RGB stream
-- `alpha.sidecar` for the alpha sidecar container
-- `alpha.manifest.json` for the session summary
+The sidecar is finalized with an index/footer on stop and on OBS `file_changed`
+split events. The manifest is written beside it and renamed into place so a
+failed finalize does not truncate the last good manifest.
 
-The scenario file controls the expected pair count, expected drop count, and
-artifact names. The verifier checks that the generated files match those
-expectations, rather than just checking that the files exist.
+After each finalization, the plugin tries to export a final alpha movie beside
+the sidecar.
 
-## 8. Use the module from your own OBS-based app
+- Apple ProRes 4444 is the supported export path and writes `.mov`
+- Lossless HEVC is listed in the settings UI, but it is disabled because the
+  bundled exporter does not support it yet
 
-If you want to embed the plugin into another OBS-based process, load the module
-the same way the E2E host does and then create the output instance.
+If export fails, keep the raw sidecar and manifest for manual recovery. The main
+OBS recording is left alone.
 
-The important settings are:
+## 8. Recover the output
 
-- `scenario_path`
-- `artifact_root`
+If finalization or export fails, look for the recording pair next to the OBS
+video file:
 
-Minimal example:
+- `MyRec.alpha.sidecar`
+- `MyRec.alpha.manifest.json`
 
-```cpp
-obs_data_t *settings = obs_data_create();
-obs_data_set_string(settings, "scenario_path", "C:/work/scenarios/basic_pair.scenario");
-obs_data_set_string(settings, "artifact_root", "C:/work/alpha_recorder_output");
+Those files are the recovery source. The manifest records the chosen
+finalization format, the sidecar path, the pair count, and a `status_flags`
+array that may include `ERR_OVERLOAD` when capture could not keep up.
 
-obs_output_t *output = obs_output_create("alpha_recorder_output", "alpha_recorder", settings, nullptr);
-obs_data_release(settings);
-
-if (output != nullptr) {
-    if (!obs_output_start(output)) {
-        const char *error = obs_output_get_last_error(output);
-        // Handle the failure message.
-    }
-}
-```
-
-The module validates both settings at start time. If either one is missing, the
-start call fails and the output never begins.
+If an old OBS config still says `finalization_format=lossless_hevc`, the loader
+normalizes it back to the supported default. The visible fallback is ProRes
+4444.
 
 ## 9. Inspect the artifacts
 
@@ -248,8 +246,9 @@ After a successful run, the most important locations are:
 - E2E artifacts:
   `out\build\windows-x64-msvc\Testing\Temporary\alpha_recorder_e2e`
 
-Within each scenario directory, you should see the RGB file, sidecar, and
-manifest together.
+The live recording workflow writes the sidecar and manifest beside the main OBS
+recording path. The E2E harness writes its own scenario-specific artifacts under
+the build tree.
 
 ## 10. Common problems
 
@@ -257,6 +256,17 @@ manifest together.
 
 The CMake configure step could not locate a valid OBS developer tree. Make sure
 `deps/obs/obs-root.cmake` exists or set `OBS_ROOT` to a real developer tree.
+
+### Finalization format is disabled
+
+Lossless HEVC is visible in the settings dialog, but the bundled exporter does
+not support it yet. Use ProRes 4444 for the shipping path.
+
+### Alpha-preserving video format is required
+
+The runtime path needs OBS to use an alpha-preserving video format such as BGRA
+or RGBA. If the plugin refuses to start the alpha session, check the OBS video
+configuration.
 
 ### `stage dir is missing the alpha_recorder plugin`
 

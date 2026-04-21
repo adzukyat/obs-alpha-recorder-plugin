@@ -7,6 +7,14 @@ project(alpha_recorder_plugin
 )
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/cmake/finders")
+
+file(GLOB _alpha_recorder_obs_deps_roots LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/.deps/obs-deps-*")
+list(SORT _alpha_recorder_obs_deps_roots)
+if(_alpha_recorder_obs_deps_roots)
+    list(POP_FRONT _alpha_recorder_obs_deps_roots _alpha_recorder_obs_deps_root)
+    list(APPEND CMAKE_PREFIX_PATH "${_alpha_recorder_obs_deps_root}")
+endif()
 
 include(ProjectOptions)
 include(Warnings)
@@ -19,17 +27,24 @@ include(CTest)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
 find_package(OBS REQUIRED MODULE)
+find_package(jansson REQUIRED)
+find_package(FFmpeg REQUIRED avcodec avformat avutil swscale)
 
 set(alpha_recorder_obs_runtime_bin_dir "${OBS_ROOT}/bin/64bit")
 
 add_library(alpha_recorder_core STATIC
     src/core/pair_gate.cpp
     src/core/manifest_writer.cpp
+    src/core/export_worker.cpp
+    src/core/sidecar_reader.cpp
     src/core/sidecar_writer.cpp
+    src/core/settings.cpp
     src/core/e2e_scenario.cpp
 )
 alpha_recorder_setup_target(alpha_recorder_core)
 alpha_recorder_apply_warnings(alpha_recorder_core)
+target_link_libraries(alpha_recorder_core PRIVATE OBS::libobs)
+target_link_libraries(alpha_recorder_core PUBLIC jansson::jansson FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale)
 target_include_directories(alpha_recorder_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -43,11 +58,11 @@ set_target_properties(alpha_recorder_core PROPERTIES
 if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     add_library(alpha_recorder_plugin MODULE
         src/obs/plugin.cpp
-        src/obs/obs_output_bridge.cpp
+        src/obs/recording_session_controller.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_plugin)
     alpha_recorder_apply_warnings(alpha_recorder_plugin)
-    target_link_libraries(alpha_recorder_plugin PRIVATE alpha_recorder_core OBS::libobs)
+    target_link_libraries(alpha_recorder_plugin PRIVATE alpha_recorder_core OBS::libobs OBS::frontend-api)
     target_include_directories(alpha_recorder_plugin PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 
     set_target_properties(alpha_recorder_plugin PROPERTIES
@@ -78,7 +93,7 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
         find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
         add_library(alpha_recorder_frontend MODULE
-            src/obs/frontend_ui.cpp
+            src/obs/settings_ui.cpp
         )
         alpha_recorder_setup_target(alpha_recorder_frontend)
         alpha_recorder_apply_warnings(alpha_recorder_frontend)
@@ -97,6 +112,30 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
             VERBATIM
         )
     endif()
+endif()
+
+if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
+    add_library(alpha_recorder_e2e_output MODULE
+        src/obs/plugin.cpp
+        src/obs/obs_output_bridge.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_e2e_output)
+    alpha_recorder_apply_warnings(alpha_recorder_e2e_output)
+    target_compile_definitions(alpha_recorder_e2e_output PRIVATE ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
+    target_link_libraries(alpha_recorder_e2e_output PRIVATE alpha_recorder_core OBS::libobs)
+    target_include_directories(alpha_recorder_e2e_output PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    set_target_properties(alpha_recorder_e2e_output PROPERTIES
+        OUTPUT_NAME "alpha_recorder_e2e"
+        FOLDER "alpha_recorder/tests/e2e"
+    )
+
+    add_custom_command(TARGET alpha_recorder_e2e_output POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:alpha_recorder_e2e_output>"
+                "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_e2e_output>"
+        VERBATIM
+    )
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
@@ -135,6 +174,18 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
     )
     add_test(NAME alpha_recorder.unit.e2e_scenario COMMAND alpha_recorder_unit_e2e_scenario)
     set_tests_properties(alpha_recorder.unit.e2e_scenario PROPERTIES LABELS "unit")
+
+    add_executable(alpha_recorder_unit_settings
+        tests/unit/settings_test.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_settings)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_settings)
+    target_link_libraries(alpha_recorder_unit_settings PRIVATE alpha_recorder_core OBS::libobs)
+    set_target_properties(alpha_recorder_unit_settings PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.settings COMMAND alpha_recorder_unit_settings)
+    set_tests_properties(alpha_recorder.unit.settings PROPERTIES LABELS "unit")
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)

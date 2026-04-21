@@ -2,10 +2,13 @@
 
 The E2E harness is deterministic and repo-local. It runs the scenario through
 the real OBS module boundary, writes real artifacts, and validates them on disk.
+The shipping workflow is separate: Tools -> Alpha Recorder Settings plus OBS
+Start Recording / Stop Recording. The scenario files under `tests/e2e/scenarios`
+are test-only fixtures.
 
 ## Current flow
 
-- The host starts libobs, loads the staged `alpha_recorder_output` module, and
+- The host starts libobs, loads the staged `alpha_recorder_e2e.dll` module, and
   starts the output through the OBS API.
 - The module uses the pair gate and sidecar writer to produce a raw RGB
   artifact, an alpha sidecar, and a manifest JSON beside the sidecar.
@@ -32,6 +35,8 @@ The shipped scenarios cover:
 - `tests/e2e/scenarios/basic_pair.scenario` for the happy path
 - `tests/e2e/scenarios/drop_backpressure.scenario` for the drop/backpressure
   path
+
+These files are not part of the shipping OBS workflow.
 
 ## Running
 

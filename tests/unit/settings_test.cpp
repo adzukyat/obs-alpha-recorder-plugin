@@ -1,0 +1,179 @@
+#include <fstream>
+#include <filesystem>
+#include <iostream>
+#include <iterator>
+#include <string>
+#include <system_error>
+
+#include <util/config-file.h>
+
+#include "alpha_recorder/export_worker.hpp"
+#include "alpha_recorder/plugin.hpp"
+
+int main()
+{
+    const alpha_recorder::obs::Settings defaults = alpha_recorder::obs::default_settings();
+    if (defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::ProRes4444)
+    {
+        std::cerr << "default settings are incorrect\n";
+        return 1;
+    }
+
+    if (alpha_recorder::obs::settings_section() != "AlphaRecorder" || alpha_recorder::obs::settings_enabled_key() != "enabled" || alpha_recorder::obs::settings_finalization_format_key() != "finalization_format")
+    {
+        std::cerr << "settings keys do not match the expected config layout\n";
+        return 2;
+    }
+
+    if (alpha_recorder::obs::finalization_format_options.size() != 2U)
+    {
+        std::cerr << "unexpected finalization format option count\n";
+        return 3;
+    }
+
+    if (alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::ProRes4444) != alpha_recorder::obs::FinalizationFormat::ProRes4444 ||
+        alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::LosslessHevc) != alpha_recorder::obs::FinalizationFormat::ProRes4444)
+    {
+        std::cerr << "finalization format normalization is incorrect\n";
+        return 4;
+    }
+
+    if (!alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::ProRes4444) || alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::LosslessHevc))
+    {
+        std::cerr << "finalization support classification is incorrect\n";
+        return 5;
+    }
+
+    const std::filesystem::path alpha_sidecar = std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"};
+    if (alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::ProRes4444) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
+        alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::LosslessHevc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"})
+    {
+        std::cerr << "finalization output path helper returned an unexpected value\n";
+        return 6;
+    }
+
+    const std::filesystem::path recording_path = std::filesystem::path{"C:/Recordings/MyRec.mkv"};
+    if (alpha_recorder::obs::recording_sidecar_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"} ||
+        alpha_recorder::obs::recording_manifest_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.manifest.json"})
+    {
+        std::cerr << "recording path helpers do not match the expected OBS naming convention\n";
+        return 7;
+    }
+
+    if (alpha_recorder::obs::finalization_format_display_name(alpha_recorder::obs::FinalizationFormat::ProRes4444) != "Apple ProRes 4444")
+    {
+        std::cerr << "prores display name mismatch\n";
+        return 8;
+    }
+
+    if (alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::LosslessHevc) != "lossless_hevc")
+    {
+        std::cerr << "lossless hevc config value mismatch\n";
+        return 9;
+    }
+
+    if (alpha_recorder::obs::frame_pts_from_elapsed_ns(33366667ULL, 30000U, 1001U) != 1U)
+    {
+        std::cerr << "fractional frame-rate pts conversion did not use fps_den\n";
+        return 10;
+    }
+
+    if (alpha_recorder::obs::frame_pts_from_elapsed_ns(1000000000ULL, 60U, 1U) != 60U)
+    {
+        std::cerr << "integer frame-rate pts conversion mismatch\n";
+        return 11;
+    }
+
+    alpha_recorder::obs::FinalizationFormat parsed_format = alpha_recorder::obs::FinalizationFormat::ProRes4444;
+    if (!alpha_recorder::obs::try_parse_finalization_format("lossless_hevc", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::LosslessHevc)
+    {
+        std::cerr << "failed to parse the lossless hevc config value\n";
+        return 12;
+    }
+
+    if (alpha_recorder::obs::try_parse_finalization_format("not-a-format", parsed_format))
+    {
+        std::cerr << "invalid finalization format value should be rejected\n";
+        return 13;
+    }
+
+    config_t *config = nullptr;
+    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=lossless_hevc\n") != CONFIG_SUCCESS || config == nullptr)
+    {
+        std::cerr << "failed to open an in-memory config string\n";
+        return 14;
+    }
+
+    const alpha_recorder::obs::Settings loaded_settings = alpha_recorder::obs::load_settings(config);
+    config_close(config);
+    if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::ProRes4444)
+    {
+        std::cerr << "unsupported config values were not normalized to the supported default\n";
+        return 15;
+    }
+
+    const std::filesystem::path temp_root = std::filesystem::temp_directory_path() / "alpha_recorder_settings_test";
+    std::error_code remove_error;
+    std::filesystem::remove_all(temp_root, remove_error);
+    std::filesystem::create_directories(temp_root);
+
+    const std::filesystem::path config_path = temp_root / "settings.ini";
+    config_t *file_config = nullptr;
+    const std::string config_path_text = config_path.generic_string();
+    if (config_open(&file_config, config_path_text.c_str(), CONFIG_OPEN_ALWAYS) != CONFIG_SUCCESS || file_config == nullptr)
+    {
+        std::cerr << "failed to open a file-backed config for persistence verification\n";
+        return 40;
+    }
+
+    config_set_bool(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_enabled_key().data(), true);
+    config_set_string(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data(), "lossless_hevc");
+    if (config_save(file_config) != CONFIG_SUCCESS)
+    {
+        std::cerr << "failed to seed the file-backed config\n";
+        config_close(file_config);
+        return 41;
+    }
+
+    const alpha_recorder::obs::Settings rewritten_settings = alpha_recorder::obs::load_settings(file_config);
+    const char *rewritten_format = config_get_string(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data());
+    if (!rewritten_settings.enabled || rewritten_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::ProRes4444 || rewritten_format == nullptr || std::string{rewritten_format} != "prores_4444")
+    {
+        std::cerr << "unsupported config values were not rewritten to the supported default\n";
+        config_close(file_config);
+        return 42;
+    }
+
+    config_close(file_config);
+
+    std::ifstream config_stream(config_path, std::ios::binary);
+    if (!config_stream)
+    {
+        std::cerr << "failed to reopen the persisted config for verification\n";
+        return 43;
+    }
+
+    const std::string config_text((std::istreambuf_iterator<char>(config_stream)), std::istreambuf_iterator<char>());
+    if (config_text.find("finalization_format=prores_4444") == std::string::npos)
+    {
+        std::cerr << "the normalized finalization format was not written back to disk\n";
+        return 44;
+    }
+
+    std::string export_error;
+    const alpha_recorder::obs::FinalizationExportRequest unsupported_request{
+        recording_path,
+        alpha_sidecar,
+        alpha_recorder::obs::recording_manifest_path(recording_path),
+        alpha_recorder::obs::FinalizationFormat::LosslessHevc,
+    };
+    if (alpha_recorder::obs::export_completed_recording(unsupported_request, &export_error) ||
+        export_error.find("Lossless HEVC export is not supported") == std::string::npos)
+    {
+        std::cerr << "unsupported export format was not rejected clearly\n";
+        return 16;
+    }
+
+    std::cout << "settings mapping test passed\n";
+    return 0;
+}

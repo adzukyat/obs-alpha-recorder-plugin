@@ -241,16 +241,6 @@ namespace
 namespace alpha_recorder::obs
 {
 
-    std::string_view module_name() noexcept
-    {
-        return project_name();
-    }
-
-    std::string_view module_description() noexcept
-    {
-        return "OBS output module for alpha_recorder";
-    }
-
     bool register_output_module() noexcept
     {
         obs_output_info info = {};
@@ -264,11 +254,6 @@ namespace alpha_recorder::obs
 
         obs_register_output(&info);
         return true;
-    }
-
-    bool initialize_module() noexcept
-    {
-        return register_output_module();
     }
 
 } // namespace alpha_recorder::obs
