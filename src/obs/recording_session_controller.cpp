@@ -1,5 +1,6 @@
-#include "alpha_recorder/frame_pair.hpp"
 #include "alpha_recorder/export_worker.hpp"
+#include "alpha_recorder/frame_matcher.hpp"
+#include "alpha_recorder/frame_pair.hpp"
 #include "alpha_recorder/plugin.hpp"
 #include "alpha_recorder/sidecar_writer.hpp"
 
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -40,6 +42,7 @@ namespace
     struct PendingFrame
     {
         FramePair pair{};
+        std::uint64_t composition_timestamp_ns = 0;
     };
 
     std::filesystem::path path_from_utf8(const char *text)
@@ -292,11 +295,9 @@ namespace
             video_info_ = video_info;
             recording_path_ = recording_path;
             next_sequence_ = 0;
-            pending_bytes_ = 0;
             pending_frames_.clear();
-            pending_packet_pts_.clear();
-            have_frame_origin_ = false;
-            frame_origin_timestamp_ns_ = 0;
+            matcher_.clear();
+            missing_packet_timing_logged_ = false;
 
             signal_handler_t *signal_handler = obs_output_get_signal_handler(recording_output_);
             if (signal_handler != nullptr)
@@ -323,8 +324,7 @@ namespace
         {
             session_aborted_ = true;
             pending_frames_.clear();
-            pending_packet_pts_.clear();
-            pending_bytes_ = 0;
+            matcher_.clear();
             writer_.mark_overload();
 
             error_message.assign(message.data(), message.size());
@@ -350,8 +350,7 @@ namespace
             video_info_ = video_info;
             recording_path_ = recording_path;
             pending_frames_.clear();
-            pending_packet_pts_.clear();
-            pending_bytes_ = 0;
+            matcher_.clear();
             session_aborted_ = false;
             return true;
         }
@@ -455,10 +454,8 @@ namespace
                 }
 
                 pending_frames_.clear();
-                pending_packet_pts_.clear();
-                pending_bytes_ = 0;
-                have_frame_origin_ = false;
-                frame_origin_timestamp_ns_ = 0;
+                matcher_.clear();
+                missing_packet_timing_logged_ = false;
             }
 
             if (recording_output != nullptr)
@@ -562,15 +559,9 @@ namespace
                     return;
                 }
 
-                if (!have_frame_origin_)
-                {
-                    frame_origin_timestamp_ns_ = frame->timestamp;
-                    have_frame_origin_ = true;
-                }
-
                 PendingFrame pending_frame;
                 pending_frame.pair.sequence = next_sequence_++;
-                pending_frame.pair.pts = derive_frame_pts(frame->timestamp);
+                pending_frame.pair.pts = 0;
                 pending_frame.pair.rgb.bytes = {0U};
                 pending_frame.pair.rgb.width = 1U;
                 pending_frame.pair.rgb.height = 1U;
@@ -579,22 +570,22 @@ namespace
                 pending_frame.pair.alpha.height = video_info_.output_height;
                 pending_frame.pair.alpha.stride = video_info_.output_width;
                 pending_frame.pair.alpha.bytes = extract_alpha_plane(frame, video_info_);
+                pending_frame.composition_timestamp_ns = frame->timestamp;
 
                 if (pending_frame.pair.alpha.bytes.empty())
                 {
                     return;
                 }
 
-                auto packet_it = std::find(pending_packet_pts_.begin(), pending_packet_pts_.end(), pending_frame.pair.pts);
-                if (packet_it != pending_packet_pts_.end())
+                alpha_recorder::AlphaFrameMatch match{};
+                if (matcher_.add_frame(pending_frame.composition_timestamp_ns, pending_frame.pair.alpha.bytes.size(), match))
                 {
-                    pending_packet_pts_.erase(packet_it);
+                    pending_frame.pair.pts = match.packet_pts;
                     if (!writer_.write_pair(pending_frame.pair))
                     {
                         session_aborted_ = true;
                         pending_frames_.clear();
-                        pending_packet_pts_.clear();
-                        pending_bytes_ = 0;
+                        matcher_.clear();
                         error_message = "Alpha Recorder failed to write a matched alpha frame.";
                     }
 
@@ -602,10 +593,9 @@ namespace
                     goto end_lock_raw;
                 }
 
-                pending_bytes_ += pending_frame.pair.alpha.bytes.size();
                 pending_frames_.push_back(std::move(pending_frame));
 
-                if (pending_frames_.size() > kMaxPendingFrames || pending_packet_pts_.size() > kMaxPendingPackets || pending_bytes_ > kMaxPendingBytes)
+                if (matcher_.overflowed())
                 {
                     should_log_overload = true;
                     abort_overflow_locked("Alpha Recorder aborted alpha capture because the pending-frame queue overflowed.", error_message);
@@ -638,6 +628,7 @@ namespace
             }
 
             std::string error_message;
+            bool should_log_missing_packet_timing = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!session_active_ || session_aborted_ || !writer_.is_open())
@@ -646,56 +637,63 @@ namespace
                 }
 
                 const std::uint64_t matched_pts = static_cast<std::uint64_t>(packet_pts);
-                auto frame_it = std::find_if(pending_frames_.begin(), pending_frames_.end(), [matched_pts](const PendingFrame &pending_frame)
-                                             { return pending_frame.pair.pts == matched_pts; });
-
-                if (frame_it != pending_frames_.end())
+                std::optional<std::uint64_t> packet_cts{};
+                if (packet_time != nullptr)
                 {
-                    PendingFrame pending_frame = std::move(*frame_it);
-                    pending_bytes_ -= pending_frame.pair.alpha.bytes.size();
-                    pending_frames_.erase(frame_it);
+                    packet_cts = packet_time->cts;
+                }
+                else if (!missing_packet_timing_logged_)
+                {
+                    missing_packet_timing_logged_ = true;
+                    should_log_missing_packet_timing = true;
+                }
 
-                    auto packet_it = std::find(pending_packet_pts_.begin(), pending_packet_pts_.end(), matched_pts);
-                    if (packet_it != pending_packet_pts_.end())
+                alpha_recorder::AlphaFrameMatch match{};
+                if (matcher_.add_packet(packet_cts, matched_pts, match))
+                {
+                    auto frame_it = std::find_if(pending_frames_.begin(), pending_frames_.end(), [&match](const PendingFrame &pending_frame)
+                                                 { return pending_frame.composition_timestamp_ns == match.frame_cts; });
+
+                    if (frame_it == pending_frames_.end())
                     {
-                        pending_packet_pts_.erase(packet_it);
+                        session_aborted_ = true;
+                        pending_frames_.clear();
+                        matcher_.clear();
+                        error_message = "Alpha Recorder lost a matched pending alpha frame.";
+                        goto end_lock_packet;
                     }
+
+                    PendingFrame pending_frame = std::move(*frame_it);
+                    pending_frames_.erase(frame_it);
+                    pending_frame.pair.pts = match.packet_pts;
 
                     if (!writer_.write_pair(pending_frame.pair))
                     {
                         session_aborted_ = true;
                         pending_frames_.clear();
-                        pending_packet_pts_.clear();
-                        pending_bytes_ = 0;
+                        matcher_.clear();
                         error_message = "Alpha Recorder failed to write a packet-matched alpha frame.";
                     }
 
                     goto end_lock_packet;
                 }
 
-                pending_packet_pts_.push_back(matched_pts);
-                if (pending_packet_pts_.size() > kMaxPendingPackets)
+                if (matcher_.overflowed())
                 {
                     abort_overflow_locked("Alpha Recorder aborted alpha capture because the pending-packet queue overflowed.", error_message);
                 }
             }
 
         end_lock_packet:
+            if (should_log_missing_packet_timing)
+            {
+                blog(LOG_WARNING, "Alpha Recorder packet timing metadata is unavailable; falling back to FIFO alpha matching.");
+            }
+
             if (!error_message.empty())
             {
                 log_and_show_error(error_message, false);
             }
-        }
-
-        std::uint64_t derive_frame_pts(std::uint64_t frame_timestamp_ns) const noexcept
-        {
-            if (!have_frame_origin_)
-            {
-                return 0U;
-            }
-
-            const std::uint64_t elapsed_ns = frame_timestamp_ns - frame_origin_timestamp_ns_;
-            return alpha_recorder::obs::frame_pts_from_elapsed_ns(elapsed_ns, video_info_.fps_num, video_info_.fps_den);
         }
 
         bool event_callback_registered_ = false;
@@ -704,12 +702,10 @@ namespace
         bool file_changed_connected_ = false;
         bool session_active_ = false;
         bool session_aborted_ = false;
-        bool have_frame_origin_ = false;
-        std::uint64_t frame_origin_timestamp_ns_ = 0;
+        bool missing_packet_timing_logged_ = false;
         std::uint64_t next_sequence_ = 0;
-        std::size_t pending_bytes_ = 0;
         std::deque<PendingFrame> pending_frames_{};
-        std::deque<std::uint64_t> pending_packet_pts_{};
+        alpha_recorder::AlphaFrameMatcher matcher_{kMaxPendingFrames, kMaxPendingPackets, kMaxPendingBytes};
         std::filesystem::path recording_path_{};
         obs_video_info video_info_{};
         AlphaLosslessWriter writer_{};

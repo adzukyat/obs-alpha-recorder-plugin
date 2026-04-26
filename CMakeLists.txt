@@ -151,6 +151,18 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
     add_test(NAME alpha_recorder.unit.pair_gate COMMAND alpha_recorder_unit_pair_gate)
     set_tests_properties(alpha_recorder.unit.pair_gate PROPERTIES LABELS "unit")
 
+    add_executable(alpha_recorder_unit_frame_matcher
+        tests/unit/frame_matcher_test.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_frame_matcher)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_frame_matcher)
+    target_link_libraries(alpha_recorder_unit_frame_matcher PRIVATE alpha_recorder_core)
+    set_target_properties(alpha_recorder_unit_frame_matcher PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.frame_matcher COMMAND alpha_recorder_unit_frame_matcher)
+    set_tests_properties(alpha_recorder.unit.frame_matcher PROPERTIES LABELS "unit")
+
     add_executable(alpha_recorder_unit_sidecar_writer
         tests/unit/sidecar_writer_test.cpp
     )
@@ -185,7 +197,10 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
         FOLDER "alpha_recorder/tests/unit"
     )
     add_test(NAME alpha_recorder.unit.settings COMMAND alpha_recorder_unit_settings)
-    set_tests_properties(alpha_recorder.unit.settings PROPERTIES LABELS "unit")
+    set_tests_properties(alpha_recorder.unit.settings PROPERTIES
+        LABELS "unit"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${alpha_recorder_obs_runtime_bin_dir};PATH=path_list_prepend:${_alpha_recorder_obs_deps_root}/bin"
+    )
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)

@@ -390,14 +390,15 @@ namespace alpha_recorder::obs
                 return set_error(error_message, "Alpha Recorder could not determine the decoded video frame geometry.");
             }
 
-            if (entry.pts > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            std::int64_t output_pts = decoded_frame->pts;
+            if (output_pts == AV_NOPTS_VALUE)
             {
-                return set_error(error_message, "Alpha Recorder encountered an out-of-range presentation timestamp while exporting.");
-            }
+                if (entry.pts > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                {
+                    return set_error(error_message, "Alpha Recorder encountered an out-of-range presentation timestamp while exporting.");
+                }
 
-            if (decoded_frame->pts != AV_NOPTS_VALUE && decoded_frame->pts != static_cast<std::int64_t>(entry.pts))
-            {
-                return set_error(error_message, "Alpha Recorder detected a timestamp mismatch between the recording and alpha sidecar.");
+                output_pts = static_cast<std::int64_t>(entry.pts);
             }
 
             if (!ensure_frame_buffers(bgra_frame, yuva_frame, decoded_frame->width, decoded_frame->height, error_message))
@@ -458,13 +459,13 @@ namespace alpha_recorder::obs
                 return set_error(error_message, "Alpha Recorder could not convert the alpha-masked frame for export.");
             }
 
-            yuva_frame.frame->pts = static_cast<std::int64_t>(entry.pts);
+            yuva_frame.frame->pts = output_pts;
             if (av_frame_copy_props(yuva_frame.frame, decoded_frame) < 0)
             {
                 return set_error(error_message, "Alpha Recorder could not preserve the decoded frame metadata for export.");
             }
 
-            yuva_frame.frame->pts = static_cast<std::int64_t>(entry.pts);
+            yuva_frame.frame->pts = output_pts;
 
             int ret = avcodec_send_frame(output.encoder, yuva_frame.frame);
             if (ret < 0)

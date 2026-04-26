@@ -57,16 +57,27 @@ namespace
 #endif
     }
 
-    void sync_runtime_hooks()
+    bool sync_runtime_hooks(QString &warning_message)
     {
         const RuntimeSyncFunction runtime_sync = resolve_runtime_sync_function();
-        if (runtime_sync != nullptr)
+        if (runtime_sync == nullptr)
         {
-            (void)runtime_sync();
+            warning_message = "Alpha Recorder saved the settings, but could not contact the recording runtime. Restart OBS if enabling does not take effect immediately.";
+            blog(LOG_WARNING, "%s", warning_message.toUtf8().constData());
+            return false;
         }
+
+        if (!runtime_sync())
+        {
+            warning_message = "Alpha Recorder saved the settings, but the recording runtime did not accept the update. Restart OBS if enabling does not take effect immediately.";
+            blog(LOG_WARNING, "%s", warning_message.toUtf8().constData());
+            return false;
+        }
+
+        return true;
     }
 
-    bool save_settings(const Settings &settings, QString &error_message)
+    bool save_settings(const Settings &settings, QString &error_message, QString &warning_message)
     {
         Settings normalized_settings = settings;
         normalized_settings.finalization_format = alpha_recorder::obs::normalize_finalization_format(normalized_settings.finalization_format);
@@ -87,7 +98,7 @@ namespace
             return false;
         }
 
-        sync_runtime_hooks();
+        (void)sync_runtime_hooks(warning_message);
 
         return true;
     }
@@ -161,10 +172,16 @@ namespace
         void accept() override
         {
             QString errorMessage;
-            if (!save_settings(collect_settings(), errorMessage))
+            QString warningMessage;
+            if (!save_settings(collect_settings(), errorMessage, warningMessage))
             {
                 QMessageBox::critical(this, "Alpha Recorder Settings", errorMessage);
                 return;
+            }
+
+            if (!warningMessage.isEmpty())
+            {
+                QMessageBox::warning(this, "Alpha Recorder Settings", warningMessage);
             }
 
             QDialog::accept();
