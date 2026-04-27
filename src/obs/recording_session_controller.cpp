@@ -55,6 +55,40 @@ namespace
         return std::filesystem::u8path(text);
     }
 
+    bool path_is_directory(const std::filesystem::path &path)
+    {
+        if (path.empty())
+        {
+            return false;
+        }
+
+        std::error_code error;
+        return std::filesystem::is_directory(path, error) && !error;
+    }
+
+    std::filesystem::path recording_file_path_from_output(obs_output_t *recording_output)
+    {
+        if (recording_output == nullptr)
+        {
+            return {};
+        }
+
+        obs_data_t *settings = obs_output_get_settings(recording_output);
+        if (settings == nullptr)
+        {
+            return {};
+        }
+
+        std::filesystem::path recording_path = path_from_utf8(obs_data_get_string(settings, "url"));
+        if (recording_path.empty())
+        {
+            recording_path = path_from_utf8(obs_data_get_string(settings, "path"));
+        }
+
+        obs_data_release(settings);
+        return path_is_directory(recording_path) ? std::filesystem::path{} : recording_path;
+    }
+
 #ifdef _WIN32
     std::wstring utf8_to_wide(std::string_view text)
     {
@@ -254,23 +288,28 @@ namespace
             }
 
             char *recording_path_text = obs_frontend_get_current_record_output_path();
-            if (recording_path_text == nullptr || *recording_path_text == '\0')
+            std::filesystem::path recording_path = recording_file_path_from_output(recording_output);
+            if (recording_path.empty() && recording_path_text != nullptr && *recording_path_text != '\0')
             {
-                if (recording_path_text != nullptr)
-                {
-                    bfree(recording_path_text);
-                }
+                recording_path = path_from_utf8(recording_path_text);
+            }
 
+            if (recording_path_text != nullptr)
+            {
+                bfree(recording_path_text);
+            }
+
+            if (recording_path.empty())
+            {
                 log_and_show_error("Alpha Recorder could not determine the recording file path.", true);
                 return false;
             }
 
-            const std::filesystem::path recording_path = path_from_utf8(recording_path_text);
-            bfree(recording_path_text);
-
-            if (recording_path.empty())
+            if (path_is_directory(recording_path))
             {
-                log_and_show_error("Alpha Recorder could not convert the recording file path.", true);
+                log_and_show_error(std::string{"Alpha Recorder could not determine the recording file name; OBS only reported the recording folder: "} +
+                                       recording_path.generic_string(),
+                                   true);
                 return false;
             }
 

@@ -4,12 +4,15 @@
 #include "alpha_recorder/sidecar_reader.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <cerrno>
 #include <filesystem>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 extern "C"
@@ -166,6 +169,23 @@ namespace alpha_recorder::obs
             return true;
         }
 
+        bool path_is_regular_file(const std::filesystem::path &path)
+        {
+            std::error_code error;
+            return std::filesystem::is_regular_file(path, error) && !error;
+        }
+
+        bool path_is_directory(const std::filesystem::path &path)
+        {
+            std::error_code error;
+            return std::filesystem::is_directory(path, error) && !error;
+        }
+
+        bool should_retry_open_error(int error_code) noexcept
+        {
+            return error_code == AVERROR(EACCES) || error_code == AVERROR(EPERM);
+        }
+
         bool open_input(InputContext &input, const std::filesystem::path &recording_path, std::string *error_message)
         {
             const std::string recording_path_text = path_to_utf8(recording_path);
@@ -174,7 +194,19 @@ namespace alpha_recorder::obs
                 return set_error(error_message, std::string{"Alpha Recorder could not convert the recording path: "} + recording_path.generic_string());
             }
 
-            int ret = avformat_open_input(&input.format, recording_path_text.c_str(), nullptr, nullptr);
+            int ret = 0;
+            constexpr int max_open_attempts = 20;
+            for (int attempt = 1; attempt <= max_open_attempts; ++attempt)
+            {
+                ret = avformat_open_input(&input.format, recording_path_text.c_str(), nullptr, nullptr);
+                if (ret >= 0 || !should_retry_open_error(ret) || attempt == max_open_attempts)
+                {
+                    break;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+
             if (ret < 0)
             {
                 return set_error(error_message, std::string{"Alpha Recorder could not open the recording file for export: "} +
@@ -573,6 +605,18 @@ namespace alpha_recorder::obs
                                                     request.recording_path.generic_string());
             }
 
+            if (path_is_directory(request.recording_path))
+            {
+                return set_error(error_message, std::string{"Alpha Recorder cannot export because OBS reported a recording folder instead of a video file: "} +
+                                                    request.recording_path.generic_string());
+            }
+
+            if (!path_is_regular_file(request.recording_path))
+            {
+                return set_error(error_message, std::string{"Alpha Recorder cannot export because the recording path is not a regular file: "} +
+                                                    request.recording_path.generic_string());
+            }
+
             ManifestWriter manifest_reader;
             AlphaSessionSummary summary;
             if (!manifest_reader.read(request.manifest_path, summary, error_message))
@@ -623,6 +667,12 @@ namespace alpha_recorder::obs
             FrameHolder yuva_frame;
             SwsHolder source_to_bgra;
             SwsHolder bgra_to_yuva;
+            decoded_frame.frame = av_frame_alloc();
+            if (decoded_frame.frame == nullptr)
+            {
+                return set_error(error_message, "Alpha Recorder could not allocate a decoded video frame.");
+            }
+
             AVPacket *packet = av_packet_alloc();
             if (packet == nullptr)
             {
@@ -672,6 +722,7 @@ namespace alpha_recorder::obs
 
                         if (next_alpha_index >= entries.size())
                         {
+                            av_frame_unref(decoded_frame.frame);
                             success = set_error(error_message, "Alpha Recorder decoded more video frames than the sidecar contains.");
                             break;
                         }
@@ -680,12 +731,15 @@ namespace alpha_recorder::obs
                         AlphaSidecarFrame alpha_frame;
                         if (!sidecar_reader.read_frame(entry, alpha_frame, error_message))
                         {
+                            av_frame_unref(decoded_frame.frame);
                             success = false;
                             break;
                         }
 
-                        if (!encode_frame(output, decoded_frame.frame, entry, alpha_frame, bgra_frame, yuva_frame, source_to_bgra,
-                                          bgra_to_yuva, error_message))
+                        const bool frame_encoded = encode_frame(output, decoded_frame.frame, entry, alpha_frame, bgra_frame, yuva_frame,
+                                                                source_to_bgra, bgra_to_yuva, error_message);
+                        av_frame_unref(decoded_frame.frame);
+                        if (!frame_encoded)
                         {
                             success = false;
                             break;
@@ -730,6 +784,7 @@ namespace alpha_recorder::obs
 
                 if (next_alpha_index >= entries.size())
                 {
+                    av_frame_unref(decoded_frame.frame);
                     return set_error(error_message, "Alpha Recorder decoded more video frames than the sidecar contains.");
                 }
 
@@ -737,11 +792,14 @@ namespace alpha_recorder::obs
                 AlphaSidecarFrame alpha_frame;
                 if (!sidecar_reader.read_frame(entry, alpha_frame, error_message))
                 {
+                    av_frame_unref(decoded_frame.frame);
                     return false;
                 }
 
-                if (!encode_frame(output, decoded_frame.frame, entry, alpha_frame, bgra_frame, yuva_frame, source_to_bgra, bgra_to_yuva,
-                                  error_message))
+                const bool frame_encoded = encode_frame(output, decoded_frame.frame, entry, alpha_frame, bgra_frame, yuva_frame,
+                                                        source_to_bgra, bgra_to_yuva, error_message);
+                av_frame_unref(decoded_frame.frame);
+                if (!frame_encoded)
                 {
                     return false;
                 }
