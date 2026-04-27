@@ -72,6 +72,7 @@ namespace alpha_recorder::e2e
             bool name_seen = false;
             bool pair_count_seen = false;
             bool drop_count_seen = false;
+            bool split_sequence_seen = false;
             bool output_root_seen = false;
             bool rgb_artifact_seen = false;
             bool alpha_sidecar_seen = false;
@@ -144,6 +145,24 @@ namespace alpha_recorder::e2e
                     }
 
                     drop_count_seen = true;
+                    continue;
+                }
+
+                if (key == "expected_split_at_sequence")
+                {
+                    if (split_sequence_seen)
+                    {
+                        error_message.assign("duplicate scenario entry: expected_split_at_sequence");
+                        return false;
+                    }
+
+                    if (!parse_uint64(value, scenario.expected_split_at_sequence))
+                    {
+                        error_message.assign("invalid unsigned integer for scenario entry: expected_split_at_sequence");
+                        return false;
+                    }
+
+                    split_sequence_seen = true;
                     continue;
                 }
 

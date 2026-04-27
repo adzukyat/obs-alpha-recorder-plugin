@@ -187,6 +187,18 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
     add_test(NAME alpha_recorder.unit.e2e_scenario COMMAND alpha_recorder_unit_e2e_scenario)
     set_tests_properties(alpha_recorder.unit.e2e_scenario PROPERTIES LABELS "unit")
 
+    add_executable(alpha_recorder_unit_recording_session_pause
+        tests/unit/recording_session_controller_pause_test.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_recording_session_pause)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_recording_session_pause)
+    target_include_directories(alpha_recorder_unit_recording_session_pause PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/obs)
+    set_target_properties(alpha_recorder_unit_recording_session_pause PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.recording_session_pause COMMAND alpha_recorder_unit_recording_session_pause)
+    set_tests_properties(alpha_recorder.unit.recording_session_pause PROPERTIES LABELS "unit")
+
     add_executable(alpha_recorder_unit_settings
         tests/unit/settings_test.cpp
     )

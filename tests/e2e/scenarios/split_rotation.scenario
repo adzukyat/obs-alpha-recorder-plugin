@@ -1,0 +1,9 @@
+# Scenario that forces a split recording rotation midway through.
+name=split_rotation
+expected_pair_count=4
+expected_drop_count=0
+expected_split_at_sequence=2
+output_root=split_rotation
+rgb_artifact=rgb.raw
+alpha_sidecar=alpha.sidecar
+alpha_manifest=alpha.manifest.json

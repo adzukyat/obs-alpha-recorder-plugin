@@ -2,6 +2,7 @@
 #include "alpha_recorder/frame_matcher.hpp"
 #include "alpha_recorder/frame_pair.hpp"
 #include "alpha_recorder/plugin.hpp"
+#include "recording_session_controller_gate.hpp"
 #include "alpha_recorder/sidecar_writer.hpp"
 
 #include <algorithm>
@@ -221,6 +222,14 @@ namespace
                 start_session();
                 break;
 
+            case OBS_FRONTEND_EVENT_RECORDING_PAUSED:
+                set_recording_paused(true);
+                break;
+
+            case OBS_FRONTEND_EVENT_RECORDING_UNPAUSED:
+                set_recording_paused(false);
+                break;
+
             case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
                 stop_session(true);
                 break;
@@ -251,6 +260,23 @@ namespace
         static void on_file_changed(void *data, calldata_t *params)
         {
             static_cast<RecordingSessionController *>(data)->on_file_changed(params);
+        }
+
+        void set_recording_paused(bool paused)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!session_active_)
+            {
+                recording_paused_ = false;
+                return;
+            }
+
+            recording_paused_ = paused;
+            if (paused)
+            {
+                pending_frames_.clear();
+                matcher_.clear();
+            }
         }
 
         bool start_session()
@@ -331,6 +357,7 @@ namespace
 
             session_active_ = true;
             session_aborted_ = false;
+            recording_paused_ = obs_frontend_recording_paused();
             video_info_ = video_info;
             recording_path_ = recording_path;
             next_sequence_ = 0;
@@ -447,10 +474,12 @@ namespace
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!session_active_ && !writer_.is_open() && recording_output_ == nullptr)
                 {
+                    recording_paused_ = false;
                     return;
                 }
 
                 session_active_ = false;
+                recording_paused_ = false;
                 recording_output = recording_output_;
                 recording_output_ = nullptr;
                 disconnect_packet_callback = packet_callback_connected_;
@@ -593,7 +622,7 @@ namespace
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!session_active_ || session_aborted_ || !writer_.is_open())
+                if (!alpha_recorder::obs::recording_input_is_allowed(session_active_, session_aborted_, writer_.is_open(), recording_paused_))
                 {
                     return;
                 }
@@ -670,7 +699,7 @@ namespace
             bool should_log_missing_packet_timing = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!session_active_ || session_aborted_ || !writer_.is_open())
+                if (!alpha_recorder::obs::recording_input_is_allowed(session_active_, session_aborted_, writer_.is_open(), recording_paused_))
                 {
                     return;
                 }
@@ -741,6 +770,7 @@ namespace
         bool file_changed_connected_ = false;
         bool session_active_ = false;
         bool session_aborted_ = false;
+        bool recording_paused_ = false;
         bool missing_packet_timing_logged_ = false;
         std::uint64_t next_sequence_ = 0;
         std::deque<PendingFrame> pending_frames_{};

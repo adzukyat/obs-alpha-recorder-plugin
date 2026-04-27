@@ -358,18 +358,23 @@ int main(int argc, char **argv)
         return 7;
     }
 
-    const std::filesystem::path rgb_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.rgb_artifact);
-    const std::filesystem::path sidecar_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_sidecar);
-    const std::filesystem::path manifest_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_manifest);
-
-    if (!std::filesystem::exists(rgb_path) || !std::filesystem::exists(sidecar_path) || !std::filesystem::exists(manifest_path))
+    const std::size_t target_chunks = (scenario.expected_split_at_sequence > 0) ? 2 : 1;
+    for (std::size_t chunk_index = 0; chunk_index < target_chunks; ++chunk_index)
     {
-        std::cerr << "host did not find the expected artifacts under " << output_root.string() << '\n';
-        obs_shutdown();
+        std::string suffix = (scenario.expected_split_at_sequence > 0) ? "." + std::to_string(chunk_index) : "";
+        const std::filesystem::path rgb_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.rgb_artifact).string() + suffix;
+        const std::filesystem::path sidecar_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_sidecar).string() + suffix;
+        const std::filesystem::path manifest_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_manifest).string() + suffix;
+
+        if (!std::filesystem::exists(rgb_path) || !std::filesystem::exists(sidecar_path) || !std::filesystem::exists(manifest_path))
+        {
+            std::cerr << "host did not find the expected artifacts under " << output_root.string() << '\n';
+            obs_shutdown();
 #ifdef _WIN32
-        DestroyWindow(hidden_window);
+            DestroyWindow(hidden_window);
 #endif
-        return 8;
+            return 8;
+        }
     }
 
     obs_shutdown();

@@ -948,12 +948,12 @@ namespace
         return true;
     }
 
-    std::vector<std::uint8_t> expected_rgb_bytes(const alpha_recorder::e2e::E2EScenario &scenario)
+    std::vector<std::uint8_t> expected_rgb_bytes(std::uint64_t start_index, std::uint64_t count)
     {
         std::vector<std::uint8_t> bytes;
-        for (std::uint64_t index = 0; index < scenario.expected_pair_count; ++index)
+        for (std::uint64_t index = 0; index < count; ++index)
         {
-            const alpha_recorder::FramePair pair = alpha_recorder::e2e::make_test_pair(index);
+            const alpha_recorder::FramePair pair = alpha_recorder::e2e::make_test_pair(start_index + index);
             bytes.insert(bytes.end(), pair.rgb.bytes.begin(), pair.rgb.bytes.end());
         }
 
@@ -987,199 +987,234 @@ int main(int argc, char **argv)
 
     const std::filesystem::path artifact_root = resolve_artifact_root(argc, argv);
     const std::filesystem::path output_root = alpha_recorder::e2e::resolve_output_root(artifact_root, scenario);
-    const std::filesystem::path rgb_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.rgb_artifact);
-    const std::filesystem::path sidecar_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_sidecar);
-    const std::filesystem::path manifest_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_manifest);
 
-    if (!std::filesystem::exists(rgb_path))
+    const std::size_t target_chunks = (scenario.expected_split_at_sequence > 0) ? 2 : 1;
+    for (std::size_t chunk_index = 0; chunk_index < target_chunks; ++chunk_index)
     {
-        std::cerr << "RGB artifact does not exist: " << rgb_path.string() << '\n';
-        return 4;
-    }
-
-    if (!std::filesystem::exists(sidecar_path))
-    {
-        std::cerr << "alpha sidecar does not exist: " << sidecar_path.string() << '\n';
-        return 5;
-    }
-
-    if (!std::filesystem::exists(manifest_path))
-    {
-        std::cerr << "manifest does not exist: " << manifest_path.string() << '\n';
-        return 6;
-    }
-
-    std::vector<std::uint8_t> rgb_bytes;
-    if (!read_file_bytes(rgb_path, rgb_bytes))
-    {
-        std::cerr << "failed to read RGB artifact: " << rgb_path.string() << '\n';
-        return 7;
-    }
-
-    const std::vector<std::uint8_t> expected_rgb = expected_rgb_bytes(scenario);
-    if (rgb_bytes != expected_rgb)
-    {
-        std::cerr << "RGB artifact bytes do not match the expected accepted pairs\n";
-        return 8;
-    }
-
-    std::ifstream sidecar_stream(sidecar_path, std::ios::binary);
-    if (!sidecar_stream)
-    {
-        std::cerr << "failed to open sidecar for verification\n";
-        return 9;
-    }
-
-    if (!read_magic(sidecar_stream, alpha_recorder::alpha_container_magic))
-    {
-        std::cerr << "sidecar magic mismatch\n";
-        return 10;
-    }
-
-    std::uint32_t container_version = 0;
-    std::uint32_t container_header_size = 0;
-    std::uint64_t record_count = 0;
-    std::uint64_t index_offset = 0;
-    std::uint64_t index_entry_count = 0;
-    std::uint32_t record_header_size = 0;
-    std::uint32_t index_entry_size = 0;
-    std::uint32_t container_flags = 0;
-    std::uint32_t container_reserved = 0;
-
-    if (!read_le(sidecar_stream, container_version) || !read_le(sidecar_stream, container_header_size) || !read_le(sidecar_stream, record_count) || !read_le(sidecar_stream, index_offset) || !read_le(sidecar_stream, index_entry_count) || !read_le(sidecar_stream, record_header_size) || !read_le(sidecar_stream, index_entry_size) || !read_le(sidecar_stream, container_flags) || !read_le(sidecar_stream, container_reserved))
-    {
-        std::cerr << "failed to read the sidecar header\n";
-        return 11;
-    }
-
-    if (container_version != alpha_recorder::alpha_container_format_version || container_header_size != alpha_recorder::alpha_container_header_size || record_count != scenario.expected_pair_count || index_offset <= alpha_recorder::alpha_container_header_size || index_entry_count != scenario.expected_pair_count || record_header_size != alpha_recorder::alpha_record_header_size || index_entry_size != alpha_recorder::alpha_index_entry_size || container_flags != 0U || container_reserved != 0U)
-    {
-        std::cerr << "sidecar header fields are incorrect\n";
-        return 12;
-    }
-
-    sidecar_stream.seekg(static_cast<std::streamoff>(index_offset), std::ios::beg);
-    if (!sidecar_stream)
-    {
-        std::cerr << "failed to seek to the index\n";
-        return 13;
-    }
-
-    std::vector<alpha_recorder::AlphaIndexEntry> entries(static_cast<std::size_t>(scenario.expected_pair_count));
-    for (alpha_recorder::AlphaIndexEntry &entry : entries)
-    {
-        if (!read_le(sidecar_stream, entry.sequence) || !read_le(sidecar_stream, entry.pts) || !read_le(sidecar_stream, entry.record_offset) || !read_le(sidecar_stream, entry.record_header_size) || !read_le(sidecar_stream, entry.uncompressed_size) || !read_le(sidecar_stream, entry.compressed_size) || !read_le(sidecar_stream, entry.flags) || !read_le(sidecar_stream, entry.reserved))
+        std::uint64_t target_pair_count = scenario.expected_pair_count;
+        std::uint64_t start_index = 0;
+        if (scenario.expected_split_at_sequence > 0)
         {
-            std::cerr << "failed to read the index entries\n";
-            return 14;
-        }
-    }
-
-    std::uint64_t total_uncompressed_bytes = 0;
-    std::uint64_t total_compressed_bytes = 0;
-
-    for (std::size_t index = 0; index < entries.size(); ++index)
-    {
-        const alpha_recorder::FramePair expected_pair = alpha_recorder::e2e::make_test_pair(static_cast<std::uint64_t>(index));
-        const alpha_recorder::AlphaIndexEntry &entry = entries[index];
-
-        if (entry.sequence != expected_pair.sequence || entry.pts != expected_pair.pts || entry.record_header_size != alpha_recorder::alpha_record_header_size || entry.uncompressed_size != expected_pair.alpha.bytes.size() || entry.flags != alpha_recorder::alpha_record_flag_lz4_block || entry.reserved != 0U)
-        {
-            std::cerr << "index entry fields are incorrect\n";
-            return 15;
+            if (chunk_index == 0)
+            {
+                target_pair_count = scenario.expected_split_at_sequence;
+            }
+            else
+            {
+                target_pair_count = scenario.expected_pair_count - scenario.expected_split_at_sequence;
+                start_index = scenario.expected_split_at_sequence;
+            }
         }
 
-        total_uncompressed_bytes += entry.uncompressed_size;
-        total_compressed_bytes += entry.compressed_size;
+        std::string suffix = (scenario.expected_split_at_sequence > 0) ? "." + std::to_string(chunk_index) : "";
+        const std::filesystem::path rgb_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.rgb_artifact).string() + suffix;
+        const std::filesystem::path sidecar_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_sidecar).string() + suffix;
+        const std::filesystem::path manifest_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_manifest).string() + suffix;
 
-        sidecar_stream.seekg(static_cast<std::streamoff>(entry.record_offset), std::ios::beg);
+        std::filesystem::path expected_mov_path = sidecar_path.string() + ".alpha.mov";
+
+        if (!std::filesystem::exists(rgb_path))
+        {
+            std::cerr << "RGB artifact does not exist: " << rgb_path.string() << '\n';
+            return 4;
+        }
+
+        if (!std::filesystem::exists(sidecar_path))
+        {
+            std::cerr << "alpha sidecar does not exist: " << sidecar_path.string() << '\n';
+            return 5;
+        }
+
+        if (!std::filesystem::exists(manifest_path))
+        {
+            std::cerr << "manifest does not exist: " << manifest_path.string() << '\n';
+            return 6;
+        }
+
+        if (!std::filesystem::exists(expected_mov_path))
+        {
+            std::cerr << "exported .alpha.mov does not exist: " << expected_mov_path.string() << '\n';
+            return 25;
+        }
+
+        if (std::filesystem::file_size(expected_mov_path) == 0)
+        {
+            std::cerr << "exported .alpha.mov has size 0: " << expected_mov_path.string() << '\n';
+            return 26;
+        }
+
+        std::vector<std::uint8_t> rgb_bytes;
+        if (!read_file_bytes(rgb_path, rgb_bytes))
+        {
+            std::cerr << "failed to read RGB artifact: " << rgb_path.string() << '\n';
+            return 7;
+        }
+
+        const std::vector<std::uint8_t> expected_rgb = expected_rgb_bytes(start_index, target_pair_count);
+        if (rgb_bytes != expected_rgb)
+        {
+            std::cerr << "RGB artifact bytes do not match the expected accepted pairs\n";
+            return 8;
+        }
+
+        std::ifstream sidecar_stream(sidecar_path, std::ios::binary);
         if (!sidecar_stream)
         {
-            std::cerr << "failed to seek to record " << index << '\n';
-            return 16;
+            std::cerr << "failed to open sidecar for verification\n";
+            return 9;
         }
 
-        std::array<char, 8> record_magic{};
-        sidecar_stream.read(record_magic.data(), static_cast<std::streamsize>(record_magic.size()));
-        if (!sidecar_stream || record_magic != alpha_recorder::alpha_record_magic)
+        if (!read_magic(sidecar_stream, alpha_recorder::alpha_container_magic))
         {
-            std::cerr << "record magic mismatch\n";
-            return 17;
+            std::cerr << "sidecar magic mismatch\n";
+            return 10;
         }
 
-        std::uint32_t record_version = 0;
-        std::uint32_t record_header_size_value = 0;
-        std::uint64_t record_sequence = 0;
-        std::uint64_t record_pts = 0;
-        std::uint32_t record_uncompressed_size = 0;
-        std::uint32_t record_compressed_size = 0;
-        std::uint32_t record_flags = 0;
-        std::uint32_t record_reserved = 0;
+        std::uint32_t container_version = 0;
+        std::uint32_t container_header_size = 0;
+        std::uint64_t record_count = 0;
+        std::uint64_t index_offset = 0;
+        std::uint64_t index_entry_count = 0;
+        std::uint32_t record_header_size = 0;
+        std::uint32_t index_entry_size = 0;
+        std::uint32_t container_flags = 0;
+        std::uint32_t container_reserved = 0;
 
-        if (!read_le(sidecar_stream, record_version) || !read_le(sidecar_stream, record_header_size_value) || !read_le(sidecar_stream, record_sequence) || !read_le(sidecar_stream, record_pts) || !read_le(sidecar_stream, record_uncompressed_size) || !read_le(sidecar_stream, record_compressed_size) || !read_le(sidecar_stream, record_flags) || !read_le(sidecar_stream, record_reserved))
+        if (!read_le(sidecar_stream, container_version) || !read_le(sidecar_stream, container_header_size) || !read_le(sidecar_stream, record_count) || !read_le(sidecar_stream, index_offset) || !read_le(sidecar_stream, index_entry_count) || !read_le(sidecar_stream, record_header_size) || !read_le(sidecar_stream, index_entry_size) || !read_le(sidecar_stream, container_flags) || !read_le(sidecar_stream, container_reserved))
         {
-            std::cerr << "failed to read a record header\n";
-            return 18;
+            std::cerr << "failed to read the sidecar header\n";
+            return 11;
         }
 
-        if (record_version != alpha_recorder::alpha_container_format_version || record_header_size_value != alpha_recorder::alpha_record_header_size || record_sequence != expected_pair.sequence || record_pts != expected_pair.pts || record_uncompressed_size != expected_pair.alpha.bytes.size() || record_compressed_size != entry.compressed_size || record_flags != alpha_recorder::alpha_record_flag_lz4_block || record_reserved != 0U)
+        if (container_version != alpha_recorder::alpha_container_format_version || container_header_size != alpha_recorder::alpha_container_header_size || record_count != target_pair_count || index_offset <= alpha_recorder::alpha_container_header_size || index_entry_count != target_pair_count || record_header_size != alpha_recorder::alpha_record_header_size || index_entry_size != alpha_recorder::alpha_index_entry_size || container_flags != 0U || container_reserved != 0U)
         {
-            std::cerr << "record header fields are incorrect\n";
-            return 19;
+            std::cerr << "sidecar header fields are incorrect\n";
+            return 12;
         }
 
-        const std::vector<std::uint8_t> compressed_payload = read_payload(sidecar_stream, record_compressed_size);
-        if (compressed_payload.size() != record_compressed_size)
+        sidecar_stream.seekg(static_cast<std::streamoff>(index_offset), std::ios::beg);
+        if (!sidecar_stream)
         {
-            std::cerr << "failed to read the record payload\n";
-            return 20;
+            std::cerr << "failed to seek to the index\n";
+            return 13;
         }
 
-        const std::vector<std::uint8_t> decoded_payload = decode_lz4_literal_block(compressed_payload);
-        if (decoded_payload != expected_pair.alpha.bytes)
+        std::vector<alpha_recorder::AlphaIndexEntry> entries(static_cast<std::size_t>(target_pair_count));
+        for (alpha_recorder::AlphaIndexEntry &entry : entries)
         {
-            std::cerr << "decoded alpha payload does not match the original bytes\n";
-            return 21;
+            if (!read_le(sidecar_stream, entry.sequence) || !read_le(sidecar_stream, entry.pts) || !read_le(sidecar_stream, entry.record_offset) || !read_le(sidecar_stream, entry.record_header_size) || !read_le(sidecar_stream, entry.uncompressed_size) || !read_le(sidecar_stream, entry.compressed_size) || !read_le(sidecar_stream, entry.flags) || !read_le(sidecar_stream, entry.reserved))
+            {
+                std::cerr << "failed to read the index entries\n";
+                return 14;
+            }
         }
-    }
 
-    const std::uint64_t first_sequence = entries.empty() ? 0U : entries.front().sequence;
-    const std::uint64_t last_sequence = entries.empty() ? 0U : entries.back().sequence;
-    const std::uint64_t first_pts = entries.empty() ? 0U : entries.front().pts;
-    const std::uint64_t last_pts = entries.empty() ? 0U : entries.back().pts;
+        std::uint64_t total_uncompressed_bytes = 0;
+        std::uint64_t total_compressed_bytes = 0;
 
-    const std::string manifest_text = read_text_file(manifest_path);
-    if (manifest_text.empty())
-    {
-        std::cerr << "failed to read manifest text\n";
-        return 22;
-    }
+        for (std::size_t index = 0; index < entries.size(); ++index)
+        {
+            const alpha_recorder::FramePair expected_pair = alpha_recorder::e2e::make_test_pair(static_cast<std::uint64_t>(start_index + index));
+            const alpha_recorder::AlphaIndexEntry &entry = entries[index];
 
-    const std::filesystem::path sidecar_relative = output_root / scenario.alpha_sidecar;
-    const std::filesystem::path manifest_relative = output_root / scenario.alpha_manifest;
-    const std::uintmax_t sidecar_size = std::filesystem::file_size(sidecar_path);
+            if (entry.sequence != expected_pair.sequence || entry.pts != expected_pair.pts || entry.record_header_size != alpha_recorder::alpha_record_header_size || entry.uncompressed_size != expected_pair.alpha.bytes.size() || entry.flags != alpha_recorder::alpha_record_flag_lz4_block || entry.reserved != 0U)
+            {
+                std::cerr << "index entry fields are incorrect\n";
+                return 15;
+            }
 
-    ManifestFields manifest_fields;
-    std::string manifest_error;
-    if (!parse_manifest_json(manifest_text, manifest_fields, manifest_error))
-    {
-        std::cerr << "invalid manifest JSON: " << manifest_error << '\n';
-        return 23;
-    }
+            total_uncompressed_bytes += entry.uncompressed_size;
+            total_compressed_bytes += entry.compressed_size;
 
-    const std::string expected_sidecar_path = sidecar_relative.generic_string();
-    const std::string expected_manifest_path = manifest_relative.generic_string();
+            sidecar_stream.seekg(static_cast<std::streamoff>(entry.record_offset), std::ios::beg);
+            if (!sidecar_stream)
+            {
+                std::cerr << "failed to seek to record " << index << '\n';
+                return 16;
+            }
 
-    if (manifest_fields.schema != "alpha_recorder.session_summary.v1" || manifest_fields.container_format_version != alpha_recorder::alpha_container_format_version || manifest_fields.project_name != "alpha_recorder" || manifest_fields.project_version != "0.1.0" || manifest_fields.sidecar_path != expected_sidecar_path || manifest_fields.manifest_path != expected_manifest_path || manifest_fields.pair_count != scenario.expected_pair_count || manifest_fields.record_count != scenario.expected_pair_count || manifest_fields.first_sequence != first_sequence || manifest_fields.last_sequence != last_sequence || manifest_fields.first_pts != first_pts || manifest_fields.last_pts != last_pts || manifest_fields.alpha_uncompressed_bytes != total_uncompressed_bytes || manifest_fields.alpha_compressed_bytes != total_compressed_bytes || manifest_fields.index_offset != index_offset || manifest_fields.index_entry_count != scenario.expected_pair_count || manifest_fields.sidecar_size_bytes != sidecar_size)
-    {
-        std::cerr << "manifest content is missing expected session metadata\n";
-        return 23;
-    }
+            std::array<char, 8> record_magic{};
+            sidecar_stream.read(record_magic.data(), static_cast<std::streamsize>(record_magic.size()));
+            if (!sidecar_stream || record_magic != alpha_recorder::alpha_record_magic)
+            {
+                std::cerr << "record magic mismatch\n";
+                return 17;
+            }
 
-    if (sidecar_size != std::filesystem::file_size(sidecar_path))
-    {
-        std::cerr << "sidecar size check failed\n";
-        return 24;
+            std::uint32_t record_version = 0;
+            std::uint32_t record_header_size_value = 0;
+            std::uint64_t record_sequence = 0;
+            std::uint64_t record_pts = 0;
+            std::uint32_t record_uncompressed_size = 0;
+            std::uint32_t record_compressed_size = 0;
+            std::uint32_t record_flags = 0;
+            std::uint32_t record_reserved = 0;
+
+            if (!read_le(sidecar_stream, record_version) || !read_le(sidecar_stream, record_header_size_value) || !read_le(sidecar_stream, record_sequence) || !read_le(sidecar_stream, record_pts) || !read_le(sidecar_stream, record_uncompressed_size) || !read_le(sidecar_stream, record_compressed_size) || !read_le(sidecar_stream, record_flags) || !read_le(sidecar_stream, record_reserved))
+            {
+                std::cerr << "failed to read a record header\n";
+                return 18;
+            }
+
+            if (record_version != alpha_recorder::alpha_container_format_version || record_header_size_value != alpha_recorder::alpha_record_header_size || record_sequence != expected_pair.sequence || record_pts != expected_pair.pts || record_uncompressed_size != expected_pair.alpha.bytes.size() || record_compressed_size != entry.compressed_size || record_flags != alpha_recorder::alpha_record_flag_lz4_block || record_reserved != 0U)
+            {
+                std::cerr << "record header fields are incorrect\n";
+                return 19;
+            }
+
+            const std::vector<std::uint8_t> compressed_payload = read_payload(sidecar_stream, record_compressed_size);
+            if (compressed_payload.size() != record_compressed_size)
+            {
+                std::cerr << "failed to read the record payload\n";
+                return 20;
+            }
+
+            const std::vector<std::uint8_t> decoded_payload = decode_lz4_literal_block(compressed_payload);
+            if (decoded_payload != expected_pair.alpha.bytes)
+            {
+                std::cerr << "decoded alpha payload does not match the original bytes\n";
+                return 21;
+            }
+        }
+
+        const std::uint64_t first_sequence = entries.empty() ? 0U : entries.front().sequence;
+        const std::uint64_t last_sequence = entries.empty() ? 0U : entries.back().sequence;
+        const std::uint64_t first_pts = entries.empty() ? 0U : entries.front().pts;
+        const std::uint64_t last_pts = entries.empty() ? 0U : entries.back().pts;
+
+        const std::string manifest_text = read_text_file(manifest_path);
+        if (manifest_text.empty())
+        {
+            std::cerr << "failed to read manifest text\n";
+            return 22;
+        }
+
+        const std::filesystem::path sidecar_relative = std::filesystem::path(scenario.alpha_sidecar.string() + suffix);
+        const std::filesystem::path manifest_relative = std::filesystem::path(scenario.alpha_manifest.string() + suffix);
+        const std::uintmax_t sidecar_size = std::filesystem::file_size(sidecar_path);
+
+        ManifestFields manifest_fields;
+        std::string manifest_error;
+        if (!parse_manifest_json(manifest_text, manifest_fields, manifest_error))
+        {
+            std::cerr << "invalid manifest JSON: " << manifest_error << '\n';
+            return 23;
+        }
+
+        const std::string expected_sidecar_path = sidecar_relative.generic_string();
+        const std::string expected_manifest_path = manifest_relative.generic_string();
+
+        if (manifest_fields.schema != "alpha_recorder.session_summary.v1" || manifest_fields.container_format_version != alpha_recorder::alpha_container_format_version || manifest_fields.project_name != "alpha_recorder" || manifest_fields.project_version != "0.1.0" || manifest_fields.sidecar_path != expected_sidecar_path || manifest_fields.manifest_path != expected_manifest_path || manifest_fields.pair_count != target_pair_count || manifest_fields.record_count != target_pair_count || manifest_fields.first_sequence != first_sequence || manifest_fields.last_sequence != last_sequence || manifest_fields.first_pts != first_pts || manifest_fields.last_pts != last_pts || manifest_fields.alpha_uncompressed_bytes != total_uncompressed_bytes || manifest_fields.alpha_compressed_bytes != total_compressed_bytes || manifest_fields.index_offset != index_offset || manifest_fields.index_entry_count != target_pair_count || manifest_fields.sidecar_size_bytes != sidecar_size)
+        {
+            std::cerr << "manifest content is missing expected session metadata\n";
+            return 23;
+        }
+
+        if (sidecar_size != std::filesystem::file_size(sidecar_path))
+        {
+            std::cerr << "sidecar size check failed\n";
+            return 24;
+        }
     }
 
     std::cout << "e2e test encoder scenario passed: " << scenario.name << '\n';

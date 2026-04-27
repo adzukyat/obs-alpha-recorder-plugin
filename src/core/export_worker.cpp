@@ -22,6 +22,7 @@ extern "C"
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
+#include <libavutil/opt.h>
 #include <libswscale/swscale.h>
 }
 
@@ -169,6 +170,45 @@ namespace alpha_recorder::obs
             return true;
         }
 
+        const AVCodec *select_output_encoder(FinalizationFormat format)
+        {
+            switch (format)
+            {
+            case FinalizationFormat::ProRes4444:
+                if (const AVCodec *const prores_encoder = avcodec_find_encoder_by_name("prores_ks"))
+                {
+                    return prores_encoder;
+                }
+
+                return avcodec_find_encoder(AV_CODEC_ID_PRORES);
+
+            case FinalizationFormat::LosslessHevc:
+                if (const AVCodec *const hevc_encoder = avcodec_find_encoder_by_name("hevc_nvenc"))
+                {
+                    return hevc_encoder;
+                }
+
+                return avcodec_find_encoder_by_name("nvenc_hevc");
+            }
+
+            return nullptr;
+        }
+
+        bool configure_hevc_encoder(AVCodecContext &encoder, std::string *error_message)
+        {
+            if (av_opt_set_int(encoder.priv_data, "profile", FF_PROFILE_HEVC_REXT, 0) < 0 ||
+                av_opt_set_int(encoder.priv_data, "preset", 10, 0) < 0 ||
+                av_opt_set_int(encoder.priv_data, "rc", 0, 0) < 0 || av_opt_set_int(encoder.priv_data, "qp", 0, 0) < 0 ||
+                av_opt_set_int(encoder.priv_data, "rgb_mode", 2, 0) < 0 || av_opt_set(encoder.priv_data, "alpha_mode", "straight", 0) < 0)
+            {
+                return set_error(error_message, "Alpha Recorder could not configure the HEVC encoder.");
+            }
+
+            encoder.pix_fmt = AV_PIX_FMT_BGRA;
+            encoder.profile = FF_PROFILE_HEVC_REXT;
+            return true;
+        }
+
         bool path_is_regular_file(const std::filesystem::path &path)
         {
             std::error_code error;
@@ -259,7 +299,7 @@ namespace alpha_recorder::obs
             return true;
         }
 
-        bool open_output(OutputContext &output, const InputContext &input, const std::filesystem::path &output_path,
+        bool open_output(OutputContext &output, const InputContext &input, const std::filesystem::path &output_path, FinalizationFormat format,
                          std::string *error_message)
         {
             const std::string output_path_text = path_to_utf8(output_path);
@@ -289,25 +329,27 @@ namespace alpha_recorder::obs
 
             av_dict_copy(&output.format->metadata, input.format->metadata, 0);
 
-            const AVCodec *const encoder = avcodec_find_encoder_by_name("prores_ks");
-            const AVCodec *const fallback_encoder = (encoder != nullptr) ? encoder : avcodec_find_encoder(AV_CODEC_ID_PRORES);
-            if (fallback_encoder == nullptr)
+            const AVCodec *const encoder = select_output_encoder(format);
+            if (encoder == nullptr)
             {
+                if (format == FinalizationFormat::LosslessHevc)
+                {
+                    return set_error(error_message, "Alpha Recorder could not find an HEVC encoder in the bundled FFmpeg stack.");
+                }
+
                 return set_error(error_message, "Alpha Recorder could not find a ProRes encoder in the bundled FFmpeg stack.");
             }
 
-            output.encoder = avcodec_alloc_context3(fallback_encoder);
+            output.encoder = avcodec_alloc_context3(encoder);
             if (output.encoder == nullptr)
             {
-                return set_error(error_message, "Alpha Recorder could not allocate a ProRes encoder context.");
+                return set_error(error_message, format == FinalizationFormat::LosslessHevc ? "Alpha Recorder could not allocate an HEVC encoder context." : "Alpha Recorder could not allocate a ProRes encoder context.");
             }
 
             output.encoder->codec_type = AVMEDIA_TYPE_VIDEO;
-            output.encoder->codec_id = fallback_encoder->id;
+            output.encoder->codec_id = encoder->id;
             output.encoder->width = input_video_stream->codecpar->width;
             output.encoder->height = input_video_stream->codecpar->height;
-            output.encoder->pix_fmt = AV_PIX_FMT_YUVA444P10LE;
-            output.encoder->profile = FF_PROFILE_PRORES_4444;
             output.encoder->time_base = time_base;
             output.encoder->framerate = input_video_stream->avg_frame_rate;
             output.encoder->sample_aspect_ratio = input_video_stream->sample_aspect_ratio;
@@ -319,18 +361,32 @@ namespace alpha_recorder::obs
             output.encoder->gop_size = 1;
             output.encoder->max_b_frames = 0;
 
+            if (format == FinalizationFormat::LosslessHevc)
+            {
+                if (!configure_hevc_encoder(*output.encoder, error_message))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                output.encoder->pix_fmt = AV_PIX_FMT_YUVA444P10LE;
+                output.encoder->profile = FF_PROFILE_PRORES_4444;
+            }
+
             if ((output.format->oformat->flags & AVFMT_GLOBALHEADER) != 0)
             {
                 output.encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
             }
 
-            ret = avcodec_open2(output.encoder, fallback_encoder, nullptr);
+            ret = avcodec_open2(output.encoder, encoder, nullptr);
             if (ret < 0)
             {
-                return set_error(error_message, std::string{"Alpha Recorder could not open the ProRes encoder: "} + av_error_message(ret));
+                return set_error(error_message,
+                                 format == FinalizationFormat::LosslessHevc ? std::string{"Alpha Recorder could not open the HEVC encoder: "} + av_error_message(ret) : std::string{"Alpha Recorder could not open the ProRes encoder: "} + av_error_message(ret));
             }
 
-            output.video_stream = avformat_new_stream(output.format, fallback_encoder);
+            output.video_stream = avformat_new_stream(output.format, encoder);
             if (output.video_stream == nullptr)
             {
                 return set_error(error_message, "Alpha Recorder could not allocate the export video stream.");
@@ -438,6 +494,8 @@ namespace alpha_recorder::obs
                 return false;
             }
 
+            const bool use_bgra_output = output.encoder->pix_fmt == AV_PIX_FMT_BGRA;
+
             if (source_to_bgra.context == nullptr)
             {
                 source_to_bgra.context = sws_getContext(decoded_frame->width, decoded_frame->height,
@@ -449,7 +507,7 @@ namespace alpha_recorder::obs
                 }
             }
 
-            if (bgra_to_yuva.context == nullptr)
+            if (!use_bgra_output && bgra_to_yuva.context == nullptr)
             {
                 bgra_to_yuva.context = sws_getContext(decoded_frame->width, decoded_frame->height, AV_PIX_FMT_BGRA, decoded_frame->width,
                                                       decoded_frame->height, AV_PIX_FMT_YUVA444P10LE, SWS_BICUBIC, nullptr, nullptr, nullptr);
@@ -459,7 +517,7 @@ namespace alpha_recorder::obs
                 }
             }
 
-            if (av_frame_make_writable(bgra_frame.frame) < 0 || av_frame_make_writable(yuva_frame.frame) < 0)
+            if (av_frame_make_writable(bgra_frame.frame) < 0 || (!use_bgra_output && av_frame_make_writable(yuva_frame.frame) < 0))
             {
                 return set_error(error_message, "Alpha Recorder could not obtain writable export frames.");
             }
@@ -484,22 +542,38 @@ namespace alpha_recorder::obs
                 }
             }
 
-            const int export_height = sws_scale(bgra_to_yuva.context, bgra_frame.frame->data, bgra_frame.frame->linesize, 0,
-                                                decoded_frame->height, yuva_frame.frame->data, yuva_frame.frame->linesize);
-            if (export_height <= 0)
+            AVFrame *export_frame = nullptr;
+            if (use_bgra_output)
             {
-                return set_error(error_message, "Alpha Recorder could not convert the alpha-masked frame for export.");
+                bgra_frame.frame->pts = output_pts;
+                if (av_frame_copy_props(bgra_frame.frame, decoded_frame) < 0)
+                {
+                    return set_error(error_message, "Alpha Recorder could not preserve the decoded frame metadata for export.");
+                }
+
+                bgra_frame.frame->pts = output_pts;
+                export_frame = bgra_frame.frame;
+            }
+            else
+            {
+                const int export_height = sws_scale(bgra_to_yuva.context, bgra_frame.frame->data, bgra_frame.frame->linesize, 0,
+                                                    decoded_frame->height, yuva_frame.frame->data, yuva_frame.frame->linesize);
+                if (export_height <= 0)
+                {
+                    return set_error(error_message, "Alpha Recorder could not convert the alpha-masked frame for export.");
+                }
+
+                yuva_frame.frame->pts = output_pts;
+                if (av_frame_copy_props(yuva_frame.frame, decoded_frame) < 0)
+                {
+                    return set_error(error_message, "Alpha Recorder could not preserve the decoded frame metadata for export.");
+                }
+
+                yuva_frame.frame->pts = output_pts;
+                export_frame = yuva_frame.frame;
             }
 
-            yuva_frame.frame->pts = output_pts;
-            if (av_frame_copy_props(yuva_frame.frame, decoded_frame) < 0)
-            {
-                return set_error(error_message, "Alpha Recorder could not preserve the decoded frame metadata for export.");
-            }
-
-            yuva_frame.frame->pts = output_pts;
-
-            int ret = avcodec_send_frame(output.encoder, yuva_frame.frame);
+            int ret = avcodec_send_frame(output.encoder, export_frame);
             if (ret < 0)
             {
                 return set_error(error_message, std::string{"Alpha Recorder failed to encode a video frame: "} + av_error_message(ret));
@@ -657,7 +731,7 @@ namespace alpha_recorder::obs
             }
 
             OutputContext output;
-            if (!open_output(output, input, output_path, error_message))
+            if (!open_output(output, input, output_path, request.finalization_format, error_message))
             {
                 return false;
             }

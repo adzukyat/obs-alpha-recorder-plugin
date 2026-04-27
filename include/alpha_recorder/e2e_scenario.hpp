@@ -14,6 +14,7 @@ namespace alpha_recorder::e2e
         std::string name{};
         std::uint64_t expected_pair_count = 0;
         std::uint64_t expected_drop_count = 0;
+        std::uint64_t expected_split_at_sequence = 0;
         std::filesystem::path output_root{};
         std::filesystem::path rgb_artifact{};
         std::filesystem::path alpha_sidecar{};

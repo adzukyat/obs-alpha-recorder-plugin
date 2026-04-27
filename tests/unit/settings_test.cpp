@@ -32,13 +32,13 @@ int main()
     }
 
     if (alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::ProRes4444) != alpha_recorder::obs::FinalizationFormat::ProRes4444 ||
-        alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::LosslessHevc) != alpha_recorder::obs::FinalizationFormat::ProRes4444)
+        alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::LosslessHevc) != alpha_recorder::obs::FinalizationFormat::LosslessHevc)
     {
         std::cerr << "finalization format normalization is incorrect\n";
         return 4;
     }
 
-    if (!alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::ProRes4444) || alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::LosslessHevc))
+    if (!alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::ProRes4444) || !alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::LosslessHevc))
     {
         std::cerr << "finalization support classification is incorrect\n";
         return 5;
@@ -106,9 +106,9 @@ int main()
 
     const alpha_recorder::obs::Settings loaded_settings = alpha_recorder::obs::load_settings(config);
     config_close(config);
-    if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::ProRes4444)
+    if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::LosslessHevc)
     {
-        std::cerr << "unsupported config values were not normalized to the supported default\n";
+        std::cerr << "lossless hevc config values were not preserved by the loader\n";
         return 15;
     }
 
@@ -137,9 +137,9 @@ int main()
 
     const alpha_recorder::obs::Settings rewritten_settings = alpha_recorder::obs::load_settings(file_config);
     const char *rewritten_format = config_get_string(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data());
-    if (!rewritten_settings.enabled || rewritten_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::ProRes4444 || rewritten_format == nullptr || std::string{rewritten_format} != "prores_4444")
+    if (!rewritten_settings.enabled || rewritten_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::LosslessHevc || rewritten_format == nullptr || std::string{rewritten_format} != "lossless_hevc")
     {
-        std::cerr << "unsupported config values were not rewritten to the supported default\n";
+        std::cerr << "lossless hevc config values were not preserved in the persisted config\n";
         config_close(file_config);
         return 42;
     }
@@ -154,23 +154,23 @@ int main()
     }
 
     const std::string config_text((std::istreambuf_iterator<char>(config_stream)), std::istreambuf_iterator<char>());
-    if (config_text.find("finalization_format=prores_4444") == std::string::npos)
+    if (config_text.find("finalization_format=lossless_hevc") == std::string::npos)
     {
-        std::cerr << "the normalized finalization format was not written back to disk\n";
+        std::cerr << "the hevc finalization format was not written back to disk\n";
         return 44;
     }
 
     std::string export_error;
-    const alpha_recorder::obs::FinalizationExportRequest unsupported_request{
+    const alpha_recorder::obs::FinalizationExportRequest hevc_request{
         recording_path,
         alpha_sidecar,
         alpha_recorder::obs::recording_manifest_path(recording_path),
         alpha_recorder::obs::FinalizationFormat::LosslessHevc,
     };
-    if (alpha_recorder::obs::export_completed_recording(unsupported_request, &export_error) ||
-        export_error.find("Lossless HEVC export is not supported") == std::string::npos)
+    if (alpha_recorder::obs::export_completed_recording(hevc_request, &export_error) ||
+        export_error.find("could not find the recorded video file") == std::string::npos)
     {
-        std::cerr << "unsupported export format was not rejected clearly\n";
+        std::cerr << "hevc export did not reach the real recording-file validation\n";
         return 16;
     }
 

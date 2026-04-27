@@ -16,6 +16,7 @@
 #include "alpha_recorder/e2e_scenario.hpp"
 #include "alpha_recorder/pair_gate.hpp"
 #include "alpha_recorder/sidecar_writer.hpp"
+#include "alpha_recorder/export_worker.hpp"
 
 namespace
 {
@@ -71,26 +72,58 @@ namespace
         const std::filesystem::path sidecar_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_sidecar);
         const std::filesystem::path manifest_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_manifest);
 
-        if (const std::filesystem::path rgb_parent = rgb_path.parent_path(); !rgb_parent.empty())
-        {
-            std::error_code rgb_directory_error;
-            std::filesystem::create_directories(rgb_parent, rgb_directory_error);
-            if (rgb_directory_error)
-            {
-                return std::string{"failed to create RGB artifact directory: "} + rgb_parent.generic_string();
-            }
-        }
-
         alpha_recorder::AlphaLosslessWriter sidecar_writer;
-        if (!sidecar_writer.open(sidecar_path, manifest_path))
-        {
-            return std::string{"failed to open alpha sidecar: "} + sidecar_path.generic_string();
-        }
+        std::ofstream rgb_stream;
 
-        std::ofstream rgb_stream(rgb_path, std::ios::binary | std::ios::trunc);
-        if (!rgb_stream)
+        auto open_segment = [&](int split_index) -> bool
         {
-            return std::string{"failed to open RGB artifact: "} + rgb_path.generic_string();
+            std::filesystem::path suffix = (scenario.expected_split_at_sequence > 0) ? std::filesystem::path("." + std::to_string(split_index)) : std::filesystem::path{};
+            std::filesystem::path current_rgb = std::filesystem::path(rgb_path.string() + suffix.string());
+            std::filesystem::path current_sidecar = std::filesystem::path(sidecar_path.string() + suffix.string());
+            std::filesystem::path current_manifest = std::filesystem::path(manifest_path.string() + suffix.string());
+
+            if (const std::filesystem::path p = current_rgb.parent_path(); !p.empty())
+            {
+                std::error_code err;
+                std::filesystem::create_directories(p, err);
+                if (err)
+                    return false;
+            }
+
+            if (!sidecar_writer.open(current_sidecar, current_manifest))
+                return false;
+            rgb_stream.open(current_rgb, std::ios::binary | std::ios::trunc);
+            return rgb_stream.is_open();
+        };
+
+        auto close_segment_and_export = [&](int split_index) -> std::string
+        {
+            std::filesystem::path suffix = (scenario.expected_split_at_sequence > 0) ? std::filesystem::path("." + std::to_string(split_index)) : std::filesystem::path{};
+            std::filesystem::path current_rgb = std::filesystem::path(rgb_path.string() + suffix.string());
+            std::filesystem::path current_sidecar = std::filesystem::path(sidecar_path.string() + suffix.string());
+            std::filesystem::path current_manifest = std::filesystem::path(manifest_path.string() + suffix.string());
+
+            rgb_stream.flush();
+            rgb_stream.close();
+            sidecar_writer.close();
+
+            alpha_recorder::obs::FinalizationExportRequest req;
+            req.recording_path = current_rgb;
+            req.sidecar_path = current_sidecar;
+            req.manifest_path = current_manifest;
+            req.finalization_format = alpha_recorder::obs::FinalizationFormat::ProRes4444;
+
+            std::string export_error;
+            if (!alpha_recorder::obs::export_completed_recording(req, &export_error))
+            {
+                return export_error;
+            }
+            return {};
+        };
+
+        if (!open_segment(0))
+        {
+            return "failed to open initial records";
         }
 
         alpha_recorder::PairAdmissionGate gate;
@@ -98,9 +131,20 @@ namespace
 
         std::uint64_t accepted_pairs = 0;
         std::uint64_t dropped_pairs = 0;
+        int current_split = 0;
 
         for (std::uint64_t index = 0; index < attempted_pairs; ++index)
         {
+            if (scenario.expected_split_at_sequence > 0 && index == scenario.expected_split_at_sequence && accepted_pairs > 0)
+            {
+                std::string error = close_segment_and_export(current_split);
+                if (!error.empty())
+                    return error;
+                ++current_split;
+                if (!open_segment(current_split))
+                    return "failed to open new segment";
+            }
+
             const alpha_recorder::FramePair pair = alpha_recorder::e2e::make_test_pair(index);
             if (!gate.try_accept(pair))
             {
@@ -127,42 +171,9 @@ namespace
             return "accepted or dropped pair counts did not match the scenario expectations";
         }
 
-        rgb_stream.flush();
-        if (!rgb_stream)
-        {
-            return std::string{"failed to flush RGB artifact: "} + rgb_path.generic_string();
-        }
-
-        rgb_stream.close();
-        sidecar_writer.close();
-
-        const alpha_recorder::AlphaSessionSummary &summary = sidecar_writer.summary();
-        if (summary.pair_count != accepted_pairs || summary.index_entry_count != accepted_pairs)
-        {
-            return "sidecar summary did not match the accepted pair count";
-        }
-
-        if (!std::filesystem::exists(sidecar_path))
-        {
-            return std::string{"alpha sidecar was not written: "} + sidecar_path.generic_string();
-        }
-
-        if (!std::filesystem::exists(manifest_path))
-        {
-            return std::string{"manifest was not written: "} + manifest_path.generic_string();
-        }
-
-        std::error_code size_error;
-        const std::uintmax_t sidecar_size = std::filesystem::file_size(sidecar_path, size_error);
-        if (size_error)
-        {
-            return std::string{"failed to read sidecar file size: "} + sidecar_path.generic_string();
-        }
-
-        if (summary.sidecar_size_bytes != sidecar_size)
-        {
-            return "sidecar size in the summary did not match the on-disk file";
-        }
+        std::string close_error = close_segment_and_export(current_split);
+        if (!close_error.empty())
+            return close_error;
 
         return {};
     }

@@ -95,10 +95,8 @@ namespace alpha_recorder::obs
         switch (format)
         {
         case FinalizationFormat::ProRes4444:
-            return {};
-
         case FinalizationFormat::LosslessHevc:
-            return "Lossless HEVC export is not supported by the bundled FFmpeg stack yet.";
+            return {};
         }
 
         return "unsupported finalization format";
