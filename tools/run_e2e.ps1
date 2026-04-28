@@ -1,5 +1,5 @@
 param(
-    [string]$BuildDir = (Join-Path $PSScriptRoot "..\out\build\windows-x64-msvc"),
+    [string]$BuildDir = $(if ($IsMacOS) { (Join-Path $PSScriptRoot "..\out\build\macos-default") } else { (Join-Path $PSScriptRoot "..\out\build\windows-x64-msvc") }),
     [string]$StageDir = (Join-Path $PSScriptRoot "..\out\stage\obs"),
     [string]$ObsRoot = $env:OBS_ROOT,
     [string]$Configuration = 'Debug',
@@ -93,17 +93,28 @@ if (-not $SkipStage) {
         -Configuration $Configuration
 }
 
-$stagePluginPath = Join-Path (Join-Path $StageDir 'obs-plugins\64bit') 'alpha_recorder_e2e.dll'
+$ext = if ($IsMacOS) { '.dylib' } else { '.dll' }
+$stagePluginPath = Join-Path (if ($IsMacOS) { Join-Path $StageDir 'obs-plugins' } else { Join-Path $StageDir 'obs-plugins\64bit' }) "alpha_recorder_e2e$ext"
+
 if (-not (Test-Path -LiteralPath $stagePluginPath)) {
-    throw "Expected staged e2e plugin DLL is missing: $stagePluginPath"
+    # Check for .plugin on mac
+    if ($IsMacOS) {
+        $stagePluginPath = Join-Path (Join-Path $StageDir 'obs-plugins') 'alpha_recorder_e2e.plugin'
+    }
+    if (-not (Test-Path -LiteralPath $stagePluginPath)) {
+        throw "Expected staged e2e plugin is missing: $stagePluginPath"
+    }
 }
 
-$stageBinPath = Join-Path $StageDir 'bin\64bit'
+$stageBinPath = if ($IsMacOS) { Join-Path $StageDir 'bin' } else { Join-Path $StageDir 'bin\64bit' }
 if (-not (Test-Path -LiteralPath $stageBinPath)) {
     throw "Expected staged OBS runtime bin directory is missing: $stageBinPath"
 }
 
 $env:PATH = "$stageBinPath;$env:PATH"
+if ($IsMacOS) {
+    $env:DYLD_LIBRARY_PATH = "$stageBinPath" + (if ($env:DYLD_LIBRARY_PATH) { ":$env:DYLD_LIBRARY_PATH" } else { "" })
+}
 
 $env:ALPHA_RECORDER_STAGE_DIR = $StageDir
 $env:ALPHA_RECORDER_SCENARIO_DIR = $scenarioDir

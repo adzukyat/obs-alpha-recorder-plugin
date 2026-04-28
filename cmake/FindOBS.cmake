@@ -91,14 +91,21 @@ if(OBS_INCLUDE_DIR AND OBS_LIBOBS_LIBRARY)
         list(APPEND _alpha_recorder_obs_include_dirs "${OBS_CONFIG_INCLUDE_DIR}")
     endif()
 
-    set_target_properties(OBS::libobs PROPERTIES
-        IMPORTED_IMPLIB "${OBS_LIBOBS_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${_alpha_recorder_obs_include_dirs}"
-    )
-
-    if(OBS_LIBOBS_DLL)
+    if(WIN32)
         set_target_properties(OBS::libobs PROPERTIES
-            IMPORTED_LOCATION "${OBS_LIBOBS_DLL}"
+            IMPORTED_IMPLIB "${OBS_LIBOBS_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${_alpha_recorder_obs_include_dirs}"
+        )
+
+        if(OBS_LIBOBS_DLL)
+            set_target_properties(OBS::libobs PROPERTIES
+                IMPORTED_LOCATION "${OBS_LIBOBS_DLL}"
+            )
+        endif()
+    else()
+        set_target_properties(OBS::libobs PROPERTIES
+            IMPORTED_LOCATION "${OBS_LIBOBS_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${_alpha_recorder_obs_include_dirs}"
         )
     endif()
 endif()
@@ -107,21 +114,24 @@ if(OBS_FRONTEND_API_INCLUDE_DIR AND OBS_FRONTEND_API_LIBRARY)
     if(NOT TARGET OBS::frontend-api)
         add_library(OBS::frontend-api SHARED IMPORTED GLOBAL)
     endif()
+    
+    set(_alpha_recorder_obs_frontend_include_dirs "${OBS_FRONTEND_API_INCLUDE_DIR}")
 
-    set(_alpha_recorder_obs_frontend_include_dirs
-        "${OBS_FRONTEND_API_INCLUDE_DIR}"
-        "${OBS_INCLUDE_DIR}"
-        "${OBS_CONFIG_INCLUDE_DIR}"
-    )
-
-    set_target_properties(OBS::frontend-api PROPERTIES
-        IMPORTED_IMPLIB "${OBS_FRONTEND_API_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${_alpha_recorder_obs_frontend_include_dirs}"
-    )
-
-    if(OBS_FRONTEND_API_DLL)
+    if(WIN32)
         set_target_properties(OBS::frontend-api PROPERTIES
-            IMPORTED_LOCATION "${OBS_FRONTEND_API_DLL}"
+            IMPORTED_IMPLIB "${OBS_FRONTEND_API_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${_alpha_recorder_obs_frontend_include_dirs}"
+        )
+
+        if(OBS_FRONTEND_API_DLL)
+            set_target_properties(OBS::frontend-api PROPERTIES
+                IMPORTED_LOCATION "${OBS_FRONTEND_API_DLL}"
+            )
+        endif()
+    else()
+        set_target_properties(OBS::frontend-api PROPERTIES
+            IMPORTED_LOCATION "${OBS_FRONTEND_API_LIBRARY}"
+            INTERFACE_INCLUDE_DIRECTORIES "${_alpha_recorder_obs_frontend_include_dirs}"
         )
     endif()
 endif()

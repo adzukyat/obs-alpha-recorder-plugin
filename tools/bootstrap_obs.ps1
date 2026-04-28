@@ -6,8 +6,8 @@ param(
     [string]$BuildDir = (Join-Path $PSScriptRoot "..\deps\obs\obs-build"),
     [string]$InstallDir = $null,
     [string]$SourceUrl = 'https://github.com/obsproject/obs-studio.git',
-    [string]$Generator = 'Visual Studio 17 2022',
-    [string]$Architecture = 'x64',
+    [string]$Generator = $(if ($IsMacOS) { 'Ninja' } else { 'Visual Studio 17 2022' }),
+    [string]$Architecture = $(if ($IsMacOS) { '' } else { 'x64' }),
     [string]$Configuration = 'RelWithDebInfo',
     [switch]$CloneSource,
     [switch]$BuildFromSource
@@ -72,6 +72,18 @@ function Test-ObsRuntimeLayout {
         [string]$Path
     )
 
+    if ($IsMacOS) {
+        $runtimeCandidates = @(
+            (Join-Path $Path 'bin/obs.dylib'),
+            (Join-Path $Path 'bin/libobs.dylib')
+        )
+
+        return (Test-Path -LiteralPath (Join-Path $Path 'bin')) -and
+        (Test-Path -LiteralPath (Join-Path $Path 'data')) -and
+        (Test-Path -LiteralPath (Join-Path $Path 'obs-plugins')) -and
+        (Test-AnyPathExists -Candidates $runtimeCandidates)
+    }
+
     $runtimeCandidates = @(
         (Join-Path $Path 'bin\64bit\obs.dll'),
         (Join-Path $Path 'bin\64bit\libobs.dll'),
@@ -95,6 +107,17 @@ function Test-ObsDeveloperLayout {
         [string]$Configuration
     )
 
+    $libraryCandidates = if ($IsMacOS) {
+        @(
+            (Join-Path $BuildDir 'libobs/libobs.dylib'),
+            (Join-Path (Join-Path $BuildDir 'libobs') $Configuration | Join-Path -ChildPath 'libobs.dylib')
+        )
+    } else {
+        @(
+            (Join-Path (Join-Path (Join-Path $BuildDir 'libobs') $Configuration) 'obs.lib')
+        )
+    }
+
     $headerCandidates = @(
         (Join-Path $SourceDir 'libobs\obs-module.h'),
         (Join-Path $SourceDir 'libobs\obs.h'),
@@ -103,10 +126,6 @@ function Test-ObsDeveloperLayout {
 
     $configCandidates = @(
         (Join-Path $BuildDir 'config\obsconfig.h')
-    )
-
-    $libraryCandidates = @(
-        (Join-Path (Join-Path (Join-Path $BuildDir 'libobs') $Configuration) 'obs.lib')
     )
 
     return (Test-AnyPathExists -Candidates $headerCandidates) -and
@@ -250,9 +269,13 @@ function Invoke-ObsBuildAndInstall {
         '-S', $SourceDir,
         '-B', $BuildDir,
         '-G', $Generator,
-        '-A', $Architecture,
         "-DCMAKE_INSTALL_PREFIX=$InstallDir"
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($Architecture)) {
+        $configureArguments += '-A'
+        $configureArguments += $Architecture
+    }
 
     Invoke-ExternalCommand -FilePath $cmakePath -Arguments $configureArguments -FailureMessage "Failed to configure OBS from source at $SourceDir"
     Invoke-ExternalCommand -FilePath $cmakePath -Arguments @('--build', $BuildDir, '--config', $Configuration, '--target', 'install') -FailureMessage "Failed to build and install OBS from $BuildDir"

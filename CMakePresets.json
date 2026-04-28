@@ -22,6 +22,42 @@
         "ALPHA_RECORDER_BUILD_E2E_TESTS": "ON",
         "OBS_ROOT": "$env{OBS_ROOT}"
       }
+    },
+    {
+      "name": "macos-x64",
+      "displayName": "macOS x64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": {
+        "value": "x86_64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "x86_64",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+        "ALPHA_RECORDER_BUILD_OBS_PLUGIN": "ON",
+        "ALPHA_RECORDER_BUILD_UNIT_TESTS": "ON",
+        "ALPHA_RECORDER_BUILD_E2E_TESTS": "ON",
+        "OBS_ROOT": "$env{OBS_ROOT}"
+      }
+    },
+    {
+      "name": "macos-arm64",
+      "displayName": "macOS arm64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": {
+        "value": "arm64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+        "ALPHA_RECORDER_BUILD_OBS_PLUGIN": "ON",
+        "ALPHA_RECORDER_BUILD_UNIT_TESTS": "ON",
+        "ALPHA_RECORDER_BUILD_E2E_TESTS": "ON",
+        "OBS_ROOT": "$env{OBS_ROOT}"
+      }
     }
   ],
   "buildPresets": [
@@ -34,12 +70,48 @@
       "name": "windows-x64-msvc-relwithdebinfo",
       "configurePreset": "windows-x64-msvc",
       "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "macos-x64-debug",
+      "configurePreset": "macos-x64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "macos-x64-relwithdebinfo",
+      "configurePreset": "macos-x64",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "macos-arm64-debug",
+      "configurePreset": "macos-arm64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "macos-arm64-relwithdebinfo",
+      "configurePreset": "macos-arm64",
+      "configuration": "RelWithDebInfo"
     }
   ],
   "testPresets": [
     {
       "name": "windows-x64-msvc-debug",
       "configurePreset": "windows-x64-msvc",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-x64-debug",
+      "configurePreset": "macos-x64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-arm64-debug",
+      "configurePreset": "macos-arm64",
       "configuration": "Debug",
       "output": {
         "outputOnFailure": true

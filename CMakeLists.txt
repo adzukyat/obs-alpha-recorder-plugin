@@ -70,13 +70,27 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
         FOLDER "alpha_recorder/obs"
     )
 
-    add_custom_command(TARGET alpha_recorder_plugin POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<TARGET_FILE:alpha_recorder_plugin>"
-                "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_plugin>"
-        VERBATIM
-    )
+    if(APPLE)
+        set_target_properties(alpha_recorder_plugin PROPERTIES
+            BUNDLE TRUE
+            BUNDLE_EXTENSION plugin
+        )
+        add_custom_command(TARGET alpha_recorder_plugin POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "$<TARGET_BUNDLE_DIR:alpha_recorder_plugin>"
+                    "${OBS_ROOT}/obs-plugins/alpha_recorder.plugin"
+            VERBATIM
+        )
+    else()
+        add_custom_command(TARGET alpha_recorder_plugin POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:alpha_recorder_plugin>"
+                    "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_plugin>"
+            VERBATIM
+        )
+    endif()
 
     if(TARGET OBS::frontend-api)
         if(NOT Qt6_DIR)
@@ -104,13 +118,27 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
             FOLDER "alpha_recorder/obs"
         )
 
-        add_custom_command(TARGET alpha_recorder_frontend POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "$<TARGET_FILE:alpha_recorder_frontend>"
-                    "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_frontend>"
-            VERBATIM
-        )
+        if(APPLE)
+            set_target_properties(alpha_recorder_frontend PROPERTIES
+                BUNDLE TRUE
+                BUNDLE_EXTENSION plugin
+            )
+            add_custom_command(TARGET alpha_recorder_frontend POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/"
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "$<TARGET_BUNDLE_DIR:alpha_recorder_frontend>"
+                        "${OBS_ROOT}/obs-plugins/alpha_recorder_frontend.plugin"
+                VERBATIM
+            )
+        else()
+            add_custom_command(TARGET alpha_recorder_frontend POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "$<TARGET_FILE:alpha_recorder_frontend>"
+                        "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_frontend>"
+                VERBATIM
+            )
+        endif()
     endif()
 endif()
 
@@ -129,13 +157,27 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
         FOLDER "alpha_recorder/tests/e2e"
     )
 
-    add_custom_command(TARGET alpha_recorder_e2e_output POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "$<TARGET_FILE:alpha_recorder_e2e_output>"
-                "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_e2e_output>"
-        VERBATIM
-    )
+    if(APPLE)
+        set_target_properties(alpha_recorder_e2e_output PROPERTIES
+            BUNDLE TRUE
+            BUNDLE_EXTENSION plugin
+        )
+        add_custom_command(TARGET alpha_recorder_e2e_output POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "$<TARGET_BUNDLE_DIR:alpha_recorder_e2e_output>"
+                    "${OBS_ROOT}/obs-plugins/alpha_recorder_e2e.plugin"
+            VERBATIM
+        )
+    else()
+        add_custom_command(TARGET alpha_recorder_e2e_output POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "$<TARGET_FILE:alpha_recorder_e2e_output>"
+                    "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_e2e_output>"
+            VERBATIM
+        )
+    endif()
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
@@ -275,6 +317,7 @@ if(TARGET alpha_recorder_plugin)
     install(TARGETS alpha_recorder_plugin
         RUNTIME DESTINATION obs-plugins/64bit
         LIBRARY DESTINATION obs-plugins/64bit
+        BUNDLE DESTINATION obs-plugins
     )
 endif()
 
@@ -282,6 +325,7 @@ if(TARGET alpha_recorder_frontend)
     install(TARGETS alpha_recorder_frontend
         RUNTIME DESTINATION obs-plugins/64bit
         LIBRARY DESTINATION obs-plugins/64bit
+        BUNDLE DESTINATION obs-plugins
     )
 endif()
 

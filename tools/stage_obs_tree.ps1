@@ -1,6 +1,6 @@
 param(
     [string]$ObsRoot = $env:OBS_ROOT,
-    [string]$BuildDir = (Join-Path $PSScriptRoot "..\out\build\windows-x64-msvc"),
+    [string]$BuildDir = $(if ($IsMacOS) { (Join-Path $PSScriptRoot "..\out\build\macos-default") } else { (Join-Path $PSScriptRoot "..\out\build\windows-x64-msvc") }),
     [string]$StageDir = (Join-Path $PSScriptRoot "..\out\stage\obs"),
     [string]$Configuration = 'RelWithDebInfo',
     [string]$PluginName = 'alpha_recorder'
@@ -49,9 +49,12 @@ function Resolve-PluginPath {
             continue
         }
 
-        $candidatePath = Join-Path $candidateRoot "$PluginName.dll"
-        if (Test-Path -LiteralPath $candidatePath) {
-            return (Get-Item -LiteralPath $candidatePath).FullName
+        $extensions = if ($IsMacOS) { @('.plugin', '.dylib') } else { @('.dll') }
+        foreach ($ext in $extensions) {
+            $candidatePath = Join-Path $candidateRoot "$PluginName$ext"
+            if (Test-Path -LiteralPath $candidatePath) {
+                return (Get-Item -LiteralPath $candidatePath).FullName
+            }
         }
     }
 
@@ -97,10 +100,8 @@ if (-not (Test-Path -LiteralPath $ObsRoot)) {
     throw "OBS root does not exist: $ObsRoot"
 }
 
-New-Item -ItemType Directory -Path $StageDir -Force | Out-Null
-
-$pluginTargetDir = Join-Path $StageDir 'obs-plugins\64bit'
-$obsBinTargetDir = Join-Path $StageDir 'bin\64bit'
+$pluginTargetDir = if ($IsMacOS) { Join-Path $StageDir 'obs-plugins' } else { Join-Path $StageDir 'obs-plugins\64bit' }
+$obsBinTargetDir = if ($IsMacOS) { Join-Path $StageDir 'bin' } else { Join-Path $StageDir 'bin\64bit' }
 $obsDataTargetDir = Join-Path $StageDir 'data'
 
 New-Item -ItemType Directory -Path $pluginTargetDir, $obsBinTargetDir, $obsDataTargetDir -Force | Out-Null
@@ -132,11 +133,11 @@ foreach ($currentPluginName in $pluginNames) {
     }
 }
 
-$obsBinSource = Join-Path $ObsRoot 'bin\64bit'
+$obsBinSource = if ($IsMacOS) { Join-Path $ObsRoot 'bin' } else { Join-Path $ObsRoot 'bin\64bit' }
 $obsDataSource = Join-Path $ObsRoot 'data'
 
 if (-not (Test-Path -LiteralPath $obsBinSource)) {
-    throw "OBS root is missing bin\\64bit: $ObsRoot"
+    throw "OBS root is missing bin directory: $obsBinSource"
 }
 
 if (-not (Test-Path -LiteralPath $obsDataSource)) {
