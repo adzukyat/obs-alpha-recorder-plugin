@@ -220,14 +220,38 @@ class ObsWebSocket {
 
 async function waitForRecordState(socket: ObsWebSocket, active: boolean, timeoutSeconds = 30): Promise<void> {
   const deadline = Date.now() + timeoutSeconds * 1000;
+  let lastStatus: unknown = undefined;
   while (Date.now() < deadline) {
     const status = await socket.request("GetRecordStatus");
+    lastStatus = status;
     if (Boolean(status.outputActive) === active) {
       return;
     }
     await delay(500);
   }
-  throw new Error(`Timed out waiting for recording active=${active}`);
+  throw new Error(`Timed out waiting for recording active=${active}; last status=${JSON.stringify(lastStatus)}`);
+}
+
+async function requestWithStartupRetry(
+  socket: ObsWebSocket,
+  requestType: string,
+  requestData: Record<string, unknown> = {},
+  timeoutSeconds = 45,
+): Promise<any> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let lastError: unknown = undefined;
+  while (Date.now() < deadline) {
+    try {
+      return await socket.request(requestType, requestData);
+    } catch (error) {
+      lastError = error;
+      if (!String(error).includes("OBS is not ready")) {
+        throw error;
+      }
+      await delay(500);
+    }
+  }
+  throw lastError;
 }
 
 async function waitForPath(path: string, timeoutSeconds: number): Promise<void> {
@@ -241,8 +265,14 @@ async function waitForPath(path: string, timeoutSeconds: number): Promise<void> 
   throw new Error(`Timed out waiting for file: ${path}`);
 }
 
-function findTool(stageBin: string, name: string): string {
+function findTool(stageBin: string, repoRoot: string, name: string): string {
   const candidates = [join(stageBin, name), join(stageBin, `${name}.exe`)];
+  const depsRoot = join(repoRoot, "deps", "obs", "obs-studio", ".deps");
+  if (existsSync(depsRoot)) {
+    for (const depsName of readdirSync(depsRoot)) {
+      candidates.push(join(depsRoot, depsName, "bin", name), join(depsRoot, depsName, "bin", `${name}.exe`));
+    }
+  }
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
       return candidate;
@@ -268,11 +298,40 @@ function checkedJson(tool: string, args: string[], timeoutSeconds: number): unkn
   return JSON.parse(new TextDecoder().decode(result.stdout));
 }
 
+async function checkedJsonWithRetry(tool: string, args: string[], timeoutSeconds: number): Promise<unknown> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let lastError: unknown = undefined;
+  while (Date.now() < deadline) {
+    try {
+      return checkedJson(tool, args, 30);
+    } catch (error) {
+      lastError = error;
+      await delay(1000);
+    }
+  }
+  throw lastError;
+}
+
 function checkedProcess(tool: string, args: string[], timeoutSeconds: number): void {
   const result = spawnSync({ cmd: [tool, ...args], stdout: "pipe", stderr: "pipe", timeout: timeoutSeconds * 1000 });
   if (result.exitCode !== 0) {
     throw new Error(`${tool} failed: ${new TextDecoder().decode(result.stderr)}`);
   }
+}
+
+async function checkedProcessWithRetry(tool: string, args: string[], timeoutSeconds: number): Promise<void> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let lastError: unknown = undefined;
+  while (Date.now() < deadline) {
+    try {
+      checkedProcess(tool, args, 30);
+      return;
+    } catch (error) {
+      lastError = error;
+      await delay(1000);
+    }
+  }
+  throw lastError;
 }
 
 async function main(): Promise<void> {
@@ -431,12 +490,12 @@ finalization_format=prores_4444
   let socket: ObsWebSocket | undefined = undefined;
   try {
     socket = await ObsWebSocket.connect(port, password);
-    await socket.request("CallVendorRequest", {
+    await requestWithStartupRetry(socket, "CallVendorRequest", {
       vendorName: "alpha_recorder",
       requestType: "SetSettings",
       requestData: { enabled: true, finalization_format: "prores_4444" },
     });
-    const settings = await socket.request("CallVendorRequest", {
+    const settings = await requestWithStartupRetry(socket, "CallVendorRequest", {
       vendorName: "alpha_recorder",
       requestType: "GetSettings",
       requestData: {},
@@ -450,7 +509,6 @@ finalization_format=prores_4444
     await waitForRecordState(socket, true);
     await delay(args.recordSeconds * 1000);
     const stopResponse = await socket.request("StopRecord");
-    await waitForRecordState(socket, false, 240);
 
     let rgbPath = String(stopResponse?.outputPath ?? "");
     if (!rgbPath) {
@@ -482,9 +540,9 @@ finalization_format=prores_4444
       throw new Error("Manifest sidecar_size_bytes does not match the sidecar file size");
     }
 
-    const ffprobe = findTool(stageBin, "ffprobe");
-    const ffmpeg = findTool(stageBin, "ffmpeg");
-    const rgbProbe = checkedJson(
+    const ffprobe = findTool(stageBin, args.repoRoot, "ffprobe");
+    const ffmpeg = findTool(stageBin, args.repoRoot, "ffmpeg");
+    const rgbProbe = await checkedJsonWithRetry(
       ffprobe,
       [
         "-v",
@@ -501,7 +559,7 @@ finalization_format=prores_4444
       ],
       30,
     );
-    const alphaProbe = checkedJson(
+    const alphaProbe = (await checkedJsonWithRetry(
       ffprobe,
       [
         "-v",
@@ -517,9 +575,9 @@ finalization_format=prores_4444
         alphaPath,
       ],
       180,
-    ) as any;
-    checkedProcess(ffmpeg, ["-v", "error", "-i", rgbPath, "-frames:v", "1", "-f", "null", "-"], 30);
-    checkedProcess(ffmpeg, ["-v", "error", "-i", alphaPath, "-frames:v", "1", "-f", "null", "-"], 180);
+    )) as any;
+    await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", rgbPath, "-frames:v", "1", "-f", "null", "-"], 30);
+    await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", alphaPath, "-frames:v", "1", "-f", "null", "-"], 180);
 
     const alphaStream = alphaProbe.streams?.[0] ?? {};
     if (alphaStream.codec_name !== "prores" || alphaStream.pix_fmt !== "yuva444p10le") {

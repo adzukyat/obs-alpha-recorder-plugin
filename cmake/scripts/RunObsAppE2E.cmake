@@ -47,7 +47,23 @@ if(NOT SKIP_STAGE)
     )
 endif()
 
-find_program(BUN_EXECUTABLE bun REQUIRED)
+set(BUN_EXECUTABLE "")
+if(WIN32 AND DEFINED ENV{USERPROFILE})
+    file(GLOB _alpha_recorder_scoop_bun_paths LIST_DIRECTORIES false "$ENV{USERPROFILE}/scoop/apps/bun/*/bun.exe")
+    list(FILTER _alpha_recorder_scoop_bun_paths EXCLUDE REGEX "/current/")
+    list(SORT _alpha_recorder_scoop_bun_paths)
+    list(REVERSE _alpha_recorder_scoop_bun_paths)
+    foreach(_alpha_recorder_scoop_bun_path IN LISTS _alpha_recorder_scoop_bun_paths)
+        if(EXISTS "${_alpha_recorder_scoop_bun_path}")
+            set(BUN_EXECUTABLE "${_alpha_recorder_scoop_bun_path}")
+            break()
+        endif()
+    endforeach()
+endif()
+
+if(NOT BUN_EXECUTABLE)
+    find_program(BUN_EXECUTABLE bun REQUIRED)
+endif()
 
 set(args
     "${CMAKE_CURRENT_LIST_DIR}/obs_app_e2e.ts"

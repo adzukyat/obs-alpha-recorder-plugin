@@ -57,7 +57,7 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN OR ALPHA_RECORDER_BUILD_E2E_TESTS OR ALPHA_RE
     set(_alpha_recorder_build_full_targets ON)
 endif()
 
-if(_alpha_recorder_build_full_targets AND TARGET alpha_recorder_plugin)
+if(_alpha_recorder_build_full_targets)
 find_package(OBS REQUIRED MODULE)
 find_package(jansson REQUIRED)
 find_package(FFmpeg REQUIRED avcodec avformat avutil swscale)
