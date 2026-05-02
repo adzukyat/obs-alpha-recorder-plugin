@@ -28,6 +28,7 @@ int main()
                     "name = gui_flow\n"
                     "expected_pair_count = 4\n"
                     "expected_drop_count = 2\n"
+                    "expected_split_at_sequence = 3\n"
                     "output_root = session/output\n"
                     "rgb_artifact = artifacts/rgb.raw\n"
                     "alpha_sidecar = artifacts/alpha.sidecar\n"
@@ -41,7 +42,8 @@ int main()
         return 1;
     }
 
-    if (scenario.name != "gui_flow" || scenario.expected_pair_count != 4U || scenario.expected_drop_count != 2U)
+    if (scenario.name != "gui_flow" || scenario.expected_pair_count != 4U || scenario.expected_drop_count != 2U ||
+        scenario.expected_split_at_sequence != 3U)
     {
         std::cerr << "scenario fields were not parsed correctly\n";
         return 2;

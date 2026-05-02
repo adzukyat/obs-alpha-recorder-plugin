@@ -1,0 +1,146 @@
+cmake_minimum_required(VERSION 3.24)
+
+include("${CMAKE_CURRENT_LIST_DIR}/ObsHelpers.cmake")
+
+alpha_recorder_require(REPO_ROOT)
+alpha_recorder_require(BUILD_DIR)
+
+set(OBS_ROOT "$ENV{OBS_ROOT}" CACHE PATH "OBS runtime root")
+set(STAGE_DIR "${REPO_ROOT}/out/stage/obs" CACHE PATH "Portable OBS stage directory")
+set(CONFIGURATION "RelWithDebInfo" CACHE STRING "Build configuration")
+set(PLUGIN_NAME "alpha_recorder" CACHE STRING "Main plugin output name")
+set(CONFIG_FILE "${REPO_ROOT}/deps/obs/obs-root.cmake" CACHE FILEPATH "Generated OBS root CMake fragment")
+
+alpha_recorder_abs_path(REPO_ROOT "${REPO_ROOT}" "${CMAKE_CURRENT_LIST_DIR}")
+alpha_recorder_abs_path(BUILD_DIR "${BUILD_DIR}" "${REPO_ROOT}")
+alpha_recorder_abs_path(STAGE_DIR "${STAGE_DIR}" "${REPO_ROOT}")
+alpha_recorder_abs_path(CONFIG_FILE "${CONFIG_FILE}" "${REPO_ROOT}")
+
+if(CONFIGURATION STREQUAL "")
+    set(CONFIGURATION "RelWithDebInfo")
+endif()
+
+if(OBS_ROOT STREQUAL "" AND EXISTS "${CONFIG_FILE}")
+    file(READ "${CONFIG_FILE}" config_text)
+    string(REGEX MATCH "set\\([ \t\r\n]*OBS_ROOT[ \t\r\n]+\"([^\"]+)\"" _match "${config_text}")
+    if(CMAKE_MATCH_1)
+        set(OBS_ROOT "${CMAKE_MATCH_1}")
+    endif()
+endif()
+
+if(OBS_ROOT STREQUAL "")
+    message(FATAL_ERROR "An OBS developer tree is required. Set OBS_ROOT or write deps/obs/obs-root.cmake before staging.")
+endif()
+
+alpha_recorder_abs_path(OBS_ROOT "${OBS_ROOT}" "${REPO_ROOT}")
+alpha_recorder_validate_obs_runtime("${OBS_ROOT}")
+
+function(alpha_recorder_find_plugin out_var plugin_name)
+    set(candidate_roots
+        "${BUILD_DIR}/bin/${CONFIGURATION}"
+        "${BUILD_DIR}/${CONFIGURATION}"
+        "${BUILD_DIR}/bin"
+        "${BUILD_DIR}"
+    )
+
+    if(APPLE)
+        set(extensions ".plugin" ".dylib")
+    else()
+        set(extensions ".dll")
+    endif()
+
+    foreach(root IN LISTS candidate_roots)
+        if(NOT EXISTS "${root}")
+            continue()
+        endif()
+        foreach(ext IN LISTS extensions)
+            set(candidate "${root}/${plugin_name}${ext}")
+            if(EXISTS "${candidate}")
+                cmake_path(ABSOLUTE_PATH candidate NORMALIZE OUTPUT_VARIABLE resolved)
+                set(${out_var} "${resolved}" PARENT_SCOPE)
+                return()
+            endif()
+        endforeach()
+    endforeach()
+
+    set(${out_var} "" PARENT_SCOPE)
+endfunction()
+
+if(APPLE)
+    set(plugin_target_dir "${STAGE_DIR}/obs-plugins")
+    set(bin_target_dir "${STAGE_DIR}/bin")
+    if(EXISTS "${OBS_ROOT}/Frameworks")
+        set(obs_bin_source "${OBS_ROOT}/Frameworks")
+    else()
+        set(obs_bin_source "${OBS_ROOT}/bin")
+    endif()
+    if(EXISTS "${OBS_ROOT}/PlugIns")
+        set(obs_plugin_source "${OBS_ROOT}/PlugIns")
+    else()
+        set(obs_plugin_source "${OBS_ROOT}/obs-plugins")
+    endif()
+    if(EXISTS "${OBS_ROOT}/Resources")
+        set(obs_data_source "${OBS_ROOT}/Resources")
+    else()
+        set(obs_data_source "${OBS_ROOT}/data")
+    endif()
+else()
+    set(plugin_target_dir "${STAGE_DIR}/obs-plugins/64bit")
+    set(bin_target_dir "${STAGE_DIR}/bin/64bit")
+    set(obs_bin_source "${OBS_ROOT}/bin/64bit")
+    set(obs_plugin_source "${OBS_ROOT}/obs-plugins/64bit")
+    set(obs_data_source "${OBS_ROOT}/data")
+endif()
+
+set(data_target_dir "${STAGE_DIR}/data")
+
+foreach(required_path IN ITEMS "${obs_bin_source}" "${obs_data_source}" "${obs_plugin_source}")
+    if(NOT EXISTS "${required_path}")
+        message(FATAL_ERROR "OBS root is missing required path: ${required_path}")
+    endif()
+endforeach()
+
+file(MAKE_DIRECTORY "${plugin_target_dir}" "${bin_target_dir}" "${data_target_dir}")
+file(COPY "${obs_bin_source}/" DESTINATION "${bin_target_dir}")
+file(COPY "${obs_data_source}/" DESTINATION "${data_target_dir}")
+file(COPY "${obs_plugin_source}/" DESTINATION "${plugin_target_dir}")
+if(APPLE AND EXISTS "${OBS_ROOT}/MacOS")
+    file(COPY "${OBS_ROOT}/MacOS/" DESTINATION "${STAGE_DIR}/MacOS")
+endif()
+
+set(main_plugin_path "")
+set(frontend_plugin_path "")
+set(e2e_plugin_path "")
+foreach(plugin IN ITEMS "${PLUGIN_NAME}" alpha_recorder_frontend alpha_recorder_e2e)
+    alpha_recorder_find_plugin(plugin_path "${plugin}")
+    if(plugin STREQUAL "${PLUGIN_NAME}" AND plugin_path STREQUAL "")
+        message(FATAL_ERROR "Failed to locate ${PLUGIN_NAME} in the build tree: ${BUILD_DIR}")
+    endif()
+    if(NOT plugin_path STREQUAL "")
+        if(IS_DIRECTORY "${plugin_path}")
+            file(COPY "${plugin_path}" DESTINATION "${plugin_target_dir}")
+        else()
+            get_filename_component(plugin_file_name "${plugin_path}" NAME)
+            file(COPY_FILE "${plugin_path}" "${plugin_target_dir}/${plugin_file_name}" ONLY_IF_DIFFERENT)
+        endif()
+        if(plugin STREQUAL "${PLUGIN_NAME}")
+            set(main_plugin_path "${plugin_path}")
+        elseif(plugin STREQUAL "alpha_recorder_frontend")
+            set(frontend_plugin_path "${plugin_path}")
+        elseif(plugin STREQUAL "alpha_recorder_e2e")
+            set(e2e_plugin_path "${plugin_path}")
+        endif()
+    endif()
+endforeach()
+
+alpha_recorder_write_json_manifest("${STAGE_DIR}/stage.manifest.json"
+    "obsRoot=${OBS_ROOT}"
+    "buildDir=${BUILD_DIR}"
+    "stageDir=${STAGE_DIR}"
+    "configuration=${CONFIGURATION}"
+    "pluginPath=${main_plugin_path}"
+    "frontendPluginPath=${frontend_plugin_path}"
+    "e2ePluginPath=${e2e_plugin_path}"
+)
+
+message(STATUS "Staged OBS tree at ${STAGE_DIR}")

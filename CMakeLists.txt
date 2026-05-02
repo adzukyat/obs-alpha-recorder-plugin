@@ -36,6 +36,28 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/obs/obsconfig.h"
 #define OBS_RELEASE_CANDIDATE 0
 #define OBS_BETA 0
 ")
+
+add_library(alpha_recorder_e2e_scenario STATIC
+    src/core/e2e_scenario.cpp
+)
+alpha_recorder_setup_target(alpha_recorder_e2e_scenario)
+alpha_recorder_apply_warnings(alpha_recorder_e2e_scenario)
+target_include_directories(alpha_recorder_e2e_scenario
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+set_target_properties(alpha_recorder_e2e_scenario PROPERTIES
+    OUTPUT_NAME "alpha_recorder_e2e_scenario"
+    FOLDER "alpha_recorder/core"
+)
+
+set(_alpha_recorder_build_full_targets OFF)
+if(ALPHA_RECORDER_BUILD_OBS_PLUGIN OR ALPHA_RECORDER_BUILD_E2E_TESTS OR ALPHA_RECORDER_BUILD_CORE_UNIT_TESTS)
+    set(_alpha_recorder_build_full_targets ON)
+endif()
+
+if(_alpha_recorder_build_full_targets AND TARGET alpha_recorder_plugin)
 find_package(OBS REQUIRED MODULE)
 find_package(jansson REQUIRED)
 find_package(FFmpeg REQUIRED avcodec avformat avutil swscale)
@@ -68,12 +90,11 @@ add_library(alpha_recorder_core STATIC
     src/core/sidecar_reader.cpp
     src/core/sidecar_writer.cpp
     src/core/settings.cpp
-    src/core/e2e_scenario.cpp
 )
 alpha_recorder_setup_target(alpha_recorder_core)
 alpha_recorder_apply_warnings(alpha_recorder_core)
 target_link_libraries(alpha_recorder_core PRIVATE OBS::libobs)
-target_link_libraries(alpha_recorder_core PUBLIC jansson::jansson FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale)
+target_link_libraries(alpha_recorder_core PUBLIC alpha_recorder_e2e_scenario jansson::jansson FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale)
 target_include_directories(alpha_recorder_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -83,8 +104,9 @@ set_target_properties(alpha_recorder_core PROPERTIES
     OUTPUT_NAME "alpha_recorder_core"
     FOLDER "alpha_recorder/core"
 )
+endif()
 
-if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
+if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     add_library(alpha_recorder_plugin MODULE
         src/obs/plugin.cpp
         src/obs/recording_session_controller.cpp
@@ -190,7 +212,7 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     endif()
 endif()
 
-if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
+if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_E2E_TESTS)
     add_library(alpha_recorder_e2e_output MODULE
         src/obs/plugin.cpp
         src/obs/obs_output_bridge.cpp
@@ -230,6 +252,20 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
 endif()
 
 if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
+    add_executable(alpha_recorder_unit_e2e_scenario
+        tests/unit/e2e_scenario_test.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_e2e_scenario)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_e2e_scenario)
+    target_link_libraries(alpha_recorder_unit_e2e_scenario PRIVATE alpha_recorder_e2e_scenario)
+    set_target_properties(alpha_recorder_unit_e2e_scenario PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.e2e_scenario COMMAND alpha_recorder_unit_e2e_scenario)
+    set_tests_properties(alpha_recorder.unit.e2e_scenario PROPERTIES LABELS "unit")
+endif()
+
+if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_UNIT_TESTS AND ALPHA_RECORDER_BUILD_CORE_UNIT_TESTS)
     add_executable(alpha_recorder_unit_pair_gate
         tests/unit/pair_gate_test.cpp
     )
@@ -266,18 +302,6 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
     add_test(NAME alpha_recorder.unit.sidecar_writer COMMAND alpha_recorder_unit_sidecar_writer)
     set_tests_properties(alpha_recorder.unit.sidecar_writer PROPERTIES LABELS "unit")
 
-    add_executable(alpha_recorder_unit_e2e_scenario
-        tests/unit/e2e_scenario_test.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_unit_e2e_scenario)
-    alpha_recorder_apply_warnings(alpha_recorder_unit_e2e_scenario)
-    target_link_libraries(alpha_recorder_unit_e2e_scenario PRIVATE alpha_recorder_core)
-    set_target_properties(alpha_recorder_unit_e2e_scenario PROPERTIES
-        FOLDER "alpha_recorder/tests/unit"
-    )
-    add_test(NAME alpha_recorder.unit.e2e_scenario COMMAND alpha_recorder_unit_e2e_scenario)
-    set_tests_properties(alpha_recorder.unit.e2e_scenario PROPERTIES LABELS "unit")
-
     add_executable(alpha_recorder_unit_recording_session_pause
         tests/unit/recording_session_controller_pause_test.cpp
     )
@@ -306,7 +330,7 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
     )
 endif()
 
-if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
+if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_E2E_TESTS)
     add_executable(alpha_recorder_e2e_host
         tests/e2e/host/main.cpp
     )
@@ -356,16 +380,53 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
 
     alpha_recorder_add_e2e_scenario(happy_path "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/basic_pair.scenario")
     alpha_recorder_add_e2e_scenario(drop_backpressure "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/drop_backpressure.scenario")
+    alpha_recorder_add_e2e_scenario(split_rotation "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/split_rotation.scenario")
 endif()
 
-if(BUILD_TESTING AND WIN32 AND ALPHA_RECORDER_ENABLE_OBS_APP_E2E)
+if(_alpha_recorder_build_full_targets AND TARGET alpha_recorder_plugin)
+    set(alpha_recorder_stage_dir "${CMAKE_CURRENT_SOURCE_DIR}/out/stage/obs" CACHE PATH "Portable OBS staging directory")
+    add_custom_target(alpha_recorder_stage_obs_tree
+        COMMAND ${CMAKE_COMMAND}
+            "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DSTAGE_DIR=${alpha_recorder_stage_dir}"
+            "-DOBS_ROOT=${OBS_ROOT}"
+            "-DCONFIGURATION=$<CONFIG>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/StageObsTree.cmake"
+        DEPENDS alpha_recorder_plugin
+        VERBATIM
+    )
+    if(TARGET alpha_recorder_frontend)
+        add_dependencies(alpha_recorder_stage_obs_tree alpha_recorder_frontend)
+    endif()
+    if(TARGET alpha_recorder_e2e_output)
+        add_dependencies(alpha_recorder_stage_obs_tree alpha_recorder_e2e_output)
+    endif()
+
+    if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
+        add_custom_target(alpha_recorder_run_e2e
+            COMMAND ${CMAKE_COMMAND}
+                "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+                "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+                "-DSTAGE_DIR=${alpha_recorder_stage_dir}"
+                "-DOBS_ROOT=${OBS_ROOT}"
+                "-DCONFIGURATION=$<CONFIG>"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunE2E.cmake"
+            DEPENDS alpha_recorder_stage_obs_tree
+            VERBATIM
+        )
+    endif()
+endif()
+
+if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_ENABLE_OBS_APP_E2E)
     add_test(NAME alpha_recorder.e2e.obs_app
-        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
-            -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_obs_app_e2e.ps1"
-            -BuildDir "${CMAKE_CURRENT_BINARY_DIR}"
-            -StageDir "${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage"
-            -ObsRoot "${OBS_ROOT}"
-            -Configuration "$<CONFIG>"
+        COMMAND ${CMAKE_COMMAND}
+            "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DSTAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage"
+            "-DOBS_ROOT=${OBS_ROOT}"
+            "-DCONFIGURATION=$<CONFIG>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
     )
     set_tests_properties(alpha_recorder.e2e.obs_app PROPERTIES
         LABELS "obs-app-e2e;e2e"
@@ -373,9 +434,26 @@ if(BUILD_TESTING AND WIN32 AND ALPHA_RECORDER_ENABLE_OBS_APP_E2E)
     )
 endif()
 
-install(TARGETS alpha_recorder_core
-    ARCHIVE DESTINATION lib
-)
+if(_alpha_recorder_build_full_targets)
+    add_custom_target(alpha_recorder_run_obs_app_e2e
+        COMMAND ${CMAKE_COMMAND}
+            "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DSTAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage"
+            "-DOBS_ROOT=${OBS_ROOT}"
+            "-DCONFIGURATION=$<CONFIG>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
+        VERBATIM
+    )
+endif()
+
+install(TARGETS alpha_recorder_e2e_scenario ARCHIVE DESTINATION lib)
+
+if(TARGET alpha_recorder_core)
+    install(TARGETS alpha_recorder_core
+        ARCHIVE DESTINATION lib
+    )
+endif()
 
 if(TARGET alpha_recorder_plugin)
     install(TARGETS alpha_recorder_plugin

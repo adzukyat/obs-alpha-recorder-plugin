@@ -2,20 +2,23 @@
 
 `alpha_recorder` is an OBS native plugin that follows the normal OBS recording
 lifecycle. Enable it from Tools -> Alpha Recorder Settings, then use OBS Start
-Recording / Stop Recording as usual. When enabled, it writes a lossless alpha
-sidecar and manifest beside each recording. On stop, and whenever OBS signals
-`file_changed` for a split recording, it finalizes the current segment and
-exports it with the selected format.
+Recording / Stop Recording as usual. When enabled, it captures alpha-preserving
+Program frames, writes a lossless alpha sidecar and manifest beside each
+recording, and exports a separate alpha movie aligned with the recorded video.
+On stop, and whenever OBS signals `file_changed` for a split recording, it
+finalizes the current segment and exports it with the selected format.
 
-The supported export path is Apple ProRes 4444. Lossless HEVC is shown in the
-settings UI but disabled, and unsupported config values normalize back to the
-supported default. If export fails, the raw sidecar and manifest remain beside
-the recording for recovery.
+Supported finalization formats are Apple ProRes 4444 (`.mov`) and Lossless HEVC
+(`.mp4`). If export fails, the raw sidecar and manifest remain beside the
+recording for recovery.
 
 Scenario files live only under `tests/e2e/scenarios`. They are inputs for the
 deterministic E2E harness, not part of the shipping plugin path.
 
-For a start-to-finish usage walkthrough, see [docs/usage.md](docs/usage.md).
+Settings can also be driven by the obs-websocket vendor API for automated tests:
+
+- Vendor: `alpha_recorder`
+- Requests: `GetSettings`, `SetSettings`
 
 The OBS module target and the E2E harness both require a real OBS developer
 tree. `OBS_ROOT` must point to a tree with libobs headers, import libraries,
@@ -27,10 +30,12 @@ source and build trees.
 The current tree is intentionally minimal. It provides:
 
 - OBS recording lifecycle hooks plus a Tools menu settings dialog
-- a core static library for pair gating, sidecar writing, and manifest writing
+- a core static library for pair gating, sidecar writing/reading, manifest
+  writing/reading, and finalization export
 - unit test executables registered with CTest
-- deterministic E2E executables and PowerShell staging helpers
-- CMake presets for Windows x64 MSVC
+- deterministic E2E executables and CMake-native staging helpers
+- a cross-platform OBS app E2E path driven by CMake and obs-websocket
+- CMake presets for Windows x64 MSVC and macOS
 
 ## Build
 
@@ -45,15 +50,15 @@ git submodule update --init --recursive
 
 2. Produce a real OBS developer tree from source:
 
-```powershell
-pwsh .\tools\bootstrap_obs.ps1 -BuildFromSource
+```sh
+cmake -DREPO_ROOT="$PWD" -DBUILD_FROM_SOURCE=ON -P cmake/scripts/BootstrapObs.cmake
 ```
 
-If you already have an OBS source checkout, use `-BuildFromSource` to stage it
-into the OBS build tree's runtime prefix without recloning. If you want the
-bootstrap script to refresh the submodule checkout from the pinned OBS tag,
-`-CloneSource` is still available. If you already have a real OBS developer
-tree, pass its root to `-ObsRoot` to validate it and write
+If you already have an OBS source checkout, use `-DBUILD_FROM_SOURCE=ON` to
+stage it into the OBS build tree's runtime prefix without recloning. If you want
+the bootstrap script to refresh the submodule checkout from the pinned OBS tag,
+use `-DCLONE_SOURCE=ON`. If you already have a real OBS developer tree, pass its
+root with `-DOBS_ROOT=...` to validate it and write
 `deps/obs/obs-root.cmake`.
 
 2. Configure and build:
@@ -63,14 +68,26 @@ cmake --preset windows-x64-msvc
 cmake --build --preset windows-x64-msvc-relwithdebinfo
 ```
 
+On macOS, use the matching macOS preset:
+
+```sh
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64-relwithdebinfo
+```
+
 The default preset fails fast if `OBS_ROOT` does not resolve to a real developer
 tree.
 
-To install into a stock OBS release, run `pwsh .\tools\stage_obs_tree.ps1` and
-copy both `alpha_recorder.dll` and `alpha_recorder_frontend.dll` from
-`out\stage\obs\obs-plugins\64bit` into OBS's `obs-plugins\64bit` directory. Use
-the RelWithDebInfo output; Debug builds depend on debug Qt and debug CRT DLLs
-that a normal OBS install does not ship.
+To stage a portable OBS tree with Alpha Recorder overlaid, build the
+`alpha_recorder_stage_obs_tree` target:
+
+```sh
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_stage_obs_tree
+```
+
+On Windows, the staged plugin DLLs land under
+`out/stage/obs/obs-plugins/64bit`. On macOS, bundles land under
+`out/stage/obs/obs-plugins`.
 
 ## Test
 
@@ -92,13 +109,41 @@ ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L e2e --output-
 The E2E host starts libobs, loads the staged `alpha_recorder_e2e.dll` module,
 and the verifier checks the generated RGB, sidecar, and manifest artifacts.
 
-`tools/run_e2e.ps1 -Configuration RelWithDebInfo` stages the OBS tree and
-prepends the staged `bin/64bit` directory to PATH before running CTest.
+The CMake target `alpha_recorder_run_e2e` stages the OBS tree and runs the
+deterministic E2E CTest label with the staged runtime on the environment path.
+
+```sh
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_e2e
+```
+
+The real OBS app E2E path launches portable OBS, enables Alpha Recorder through
+obs-websocket, starts and stops recording, then verifies the RGB recording,
+sidecar, manifest, and exported alpha movie.
+
+```sh
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
+```
+
+On macOS:
+
+```sh
+cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
+```
+
+CTest can register this slow app-level test when configured with
+`ALPHA_RECORDER_ENABLE_OBS_APP_E2E=ON`.
+
+The app-level E2E is cross-platform at the harness layer: CMake launches
+`cmake/scripts/RunObsAppE2E.cmake`, which stages OBS and calls a Bun
+obs-websocket client. Platform-specific differences are limited to executable
+and runtime layout resolution (`obs64.exe` on Windows, `MacOS/OBS` or `bin/obs`
+on macOS). The staged OBS root still needs the platform's real OBS runtime,
+plugins, FFmpeg tools, obs-websocket plugin, and `bun` on PATH.
 
 ## OBS/libobs resolution
 
 - `deps/obs/obs-root.cmake` is an optional CMake fragment generated by
-  `tools/bootstrap_obs.ps1`.
+  `cmake/scripts/BootstrapObs.cmake`.
 - `OBS_ROOT` may also be supplied through the environment or the CMake preset.
 - `cmake/FindOBS.cmake` looks for libobs headers and import libraries under the
   configured root and creates an imported `OBS::libobs` target when found.
@@ -110,11 +155,17 @@ Implemented in the core library and live OBS workflow:
 - pair admission logic with all-or-nothing frame-pair acceptance
 - alpha sidecar container writing with LZ4-compressed payload blocks and index
   entries
-- manifest/session summary serialization with atomic manifest replacement
-- OBS recording lifecycle hooks, settings persistence, and Tools menu
-  integration
+- sidecar reading and alpha movie finalization export
+- manifest/session summary serialization and parsing with atomic manifest
+  replacement
+- OBS recording lifecycle hooks, settings persistence, Tools menu integration,
+  and obs-websocket vendor automation
+- raw Program frame capture through OBS's alpha-preserving video callback path
+- split recording handling through OBS `file_changed`
 - deterministic E2E scenarios that validate the RGB raw artifact, alpha sidecar,
-  and manifest content through the OBS module boundary
+  manifest content, and split-rotation behavior through the OBS module boundary
+- cross-platform OBS app E2E harness that verifies RGB, sidecar, manifest, and
+  exported alpha movie outputs
 
 The test-only scenario path remains confined to the E2E harness; the shipping
 plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder

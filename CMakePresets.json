@@ -58,6 +58,24 @@
         "ALPHA_RECORDER_BUILD_E2E_TESTS": "ON",
         "OBS_ROOT": "$env{OBS_ROOT}"
       }
+    },
+    {
+      "name": "macos-arm64-scenario",
+      "displayName": "macOS arm64 scenario parser tests",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": {
+        "value": "arm64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+        "ALPHA_RECORDER_BUILD_OBS_PLUGIN": "OFF",
+        "ALPHA_RECORDER_BUILD_UNIT_TESTS": "ON",
+        "ALPHA_RECORDER_BUILD_CORE_UNIT_TESTS": "OFF",
+        "ALPHA_RECORDER_BUILD_E2E_TESTS": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -90,6 +108,11 @@
       "name": "macos-arm64-relwithdebinfo",
       "configurePreset": "macos-arm64",
       "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "macos-arm64-scenario-debug",
+      "configurePreset": "macos-arm64-scenario",
+      "configuration": "Debug"
     }
   ],
   "testPresets": [
@@ -112,6 +135,14 @@
     {
       "name": "macos-arm64-debug",
       "configurePreset": "macos-arm64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "macos-arm64-scenario-debug",
+      "configurePreset": "macos-arm64-scenario",
       "configuration": "Debug",
       "output": {
         "outputOnFailure": true
