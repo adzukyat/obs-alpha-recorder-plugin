@@ -9,6 +9,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not (Get-Variable -Name IsMacOS -Scope Global -ErrorAction SilentlyContinue)) {
+    $script:IsMacOS = $false
+}
+
 function Resolve-RepoPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -135,6 +139,7 @@ foreach ($currentPluginName in $pluginNames) {
 
 $obsBinSource = if ($IsMacOS) { Join-Path $ObsRoot 'bin' } else { Join-Path $ObsRoot 'bin\64bit' }
 $obsDataSource = Join-Path $ObsRoot 'data'
+$obsPluginSource = if ($IsMacOS) { Join-Path $ObsRoot 'obs-plugins' } else { Join-Path $ObsRoot 'obs-plugins\64bit' }
 
 if (-not (Test-Path -LiteralPath $obsBinSource)) {
     throw "OBS root is missing bin directory: $obsBinSource"
@@ -144,8 +149,20 @@ if (-not (Test-Path -LiteralPath $obsDataSource)) {
     throw "OBS root is missing data: $ObsRoot"
 }
 
+if (-not (Test-Path -LiteralPath $obsPluginSource)) {
+    throw "OBS root is missing plugin directory: $obsPluginSource"
+}
+
 Copy-Item -Path (Join-Path $obsBinSource '*') -Destination $obsBinTargetDir -Recurse -Force
 Copy-Item -Path (Join-Path $obsDataSource '*') -Destination $obsDataTargetDir -Recurse -Force
+Copy-Item -Path (Join-Path $obsPluginSource '*') -Destination $pluginTargetDir -Recurse -Force
+
+foreach ($currentPluginName in $pluginNames) {
+    $currentPluginPath = Resolve-PluginPath -BuildDir $BuildDir -Configuration $Configuration -PluginName $currentPluginName
+    if ($null -ne $currentPluginPath) {
+        Copy-Item -LiteralPath $currentPluginPath -Destination $pluginTargetDir -Force
+    }
+}
 
 $manifest = [pscustomobject]@{
     obsRoot            = $ObsRoot

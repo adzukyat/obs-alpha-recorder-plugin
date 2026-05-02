@@ -179,6 +179,8 @@ namespace alpha_recorder::obs
     [[nodiscard]] Settings load_settings(struct config_data *config) noexcept;
     bool register_runtime_hooks() noexcept;
     void unregister_runtime_hooks() noexcept;
+    void register_websocket_vendor_api() noexcept;
+    void unregister_websocket_vendor_api() noexcept;
     bool register_output_module() noexcept;
     bool initialize_module() noexcept;
 

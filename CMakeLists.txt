@@ -88,11 +88,15 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     add_library(alpha_recorder_plugin MODULE
         src/obs/plugin.cpp
         src/obs/recording_session_controller.cpp
+        src/obs/websocket_vendor_api.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_plugin)
     alpha_recorder_apply_warnings(alpha_recorder_plugin)
     target_link_libraries(alpha_recorder_plugin PRIVATE alpha_recorder_core OBS::libobs OBS::frontend-api)
-    target_include_directories(alpha_recorder_plugin PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_include_directories(alpha_recorder_plugin PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/plugins/obs-websocket/lib>
+    )
 
     set_target_properties(alpha_recorder_plugin PROPERTIES
         OUTPUT_NAME "alpha_recorder"
@@ -352,6 +356,21 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
 
     alpha_recorder_add_e2e_scenario(happy_path "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/basic_pair.scenario")
     alpha_recorder_add_e2e_scenario(drop_backpressure "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/drop_backpressure.scenario")
+endif()
+
+if(BUILD_TESTING AND WIN32 AND ALPHA_RECORDER_ENABLE_OBS_APP_E2E)
+    add_test(NAME alpha_recorder.e2e.obs_app
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/run_obs_app_e2e.ps1"
+            -BuildDir "${CMAKE_CURRENT_BINARY_DIR}"
+            -StageDir "${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage"
+            -ObsRoot "${OBS_ROOT}"
+            -Configuration "$<CONFIG>"
+    )
+    set_tests_properties(alpha_recorder.e2e.obs_app PROPERTIES
+        LABELS "obs-app-e2e;e2e"
+        TIMEOUT 420
+    )
 endif()
 
 install(TARGETS alpha_recorder_core

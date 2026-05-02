@@ -3,6 +3,7 @@ include_guard(GLOBAL)
 option(ALPHA_RECORDER_BUILD_OBS_PLUGIN "Build the OBS module wrapper" ON)
 option(ALPHA_RECORDER_BUILD_UNIT_TESTS "Build the unit test targets" ON)
 option(ALPHA_RECORDER_BUILD_E2E_TESTS "Build the E2E test targets" ON)
+option(ALPHA_RECORDER_ENABLE_OBS_APP_E2E "Register the slow real OBS app E2E test on Windows" OFF)
 
 function(alpha_recorder_set_project_options)
     set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ language standard" FORCE)

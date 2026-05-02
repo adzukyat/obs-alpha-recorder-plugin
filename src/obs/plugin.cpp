@@ -39,6 +39,13 @@ extern "C" bool obs_module_load(void)
     return alpha_recorder::obs::initialize_module();
 }
 
+extern "C" void obs_module_post_load(void)
+{
+#if !defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
+    alpha_recorder::obs::register_websocket_vendor_api();
+#endif
+}
+
 MODULE_EXPORT bool alpha_recorder_sync_runtime_hooks(void)
 {
 #if defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
@@ -51,6 +58,7 @@ MODULE_EXPORT bool alpha_recorder_sync_runtime_hooks(void)
 extern "C" void obs_module_unload(void)
 {
 #if !defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
+    alpha_recorder::obs::unregister_websocket_vendor_api();
     alpha_recorder::obs::unregister_runtime_hooks();
 #endif
 }
