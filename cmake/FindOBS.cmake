@@ -7,6 +7,8 @@ set(_alpha_recorder_obs_root_candidates
     "$ENV{OBS_ROOT}"
     "$ENV{OBS_INSTALL_DIR}"
     "$ENV{OBS_DIR}"
+    "/Applications/OBS.app/Contents"
+    "/Applications/OBS Studio.app/Contents"
 )
 
 set(_alpha_recorder_obs_build_root_candidates)
@@ -43,19 +45,32 @@ list(REMOVE_DUPLICATES _alpha_recorder_obs_build_root_candidates)
 find_path(OBS_INCLUDE_DIR
     NAMES obs-module.h obs.h
     HINTS ${_alpha_recorder_obs_hint_paths}
+        "${CMAKE_CURRENT_LIST_DIR}/../deps/obs/obs-studio"
     PATH_SUFFIXES include libobs/include libobs libobs/libobs
 )
 
 find_path(OBS_CONFIG_INCLUDE_DIR
     NAMES obsconfig.h obs-config.h
     HINTS ${_alpha_recorder_obs_hint_paths}
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/obs"
+        "${CMAKE_CURRENT_LIST_DIR}/../deps/obs/obs-studio"
     PATH_SUFFIXES include libobs/include libobs libobs/libobs config build/config
 )
 
 find_library(OBS_LIBOBS_LIBRARY
     NAMES libobs obs
     HINTS ${_alpha_recorder_obs_hint_paths}
-    PATH_SUFFIXES lib bin/64bit bin libobs/lib libobs/RelWithDebInfo build/libobs/Debug build/libobs/Release build/libobs/RelWithDebInfo
+    PATH_SUFFIXES
+        lib
+        bin/64bit
+        bin
+        Frameworks/libobs.framework/Versions/A
+        Frameworks/libobs.framework
+        libobs/lib
+        libobs/RelWithDebInfo
+        build/libobs/Debug
+        build/libobs/Release
+        build/libobs/RelWithDebInfo
 )
 
 find_file(OBS_LIBOBS_DLL
@@ -70,9 +85,17 @@ find_path(OBS_FRONTEND_API_INCLUDE_DIR
 )
 
 find_library(OBS_FRONTEND_API_LIBRARY
-    NAMES obs-frontend-api
+    NAMES obs-frontend-api.dylib obs-frontend-api libobs-frontend-api
     HINTS ${_alpha_recorder_obs_build_root_candidates}
-    PATH_SUFFIXES frontend/api/RelWithDebInfo frontend/api/Debug frontend/api/Release frontend/api
+        ${_alpha_recorder_obs_hint_paths}
+    PATH_SUFFIXES Frameworks frontend/api/RelWithDebInfo frontend/api/Debug frontend/api/Release frontend/api
+)
+
+find_path(OBS_SIMDE_INCLUDE_DIR
+    NAMES simde/x86/sse2.h
+    HINTS ${_alpha_recorder_obs_hint_paths}
+    PATHS /opt/homebrew/include /usr/local/include
+    PATH_SUFFIXES include
 )
 
 find_file(OBS_FRONTEND_API_DLL
@@ -89,6 +112,9 @@ if(OBS_INCLUDE_DIR AND OBS_LIBOBS_LIBRARY)
     set(_alpha_recorder_obs_include_dirs "${OBS_INCLUDE_DIR}")
     if(OBS_CONFIG_INCLUDE_DIR)
         list(APPEND _alpha_recorder_obs_include_dirs "${OBS_CONFIG_INCLUDE_DIR}")
+    endif()
+    if(OBS_SIMDE_INCLUDE_DIR)
+        list(APPEND _alpha_recorder_obs_include_dirs "${OBS_SIMDE_INCLUDE_DIR}")
     endif()
 
     if(WIN32)
@@ -140,4 +166,4 @@ find_package_handle_standard_args(OBS
     REQUIRED_VARS OBS_INCLUDE_DIR OBS_CONFIG_INCLUDE_DIR OBS_LIBOBS_LIBRARY
 )
 
-mark_as_advanced(OBS_INCLUDE_DIR OBS_CONFIG_INCLUDE_DIR OBS_LIBOBS_LIBRARY OBS_LIBOBS_DLL OBS_FRONTEND_API_INCLUDE_DIR OBS_FRONTEND_API_LIBRARY OBS_FRONTEND_API_DLL)
+mark_as_advanced(OBS_INCLUDE_DIR OBS_CONFIG_INCLUDE_DIR OBS_LIBOBS_LIBRARY OBS_LIBOBS_DLL OBS_FRONTEND_API_INCLUDE_DIR OBS_FRONTEND_API_LIBRARY OBS_FRONTEND_API_DLL OBS_SIMDE_INCLUDE_DIR)

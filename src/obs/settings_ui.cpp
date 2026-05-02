@@ -22,6 +22,8 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
+#else
+#include <dlfcn.h>
 #endif
 
 OBS_DECLARE_MODULE()
@@ -52,8 +54,7 @@ namespace
 #ifdef _WIN32
         return reinterpret_cast<RuntimeSyncFunction>(GetProcAddress(static_cast<HMODULE>(module_lib), "alpha_recorder_sync_runtime_hooks"));
 #else
-        (void)module_lib;
-        return nullptr;
+        return reinterpret_cast<RuntimeSyncFunction>(dlsym(module_lib, "alpha_recorder_sync_runtime_hooks"));
 #endif
     }
 

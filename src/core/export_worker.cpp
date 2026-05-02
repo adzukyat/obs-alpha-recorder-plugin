@@ -26,6 +26,14 @@ extern "C"
 #include <libswscale/swscale.h>
 }
 
+#if !defined(FF_PROFILE_HEVC_REXT) && defined(AV_PROFILE_HEVC_REXT)
+#define FF_PROFILE_HEVC_REXT AV_PROFILE_HEVC_REXT
+#endif
+
+#if !defined(FF_PROFILE_PRORES_4444) && defined(AV_PROFILE_PRORES_4444)
+#define FF_PROFILE_PRORES_4444 AV_PROFILE_PRORES_4444
+#endif
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX

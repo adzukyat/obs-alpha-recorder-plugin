@@ -26,11 +26,40 @@ alpha_recorder_fetch_test_deps()
 include(CTest)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/obs")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/obs/obsconfig.h"
+"#pragma once
+
+#define OBS_DATA_PATH \"Resources\"
+#define OBS_PLUGIN_PATH \"PlugIns\"
+#define OBS_PLUGIN_DESTINATION \"PlugIns\"
+#define OBS_RELEASE_CANDIDATE 0
+#define OBS_BETA 0
+")
 find_package(OBS REQUIRED MODULE)
 find_package(jansson REQUIRED)
 find_package(FFmpeg REQUIRED avcodec avformat avutil swscale)
 
-set(alpha_recorder_obs_runtime_bin_dir "${OBS_ROOT}/bin/64bit")
+if(APPLE)
+    if(EXISTS "${OBS_ROOT}/Frameworks")
+        set(alpha_recorder_obs_runtime_bin_dir "${OBS_ROOT}/Frameworks")
+    else()
+        set(alpha_recorder_obs_runtime_bin_dir "${OBS_ROOT}/bin")
+    endif()
+
+    if(EXISTS "${OBS_ROOT}/PlugIns")
+        set(alpha_recorder_obs_plugin_dir "${OBS_ROOT}/PlugIns")
+    else()
+        set(alpha_recorder_obs_plugin_dir "${OBS_ROOT}/obs-plugins")
+    endif()
+else()
+    set(alpha_recorder_obs_runtime_bin_dir "${OBS_ROOT}/bin/64bit")
+    set(alpha_recorder_obs_plugin_dir "${OBS_ROOT}/obs-plugins/64bit")
+endif()
+
+if(APPLE)
+    list(APPEND CMAKE_BUILD_RPATH "${alpha_recorder_obs_runtime_bin_dir}")
+endif()
 
 add_library(alpha_recorder_core STATIC
     src/core/pair_gate.cpp
@@ -76,18 +105,19 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
             BUNDLE_EXTENSION plugin
         )
         add_custom_command(TARGET alpha_recorder_plugin POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                     "$<TARGET_BUNDLE_DIR:alpha_recorder_plugin>"
-                    "${OBS_ROOT}/obs-plugins/alpha_recorder.plugin"
+                    "${alpha_recorder_obs_plugin_dir}/alpha_recorder.plugin"
+            COMMAND codesign --force --sign - "${alpha_recorder_obs_plugin_dir}/alpha_recorder.plugin"
             VERBATIM
         )
     else()
         add_custom_command(TARGET alpha_recorder_plugin POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "$<TARGET_FILE:alpha_recorder_plugin>"
-                    "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_plugin>"
+                    "${alpha_recorder_obs_plugin_dir}/$<TARGET_FILE_NAME:alpha_recorder_plugin>"
             VERBATIM
         )
     endif()
@@ -106,11 +136,24 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
 
         find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
+        if(APPLE AND EXISTS "${OBS_ROOT}/Frameworks/QtWidgets.framework")
+            foreach(_alpha_recorder_qt_component IN ITEMS Core Gui Widgets)
+                if(TARGET Qt6::${_alpha_recorder_qt_component})
+                    set_target_properties(Qt6::${_alpha_recorder_qt_component} PROPERTIES
+                        IMPORTED_LOCATION "${OBS_ROOT}/Frameworks/Qt${_alpha_recorder_qt_component}.framework/Versions/A/Qt${_alpha_recorder_qt_component}"
+                        IMPORTED_LOCATION_RELEASE "${OBS_ROOT}/Frameworks/Qt${_alpha_recorder_qt_component}.framework/Versions/A/Qt${_alpha_recorder_qt_component}"
+                        IMPORTED_LOCATION_RELWITHDEBINFO "${OBS_ROOT}/Frameworks/Qt${_alpha_recorder_qt_component}.framework/Versions/A/Qt${_alpha_recorder_qt_component}"
+                    )
+                endif()
+            endforeach()
+        endif()
+
         add_library(alpha_recorder_frontend MODULE
             src/obs/settings_ui.cpp
         )
         alpha_recorder_setup_target(alpha_recorder_frontend)
         alpha_recorder_apply_warnings(alpha_recorder_frontend)
+        target_compile_definitions(alpha_recorder_frontend PRIVATE QT_NO_VERSION_TAGGING)
         target_include_directories(alpha_recorder_frontend PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
         target_link_libraries(alpha_recorder_frontend PRIVATE alpha_recorder_core OBS::libobs OBS::frontend-api Qt6::Widgets)
         set_target_properties(alpha_recorder_frontend PROPERTIES
@@ -124,18 +167,19 @@ if(ALPHA_RECORDER_BUILD_OBS_PLUGIN)
                 BUNDLE_EXTENSION plugin
             )
             add_custom_command(TARGET alpha_recorder_frontend POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
                 COMMAND ${CMAKE_COMMAND} -E copy_directory
                         "$<TARGET_BUNDLE_DIR:alpha_recorder_frontend>"
-                        "${OBS_ROOT}/obs-plugins/alpha_recorder_frontend.plugin"
+                        "${alpha_recorder_obs_plugin_dir}/alpha_recorder_frontend.plugin"
+                COMMAND codesign --force --sign - "${alpha_recorder_obs_plugin_dir}/alpha_recorder_frontend.plugin"
                 VERBATIM
             )
         else()
             add_custom_command(TARGET alpha_recorder_frontend POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         "$<TARGET_FILE:alpha_recorder_frontend>"
-                        "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_frontend>"
+                        "${alpha_recorder_obs_plugin_dir}/$<TARGET_FILE_NAME:alpha_recorder_frontend>"
                 VERBATIM
             )
         endif()
@@ -163,18 +207,19 @@ if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
             BUNDLE_EXTENSION plugin
         )
         add_custom_command(TARGET alpha_recorder_e2e_output POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory
                     "$<TARGET_BUNDLE_DIR:alpha_recorder_e2e_output>"
-                    "${OBS_ROOT}/obs-plugins/alpha_recorder_e2e.plugin"
+                    "${alpha_recorder_obs_plugin_dir}/alpha_recorder_e2e.plugin"
+            COMMAND codesign --force --sign - "${alpha_recorder_obs_plugin_dir}/alpha_recorder_e2e.plugin"
             VERBATIM
         )
     else()
         add_custom_command(TARGET alpha_recorder_e2e_output POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${OBS_ROOT}/obs-plugins/64bit"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "$<TARGET_FILE:alpha_recorder_e2e_output>"
-                    "${OBS_ROOT}/obs-plugins/64bit/$<TARGET_FILE_NAME:alpha_recorder_e2e_output>"
+                    "${alpha_recorder_obs_plugin_dir}/$<TARGET_FILE_NAME:alpha_recorder_e2e_output>"
             VERBATIM
         )
     endif()
