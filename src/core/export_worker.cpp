@@ -763,7 +763,8 @@ namespace alpha_recorder::obs
 
             std::size_t next_alpha_index = 0;
             bool success = true;
-            while (success)
+            bool alpha_exhausted = entries.empty();
+            while (success && !alpha_exhausted)
             {
                 const int ret = av_read_frame(input.format, packet);
                 if (ret == AVERROR_EOF)
@@ -805,7 +806,7 @@ namespace alpha_recorder::obs
                         if (next_alpha_index >= entries.size())
                         {
                             av_frame_unref(decoded_frame.frame);
-                            success = set_error(error_message, "Alpha Recorder decoded more video frames than the sidecar contains.");
+                            alpha_exhausted = true;
                             break;
                         }
 
@@ -834,6 +835,11 @@ namespace alpha_recorder::obs
                     {
                         break;
                     }
+
+                    if (alpha_exhausted)
+                    {
+                        break;
+                    }
                 }
 
                 av_packet_unref(packet);
@@ -845,51 +851,59 @@ namespace alpha_recorder::obs
                 return false;
             }
 
-            int ret = avcodec_send_packet(input.decoder, nullptr);
-            if (ret < 0 && ret != AVERROR_EOF)
+            if (alpha_exhausted || next_alpha_index >= entries.size())
             {
-                return set_error(error_message, std::string{"Alpha Recorder failed to flush the video decoder: "} + av_error_message(ret));
+                alpha_exhausted = true;
+            }
+            else
+            {
+                int ret = avcodec_send_packet(input.decoder, nullptr);
+                if (ret < 0 && ret != AVERROR_EOF)
+                {
+                    return set_error(error_message, std::string{"Alpha Recorder failed to flush the video decoder: "} + av_error_message(ret));
+                }
+
+                while (true)
+                {
+                    ret = avcodec_receive_frame(input.decoder, decoded_frame.frame);
+                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                    {
+                        break;
+                    }
+
+                    if (ret < 0)
+                    {
+                        return set_error(error_message, std::string{"Alpha Recorder failed while draining the video decoder: "} + av_error_message(ret));
+                    }
+
+                    if (next_alpha_index >= entries.size())
+                    {
+                        av_frame_unref(decoded_frame.frame);
+                        alpha_exhausted = true;
+                        break;
+                    }
+
+                    const AlphaIndexEntry &entry = entries[next_alpha_index];
+                    AlphaSidecarFrame alpha_frame;
+                    if (!sidecar_reader.read_frame(entry, alpha_frame, error_message))
+                    {
+                        av_frame_unref(decoded_frame.frame);
+                        return false;
+                    }
+
+                    const bool frame_encoded = encode_frame(output, decoded_frame.frame, entry, alpha_frame, bgra_frame, yuva_frame,
+                                                            source_to_bgra, bgra_to_yuva, error_message);
+                    av_frame_unref(decoded_frame.frame);
+                    if (!frame_encoded)
+                    {
+                        return false;
+                    }
+
+                    ++next_alpha_index;
+                }
             }
 
-            while (true)
-            {
-                ret = avcodec_receive_frame(input.decoder, decoded_frame.frame);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                {
-                    break;
-                }
-
-                if (ret < 0)
-                {
-                    return set_error(error_message, std::string{"Alpha Recorder failed while draining the video decoder: "} + av_error_message(ret));
-                }
-
-                if (next_alpha_index >= entries.size())
-                {
-                    av_frame_unref(decoded_frame.frame);
-                    return set_error(error_message, "Alpha Recorder decoded more video frames than the sidecar contains.");
-                }
-
-                const AlphaIndexEntry &entry = entries[next_alpha_index];
-                AlphaSidecarFrame alpha_frame;
-                if (!sidecar_reader.read_frame(entry, alpha_frame, error_message))
-                {
-                    av_frame_unref(decoded_frame.frame);
-                    return false;
-                }
-
-                const bool frame_encoded = encode_frame(output, decoded_frame.frame, entry, alpha_frame, bgra_frame, yuva_frame,
-                                                        source_to_bgra, bgra_to_yuva, error_message);
-                av_frame_unref(decoded_frame.frame);
-                if (!frame_encoded)
-                {
-                    return false;
-                }
-
-                ++next_alpha_index;
-            }
-
-            if (next_alpha_index != entries.size())
+            if (next_alpha_index == 0 && !entries.empty())
             {
                 return set_error(error_message, "Alpha Recorder decoded fewer video frames than the sidecar contains.");
             }

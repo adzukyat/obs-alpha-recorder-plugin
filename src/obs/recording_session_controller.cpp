@@ -218,6 +218,9 @@ namespace
         {
             switch (event)
             {
+            case OBS_FRONTEND_EVENT_RECORDING_STARTING:
+                break;
+
             case OBS_FRONTEND_EVENT_RECORDING_STARTED:
                 start_session();
                 break;
@@ -228,6 +231,10 @@ namespace
 
             case OBS_FRONTEND_EVENT_RECORDING_UNPAUSED:
                 set_recording_paused(false);
+                break;
+
+            case OBS_FRONTEND_EVENT_RECORDING_STOPPING:
+                set_recording_paused(true);
                 break;
 
             case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
@@ -279,7 +286,7 @@ namespace
             }
         }
 
-        bool start_session()
+        bool prepare_packet_callback()
         {
             const alpha_recorder::obs::Settings settings = alpha_recorder::obs::load_settings(obs_frontend_get_user_config());
             if (!settings.enabled)
@@ -298,6 +305,41 @@ namespace
             {
                 log_and_show_error("Alpha Recorder could not access the active recording output.", true);
                 return false;
+            }
+
+            recording_output_ = obs_output_get_ref(recording_output);
+            if (recording_output_ == nullptr)
+            {
+                log_and_show_error("Alpha Recorder could not retain a reference to the recording output.", true);
+                return false;
+            }
+
+            return true;
+        }
+
+        bool start_session()
+        {
+            const alpha_recorder::obs::Settings settings = alpha_recorder::obs::load_settings(obs_frontend_get_user_config());
+            if (!settings.enabled)
+            {
+                return true;
+            }
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (session_active_)
+            {
+                return true;
+            }
+
+            obs_output_t *recording_output = recording_output_;
+            if (recording_output == nullptr)
+            {
+                recording_output = obs_frontend_get_recording_output();
+                if (recording_output == nullptr)
+                {
+                    log_and_show_error("Alpha Recorder could not access the active recording output.", true);
+                    return false;
+                }
             }
 
             obs_video_info video_info = {};
@@ -339,11 +381,14 @@ namespace
                 return false;
             }
 
-            recording_output_ = obs_output_get_ref(recording_output);
             if (recording_output_ == nullptr)
             {
-                log_and_show_error("Alpha Recorder could not retain a reference to the recording output.", true);
-                return false;
+                recording_output_ = obs_output_get_ref(recording_output);
+                if (recording_output_ == nullptr)
+                {
+                    log_and_show_error("Alpha Recorder could not retain a reference to the recording output.", true);
+                    return false;
+                }
             }
 
             finalization_format_ = settings.finalization_format;
@@ -371,9 +416,6 @@ namespace
                 signal_handler_connect(signal_handler, "file_changed", &RecordingSessionController::on_file_changed, this);
                 file_changed_connected_ = true;
             }
-
-            obs_output_add_packet_callback(recording_output_, &RecordingSessionController::on_packet, this);
-            packet_callback_connected_ = true;
 
             struct video_scale_info conversion = {};
             conversion.format = VIDEO_FORMAT_BGRA;
@@ -618,7 +660,6 @@ namespace
             }
 
             std::string error_message;
-            bool should_log_overload = false;
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -645,40 +686,19 @@ namespace
                     return;
                 }
 
-                alpha_recorder::AlphaFrameMatch match{};
-                if (matcher_.add_frame(pending_frame.composition_timestamp_ns, pending_frame.pair.alpha.bytes.size(), match))
+                pending_frame.pair.pts = pending_frame.composition_timestamp_ns;
+                if (!writer_.write_pair(pending_frame.pair))
                 {
-                    pending_frame.pair.pts = match.packet_pts;
-                    if (!writer_.write_pair(pending_frame.pair))
-                    {
-                        session_aborted_ = true;
-                        pending_frames_.clear();
-                        matcher_.clear();
-                        error_message = "Alpha Recorder failed to write a matched alpha frame.";
-                    }
-
-                    should_log_overload = false;
-                    goto end_lock_raw;
-                }
-
-                pending_frames_.push_back(std::move(pending_frame));
-
-                if (matcher_.overflowed())
-                {
-                    should_log_overload = true;
-                    abort_overflow_locked("Alpha Recorder aborted alpha capture because the pending-frame queue overflowed.", error_message);
+                    session_aborted_ = true;
+                    pending_frames_.clear();
+                    matcher_.clear();
+                    error_message = "Alpha Recorder failed to write an alpha frame.";
                 }
             }
 
-        end_lock_raw:
             if (!error_message.empty())
             {
                 log_and_show_error(error_message, false);
-            }
-
-            if (should_log_overload)
-            {
-                return;
             }
         }
 
@@ -706,11 +726,7 @@ namespace
 
                 const std::uint64_t matched_pts = static_cast<std::uint64_t>(packet_pts);
                 std::optional<std::uint64_t> packet_cts{};
-                if (packet_time != nullptr)
-                {
-                    packet_cts = packet_time->cts;
-                }
-                else if (!missing_packet_timing_logged_)
+                if (packet_time == nullptr && !missing_packet_timing_logged_)
                 {
                     missing_packet_timing_logged_ = true;
                     should_log_missing_packet_timing = true;
