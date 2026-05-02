@@ -54,6 +54,9 @@ git submodule update --init --recursive
 cmake -DREPO_ROOT="$PWD" -DBUILD_FROM_SOURCE=ON -P cmake/scripts/BootstrapObs.cmake
 ```
 
+On macOS this uses OBS Studio's required Xcode generator for the OBS dependency
+build. On Windows it uses Visual Studio by default.
+
 If you already have an OBS source checkout, use `-DBUILD_FROM_SOURCE=ON` to
 stage it into the OBS build tree's runtime prefix without recloning. If you want
 the bootstrap script to refresh the submodule checkout from the pinned OBS tag,

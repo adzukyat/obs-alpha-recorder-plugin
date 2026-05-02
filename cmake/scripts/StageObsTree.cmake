@@ -33,6 +33,7 @@ if(OBS_ROOT STREQUAL "")
 endif()
 
 alpha_recorder_abs_path(OBS_ROOT "${OBS_ROOT}" "${REPO_ROOT}")
+alpha_recorder_resolve_obs_runtime_root(OBS_ROOT "${OBS_ROOT}")
 alpha_recorder_validate_obs_runtime("${OBS_ROOT}")
 
 function(alpha_recorder_find_plugin out_var plugin_name)

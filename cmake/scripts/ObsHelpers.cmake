@@ -41,7 +41,22 @@ function(alpha_recorder_any_exists out_var)
     set(${out_var} "${found}" PARENT_SCOPE)
 endfunction()
 
+function(alpha_recorder_resolve_obs_runtime_root out_var obs_root)
+    set(resolved "${obs_root}")
+    if(APPLE)
+        if(EXISTS "${resolved}/OBS.app/Contents")
+            set(resolved "${resolved}/OBS.app/Contents")
+        elseif(EXISTS "${resolved}/Contents")
+            set(resolved "${resolved}/Contents")
+        endif()
+    endif()
+    cmake_path(ABSOLUTE_PATH resolved NORMALIZE OUTPUT_VARIABLE resolved)
+    set(${out_var} "${resolved}" PARENT_SCOPE)
+endfunction()
+
 function(alpha_recorder_validate_obs_runtime obs_root)
+    alpha_recorder_resolve_obs_runtime_root(obs_root "${obs_root}")
+
     if(APPLE)
         set(bin_dir "${obs_root}/bin")
         set(plugin_dir "${obs_root}/obs-plugins")
@@ -85,6 +100,8 @@ function(alpha_recorder_validate_obs_developer source_dir build_dir configuratio
         alpha_recorder_any_exists(has_library
             "${build_dir}/libobs/libobs.dylib"
             "${build_dir}/libobs/${configuration}/libobs.dylib"
+            "${build_dir}/libobs/libobs.framework"
+            "${build_dir}/libobs/${configuration}/libobs.framework"
         )
     else()
         alpha_recorder_any_exists(has_library

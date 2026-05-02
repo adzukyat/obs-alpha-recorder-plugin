@@ -35,6 +35,7 @@ namespace
 
     std::filesystem::path read_environment_path(const char *name)
     {
+#ifdef _WIN32
         size_t required_size = 0;
         if (getenv_s(&required_size, nullptr, 0, name) != 0 || required_size == 0U)
         {
@@ -53,6 +54,15 @@ namespace
         }
 
         return std::filesystem::path{value};
+#else
+        const char *value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0')
+        {
+            return {};
+        }
+
+        return std::filesystem::path{value};
+#endif
     }
 
     std::filesystem::path resolve_artifact_root(int argc, char **argv)
@@ -182,11 +192,6 @@ namespace
         }
 
         return payload;
-    }
-
-    bool contains_text(const std::string &text, const std::string &needle)
-    {
-        return text.find(needle) != std::string::npos;
     }
 
     std::string read_text_file(const std::filesystem::path &file_path)

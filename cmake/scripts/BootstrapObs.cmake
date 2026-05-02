@@ -19,7 +19,7 @@ set(BUILD_FROM_SOURCE OFF CACHE BOOL "Build OBS from source")
 
 if(GENERATOR STREQUAL "")
     if(APPLE)
-        set(GENERATOR "Ninja")
+        set(GENERATOR "Xcode")
     elseif(WIN32)
         set(GENERATOR "Visual Studio 17 2022")
     else()
@@ -90,16 +90,38 @@ else()
 endif()
 
 set(configure_args -S "${SOURCE_DIR}" -B "${BUILD_DIR}" -G "${GENERATOR}" "-DCMAKE_INSTALL_PREFIX=${INSTALL_DIR}")
+if(APPLE)
+    list(APPEND configure_args
+        "-DCMAKE_PROJECT_INCLUDE=${CMAKE_CURRENT_LIST_DIR}/ObsBootstrapProjectInclude.cmake"
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0"
+        "-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF"
+        "-DOBS_COMPILE_DEPRECATION_AS_WARNING=ON"
+        "-DENABLE_VIRTUALCAM=OFF"
+    )
+endif()
 if(NOT ARCHITECTURE STREQUAL "")
     list(APPEND configure_args -A "${ARCHITECTURE}")
+endif()
+
+set(_alpha_recorder_obs_cache "${BUILD_DIR}/CMakeCache.txt")
+if(EXISTS "${_alpha_recorder_obs_cache}")
+    file(STRINGS "${_alpha_recorder_obs_cache}" _alpha_recorder_obs_cached_generator REGEX "^CMAKE_GENERATOR:INTERNAL=" LIMIT_COUNT 1)
+    if(_alpha_recorder_obs_cached_generator)
+        string(REGEX REPLACE "^CMAKE_GENERATOR:INTERNAL=" "" _alpha_recorder_obs_cached_generator "${_alpha_recorder_obs_cached_generator}")
+        if(NOT _alpha_recorder_obs_cached_generator STREQUAL GENERATOR)
+            message(STATUS "Removing stale OBS build directory configured with ${_alpha_recorder_obs_cached_generator}; expected ${GENERATOR}")
+            file(REMOVE_RECURSE "${BUILD_DIR}")
+        endif()
+    endif()
 endif()
 
 execute_process(COMMAND "${CMAKE_COMMAND}" ${configure_args} COMMAND_ERROR_IS_FATAL ANY)
 execute_process(COMMAND "${CMAKE_COMMAND}" --build "${BUILD_DIR}" --config "${CONFIGURATION}" --target install COMMAND_ERROR_IS_FATAL ANY)
 
-alpha_recorder_validate_obs_runtime("${INSTALL_DIR}")
+alpha_recorder_resolve_obs_runtime_root(OBS_RUNTIME_ROOT "${INSTALL_DIR}")
+alpha_recorder_validate_obs_runtime("${OBS_RUNTIME_ROOT}")
 alpha_recorder_validate_obs_developer("${SOURCE_DIR}" "${BUILD_DIR}" "${CONFIGURATION}")
-alpha_recorder_write_obs_root_config("${INSTALL_DIR}" "${CONFIG_FILE}")
+alpha_recorder_write_obs_root_config("${OBS_RUNTIME_ROOT}" "${CONFIG_FILE}")
 
 alpha_recorder_write_json_manifest("${REPO_ROOT}/deps/obs/obs-source.manifest.json"
     "sourceUrl=${SOURCE_URL}"
@@ -107,6 +129,7 @@ alpha_recorder_write_json_manifest("${REPO_ROOT}/deps/obs/obs-source.manifest.js
     "sourceDir=${SOURCE_DIR}"
     "buildDir=${BUILD_DIR}"
     "installDir=${INSTALL_DIR}"
+    "obsRoot=${OBS_RUNTIME_ROOT}"
     "generator=${GENERATOR}"
     "architecture=${ARCHITECTURE}"
     "configuration=${CONFIGURATION}"

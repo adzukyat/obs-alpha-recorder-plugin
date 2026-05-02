@@ -34,6 +34,7 @@
       },
       "cacheVariables": {
         "CMAKE_OSX_ARCHITECTURES": "x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
         "ALPHA_RECORDER_BUILD_OBS_PLUGIN": "ON",
         "ALPHA_RECORDER_BUILD_UNIT_TESTS": "ON",
@@ -52,6 +53,7 @@
       },
       "cacheVariables": {
         "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
         "ALPHA_RECORDER_BUILD_OBS_PLUGIN": "ON",
         "ALPHA_RECORDER_BUILD_UNIT_TESTS": "ON",
@@ -70,6 +72,7 @@
       },
       "cacheVariables": {
         "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
         "ALPHA_RECORDER_BUILD_OBS_PLUGIN": "OFF",
         "ALPHA_RECORDER_BUILD_UNIT_TESTS": "ON",

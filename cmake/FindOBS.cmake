@@ -73,6 +73,18 @@ find_library(OBS_LIBOBS_LIBRARY
         build/libobs/RelWithDebInfo
 )
 
+if(APPLE AND OBS_ROOT AND EXISTS "${OBS_ROOT}/Frameworks/libobs.framework")
+    set(OBS_LIBOBS_LIBRARY "${OBS_ROOT}/Frameworks/libobs.framework" CACHE FILEPATH "OBS libobs framework" FORCE)
+endif()
+
+if(APPLE AND NOT OBS_LIBOBS_LIBRARY)
+    find_path(OBS_LIBOBS_LIBRARY
+        NAMES libobs
+        HINTS ${_alpha_recorder_obs_hint_paths}
+        PATH_SUFFIXES Frameworks/libobs.framework libobs/RelWithDebInfo/libobs.framework
+    )
+endif()
+
 find_file(OBS_LIBOBS_DLL
     NAMES libobs.dll obs.dll
     HINTS ${_alpha_recorder_obs_hint_paths}
@@ -90,6 +102,22 @@ find_library(OBS_FRONTEND_API_LIBRARY
         ${_alpha_recorder_obs_hint_paths}
     PATH_SUFFIXES Frameworks frontend/api/RelWithDebInfo frontend/api/Debug frontend/api/Release frontend/api
 )
+
+if(APPLE AND OBS_ROOT)
+    if(EXISTS "${OBS_ROOT}/Frameworks/obs-frontend-api.dylib")
+        set(OBS_FRONTEND_API_LIBRARY "${OBS_ROOT}/Frameworks/obs-frontend-api.dylib" CACHE FILEPATH "OBS frontend API library" FORCE)
+    elseif(EXISTS "${OBS_ROOT}/Frameworks/libobs-frontend-api.1.dylib")
+        set(OBS_FRONTEND_API_LIBRARY "${OBS_ROOT}/Frameworks/libobs-frontend-api.1.dylib" CACHE FILEPATH "OBS frontend API library" FORCE)
+    endif()
+endif()
+
+if(APPLE AND NOT OBS_FRONTEND_API_LIBRARY)
+    find_file(OBS_FRONTEND_API_LIBRARY
+        NAMES obs-frontend-api.dylib libobs-frontend-api.1.dylib
+        HINTS ${_alpha_recorder_obs_hint_paths}
+        PATH_SUFFIXES Frameworks frontend/api/RelWithDebInfo frontend/api/Debug frontend/api/Release frontend/api
+    )
+endif()
 
 find_path(OBS_SIMDE_INCLUDE_DIR
     NAMES simde/x86/sse2.h
