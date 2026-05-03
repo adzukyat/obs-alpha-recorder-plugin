@@ -96,8 +96,8 @@ namespace alpha_recorder::obs
         {
             AlphaMaskVideoWriterConfig config{};
             config.finalization_format = format;
-            config.width = 16U;
-            config.height = 16U;
+            config.width = 1920U;
+            config.height = 1080U;
             config.fps_num = 30U;
             config.fps_den = 1U;
             return config;
