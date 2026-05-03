@@ -2,11 +2,11 @@
 
 `alpha_recorder` is an OBS native plugin that follows the normal OBS recording
 lifecycle. Enable it from Tools -> Alpha Recorder Settings, then use OBS Start
-Recording / Stop Recording as usual. When enabled, it captures alpha-preserving
-Program frames and writes a playable grayscale alpha-mask movie beside each
-recording while OBS records the normal RGB video. On stop, and whenever OBS
-signals `file_changed` for a split recording, it finalizes the current mask
-movie segment.
+Recording / Stop Recording as usual. When enabled, it extracts the Program
+texture's alpha on the GPU and writes a playable grayscale alpha-mask movie
+beside each recording while OBS records the normal RGB video. On stop, and
+whenever OBS signals `file_changed` for a split recording, it finalizes the
+current mask movie segment.
 
 Supported mask formats are lossless PNG MOV (`mask_png_mov`, `.mov`), HEVC
 NVENC (`mask_hevc_nvenc`, `.mp4`), and HEVC AMF (`mask_hevc_amf`, `.mp4`). The
@@ -20,7 +20,8 @@ on the current machine.
 
 Mask encoding runs behind a bounded asynchronous queue. If the selected mask
 encoder cannot keep up, Alpha Recorder aborts the mask movie output instead of
-blocking or slowing the main OBS recording.
+blocking or slowing the main OBS recording. OBS's normal NV12/P010 hardware
+encoder path does not need to be changed to RGBA for alpha capture.
 
 Scenario files live only under `tests/e2e/scenarios`. They are inputs for the
 deterministic E2E harness, not part of the shipping plugin path.
@@ -170,7 +171,8 @@ Implemented in the core library and live OBS workflow:
   bounded asynchronous writer queue
 - OBS recording lifecycle hooks, settings persistence, Tools menu integration,
   and obs-websocket vendor automation
-- raw Program frame capture through OBS's alpha-preserving video callback path
+- GPU-side Program alpha extraction that keeps OBS's normal recording color
+  format independent of Alpha Recorder
 - split recording handling through OBS `file_changed`
 - deterministic E2E scenarios that validate RGB raw artifacts, alpha mask
   artifacts, and split-rotation behavior through the OBS module boundary

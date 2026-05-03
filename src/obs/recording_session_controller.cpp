@@ -1,26 +1,21 @@
 #include "alpha_recorder/export_worker.hpp"
-#include "alpha_recorder/frame_matcher.hpp"
-#include "alpha_recorder/frame_pair.hpp"
 #include "alpha_recorder/plugin.hpp"
 #include "recording_session_controller_gate.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
-#include <deque>
 #include <filesystem>
-#include <limits>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
+#include <graphics/vec4.h>
 #include <util/bmem.h>
-#include <util/util_uint64.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -33,17 +28,47 @@ namespace
 {
 
     using alpha_recorder::obs::AlphaMaskVideoWriter;
-    using alpha_recorder::FramePair;
 
-    constexpr std::size_t kMaxPendingFrames = 120U;
-    constexpr std::size_t kMaxPendingPackets = 120U;
-    constexpr std::size_t kMaxPendingBytes = 32U * 1024U * 1024U;
+    constexpr std::size_t kAlphaStageSurfaceCount = 3U;
 
-    struct PendingFrame
+    constexpr std::string_view kAlphaExtractEffect = R"(
+uniform float4x4 ViewProj;
+uniform texture2d image;
+
+sampler_state def_sampler {
+    Filter   = Point;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+struct VertInOut {
+    float4 pos : POSITION;
+    float2 uv  : TEXCOORD0;
+};
+
+VertInOut VSDefault(VertInOut vert_in)
+{
+    VertInOut vert_out;
+    vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
+    vert_out.uv  = vert_in.uv;
+    return vert_out;
+}
+
+float4 PSAlpha(VertInOut vert_in) : TARGET
+{
+    float alpha = image.Sample(def_sampler, vert_in.uv).a;
+    return float4(alpha, alpha, alpha, 1.0);
+}
+
+technique Draw
+{
+    pass
     {
-        FramePair pair{};
-        std::uint64_t composition_timestamp_ns = 0;
-    };
+        vertex_shader = VSDefault(vert_in);
+        pixel_shader  = PSAlpha(vert_in);
+    }
+}
+)";
 
     std::filesystem::path path_from_utf8(const char *text)
     {
@@ -127,56 +152,197 @@ namespace
 #endif
     }
 
-    bool output_supports_alpha(enum video_format format)
+    void copy_alpha_plane(std::vector<std::uint8_t> &alpha,
+                          const std::uint8_t *source,
+                          std::uint32_t source_linesize,
+                          std::uint32_t width,
+                          std::uint32_t height)
     {
-        return format == VIDEO_FORMAT_BGRA || format == VIDEO_FORMAT_RGBA;
-    }
-
-    std::vector<std::uint8_t> extract_alpha_plane(const video_data *frame,
-                                                  const obs_video_info &video_info)
-    {
-        if (frame == nullptr || frame->data[0] == nullptr)
-        {
-            return {};
-        }
-
-        const std::uint32_t width = video_info.output_width;
-        const std::uint32_t height = video_info.output_height;
-        if (width == 0U || height == 0U)
-        {
-            return {};
-        }
-
         const std::size_t alpha_bytes = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-        if (width != 0U && alpha_bytes / static_cast<std::size_t>(width) != static_cast<std::size_t>(height))
-        {
-            return {};
-        }
+        alpha.resize(alpha_bytes);
 
-        const std::size_t source_row_bytes = static_cast<std::size_t>(width) * 4U;
-        if (source_row_bytes / 4U != width)
-        {
-            return {};
-        }
-
-        if (static_cast<std::size_t>(frame->linesize[0]) < source_row_bytes)
-        {
-            return {};
-        }
-
-        std::vector<std::uint8_t> alpha(alpha_bytes);
         for (std::uint32_t row = 0; row < height; ++row)
         {
-            const std::uint8_t *source_row = frame->data[0] + (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame->linesize[0]));
+            const std::uint8_t *source_row = source + (static_cast<std::size_t>(row) * static_cast<std::size_t>(source_linesize));
             std::uint8_t *dest_row = alpha.data() + (static_cast<std::size_t>(row) * static_cast<std::size_t>(width));
-            for (std::uint32_t column = 0; column < width; ++column)
+            std::copy(source_row, source_row + width, dest_row);
+        }
+    }
+
+    class AlphaPlaneExtractor
+    {
+    public:
+        bool ensure(std::uint32_t width, std::uint32_t height, std::string &error_message)
+        {
+            if (width == 0U || height == 0U)
             {
-                dest_row[column] = source_row[(static_cast<std::size_t>(column) * 4U) + 3U];
+                error_message = "Alpha Recorder cannot capture a zero-sized OBS frame.";
+                return false;
             }
+
+            if (effect_ != nullptr && mask_texture_ != nullptr && width_ == width && height_ == height)
+            {
+                return true;
+            }
+
+            destroy();
+
+            char *effect_error = nullptr;
+            effect_ = gs_effect_create(std::string{kAlphaExtractEffect}.c_str(), "alpha-recorder-alpha-extract.effect", &effect_error);
+            if (effect_ == nullptr)
+            {
+                error_message = effect_error != nullptr ? std::string{effect_error}
+                                                        : std::string{"Alpha Recorder could not create the alpha extraction shader."};
+                if (effect_error != nullptr)
+                {
+                    bfree(effect_error);
+                }
+                return false;
+            }
+
+            image_param_ = gs_effect_get_param_by_name(effect_, "image");
+            mask_texture_ = gs_texture_create(width, height, GS_R8, 1, nullptr, GS_RENDER_TARGET);
+            for (gs_stagesurf_t *&surface : stage_surfaces_)
+            {
+                surface = gs_stagesurface_create(width, height, GS_R8);
+            }
+
+            if (image_param_ == nullptr || mask_texture_ == nullptr || !stage_surfaces_ready())
+            {
+                error_message = "Alpha Recorder could not allocate GPU resources for alpha extraction.";
+                destroy();
+                return false;
+            }
+
+            width_ = width;
+            height_ = height;
+            next_stage_index_ = 0U;
+            staged_frame_count_ = 0U;
+            return true;
         }
 
-        return alpha;
-    }
+        bool capture_latest(std::vector<std::uint8_t> &alpha, std::string &error_message)
+        {
+            alpha.clear();
+
+            gs_texture_t *program_texture = obs_get_main_texture();
+            if (program_texture == nullptr)
+            {
+                return true;
+            }
+
+            if (staged_frame_count_ > 0U)
+            {
+                const std::size_t map_index = (next_stage_index_ + kAlphaStageSurfaceCount - 1U) % kAlphaStageSurfaceCount;
+                map_staged_surface(map_index, alpha, error_message);
+                if (!error_message.empty())
+                {
+                    return false;
+                }
+            }
+
+            if (!render_alpha_mask(program_texture))
+            {
+                return false;
+            }
+
+            gs_stage_texture(stage_surfaces_[next_stage_index_], mask_texture_);
+            next_stage_index_ = (next_stage_index_ + 1U) % kAlphaStageSurfaceCount;
+            if (staged_frame_count_ < kAlphaStageSurfaceCount)
+            {
+                ++staged_frame_count_;
+            }
+
+            return true;
+        }
+
+        void destroy() noexcept
+        {
+            for (gs_stagesurf_t *&surface : stage_surfaces_)
+            {
+                if (surface != nullptr)
+                {
+                    gs_stagesurface_destroy(surface);
+                    surface = nullptr;
+                }
+            }
+
+            if (mask_texture_ != nullptr)
+            {
+                gs_texture_destroy(mask_texture_);
+                mask_texture_ = nullptr;
+            }
+
+            if (effect_ != nullptr)
+            {
+                gs_effect_destroy(effect_);
+                effect_ = nullptr;
+            }
+
+            image_param_ = nullptr;
+            width_ = 0U;
+            height_ = 0U;
+            next_stage_index_ = 0U;
+            staged_frame_count_ = 0U;
+        }
+
+    private:
+        bool stage_surfaces_ready() const noexcept
+        {
+            return std::all_of(stage_surfaces_.begin(), stage_surfaces_.end(),
+                               [](const gs_stagesurf_t *surface) { return surface != nullptr; });
+        }
+
+        void map_staged_surface(std::size_t index, std::vector<std::uint8_t> &alpha, std::string &error_message)
+        {
+            std::uint8_t *data = nullptr;
+            std::uint32_t linesize = 0U;
+            if (!gs_stagesurface_map(stage_surfaces_[index], &data, &linesize))
+            {
+                error_message = "Alpha Recorder could not map the staged alpha frame.";
+                return;
+            }
+
+            if (data == nullptr || linesize < width_)
+            {
+                gs_stagesurface_unmap(stage_surfaces_[index]);
+                error_message = "Alpha Recorder received an invalid staged alpha frame.";
+                return;
+            }
+
+            copy_alpha_plane(alpha, data, linesize, width_, height_);
+            gs_stagesurface_unmap(stage_surfaces_[index]);
+        }
+
+        bool render_alpha_mask(gs_texture_t *program_texture)
+        {
+            gs_set_render_target(mask_texture_, nullptr);
+            vec4 clear_color;
+            vec4_set(&clear_color, 0.0F, 0.0F, 0.0F, 1.0F);
+            gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0F, 0);
+            gs_ortho(0.0F, static_cast<float>(width_), 0.0F, static_cast<float>(height_), -100.0F, 100.0F);
+            gs_set_viewport(0, 0, static_cast<int>(width_), static_cast<int>(height_));
+
+            gs_enable_blending(false);
+            gs_effect_set_texture(image_param_, program_texture);
+            while (gs_effect_loop(effect_, "Draw"))
+            {
+                gs_draw_sprite(program_texture, 0, width_, height_);
+            }
+            gs_enable_blending(true);
+            gs_set_render_target(program_texture, nullptr);
+            return true;
+        }
+
+        gs_effect_t *effect_ = nullptr;
+        gs_eparam_t *image_param_ = nullptr;
+        gs_texture_t *mask_texture_ = nullptr;
+        std::array<gs_stagesurf_t *, kAlphaStageSurfaceCount> stage_surfaces_{};
+        std::uint32_t width_ = 0U;
+        std::uint32_t height_ = 0U;
+        std::size_t next_stage_index_ = 0U;
+        std::size_t staged_frame_count_ = 0U;
+    };
 
     class RecordingSessionController
     {
@@ -251,16 +417,9 @@ namespace
             static_cast<RecordingSessionController *>(data)->on_frontend_event(event);
         }
 
-        static void on_packet(obs_output_t *output, struct encoder_packet *packet, struct encoder_packet_time *packet_time,
-                              void *data)
+        static void on_main_rendered(void *data)
         {
-            (void)output;
-            static_cast<RecordingSessionController *>(data)->on_packet(packet, packet_time);
-        }
-
-        static void on_raw_video(void *data, struct video_data *frame)
-        {
-            static_cast<RecordingSessionController *>(data)->on_raw_video(frame);
+            static_cast<RecordingSessionController *>(data)->on_main_rendered();
         }
 
         static void on_file_changed(void *data, calldata_t *params)
@@ -278,42 +437,6 @@ namespace
             }
 
             recording_paused_ = paused;
-            if (paused)
-            {
-                pending_frames_.clear();
-                matcher_.clear();
-            }
-        }
-
-        bool prepare_packet_callback()
-        {
-            const alpha_recorder::obs::Settings settings = alpha_recorder::obs::load_settings(obs_frontend_get_user_config());
-            if (!settings.enabled)
-            {
-                return true;
-            }
-
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (session_active_)
-            {
-                return true;
-            }
-
-            obs_output_t *recording_output = obs_frontend_get_recording_output();
-            if (recording_output == nullptr)
-            {
-                log_and_show_error("Alpha Recorder could not access the active recording output.", true);
-                return false;
-            }
-
-            recording_output_ = obs_output_get_ref(recording_output);
-            if (recording_output_ == nullptr)
-            {
-                log_and_show_error("Alpha Recorder could not retain a reference to the recording output.", true);
-                return false;
-            }
-
-            return true;
         }
 
         bool start_session()
@@ -345,12 +468,6 @@ namespace
             if (!obs_get_video_info(&video_info))
             {
                 log_and_show_error("Alpha Recorder could not read the OBS video configuration.", true);
-                return false;
-            }
-
-            if (!output_supports_alpha(video_info.output_format))
-            {
-                log_and_show_error("Alpha Recorder requires OBS to use an alpha-preserving video format such as BGRA or RGBA.", true);
                 return false;
             }
 
@@ -405,9 +522,6 @@ namespace
             video_info_ = video_info;
             recording_path_ = recording_path;
             next_sequence_ = 0;
-            pending_frames_.clear();
-            matcher_.clear();
-            missing_packet_timing_logged_ = false;
 
             signal_handler_t *signal_handler = obs_output_get_signal_handler(recording_output_);
             if (signal_handler != nullptr)
@@ -416,27 +530,9 @@ namespace
                 file_changed_connected_ = true;
             }
 
-            struct video_scale_info conversion = {};
-            conversion.format = VIDEO_FORMAT_BGRA;
-            conversion.width = video_info.output_width;
-            conversion.height = video_info.output_height;
-            conversion.colorspace = video_info.colorspace;
-            conversion.range = video_info.range;
-            obs_add_raw_video_callback(&conversion, &RecordingSessionController::on_raw_video, this);
-            raw_callback_connected_ = true;
+            obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
+            main_rendered_callback_connected_ = true;
             return true;
-        }
-
-        void abort_overflow_locked(std::string_view message, std::string &error_message)
-        {
-            session_aborted_ = true;
-            pending_frames_.clear();
-            matcher_.clear();
-            error_message.assign(message.data(), message.size());
-            if (!writer_.close())
-            {
-                error_message += " Alpha Recorder also failed to finalize the current alpha mask movie.";
-            }
         }
 
         bool open_segment_locked(const std::filesystem::path &recording_path, const obs_video_info &video_info, bool show_popup)
@@ -463,8 +559,6 @@ namespace
 
             video_info_ = video_info;
             recording_path_ = recording_path;
-            pending_frames_.clear();
-            matcher_.clear();
             session_aborted_ = false;
             return true;
         }
@@ -487,8 +581,7 @@ namespace
         void stop_session(bool show_popup)
         {
             obs_output_t *recording_output = nullptr;
-            bool disconnect_packet_callback = false;
-            bool disconnect_raw_callback = false;
+            bool disconnect_main_rendered_callback = false;
             bool disconnect_file_changed = false;
             bool finalize_failed = false;
             std::string finalize_error;
@@ -505,12 +598,15 @@ namespace
                 recording_paused_ = false;
                 recording_output = recording_output_;
                 recording_output_ = nullptr;
-                disconnect_packet_callback = packet_callback_connected_;
-                disconnect_raw_callback = raw_callback_connected_;
+                disconnect_main_rendered_callback = main_rendered_callback_connected_;
                 disconnect_file_changed = file_changed_connected_;
-                packet_callback_connected_ = false;
-                raw_callback_connected_ = false;
+                main_rendered_callback_connected_ = false;
                 file_changed_connected_ = false;
+            }
+
+            if (disconnect_main_rendered_callback)
+            {
+                obs_remove_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
             }
 
             if (recording_output != nullptr)
@@ -525,15 +621,6 @@ namespace
                     }
                 }
 
-                if (disconnect_packet_callback)
-                {
-                    obs_output_remove_packet_callback(recording_output, &RecordingSessionController::on_packet, this);
-                }
-
-                if (disconnect_raw_callback)
-                {
-                    obs_remove_raw_video_callback(&RecordingSessionController::on_raw_video, this);
-                }
             }
 
             {
@@ -543,9 +630,9 @@ namespace
                     finalize_failed = true;
                 }
 
-                pending_frames_.clear();
-                matcher_.clear();
-                missing_packet_timing_logged_ = false;
+                obs_enter_graphics();
+                alpha_extractor_.destroy();
+                obs_leave_graphics();
             }
 
             if (recording_output != nullptr)
@@ -615,13 +702,9 @@ namespace
             }
         }
 
-        void on_raw_video(struct video_data *frame)
+        void on_main_rendered()
         {
-            if (frame == nullptr)
-            {
-                return;
-            }
-
+            std::vector<std::uint8_t> alpha;
             std::string error_message;
 
             {
@@ -631,23 +714,27 @@ namespace
                     return;
                 }
 
-                std::vector<std::uint8_t> alpha = extract_alpha_plane(frame, video_info_);
-                if (alpha.empty())
-                {
-                    return;
-                }
-
-                if (!writer_.write_frame(alpha.data(), video_info_.output_width, &error_message))
+                if (!alpha_extractor_.ensure(video_info_.output_width, video_info_.output_height, error_message) ||
+                    !alpha_extractor_.capture_latest(alpha, error_message))
                 {
                     session_aborted_ = true;
-                    pending_frames_.clear();
-                    matcher_.clear();
                     if (error_message.empty())
                     {
-                        error_message = "Alpha Recorder failed to write an alpha mask frame.";
+                        error_message = "Alpha Recorder failed to capture an alpha mask frame.";
                     }
                 }
-                ++next_sequence_;
+                else if (!alpha.empty())
+                {
+                    if (!writer_.write_frame(alpha.data(), video_info_.output_width, &error_message))
+                    {
+                        session_aborted_ = true;
+                        if (error_message.empty())
+                        {
+                            error_message = "Alpha Recorder failed to write an alpha mask frame.";
+                        }
+                    }
+                    ++next_sequence_;
+                }
             }
 
             if (!error_message.empty())
@@ -656,25 +743,16 @@ namespace
             }
         }
 
-        void on_packet(struct encoder_packet *packet, struct encoder_packet_time *packet_time)
-        {
-            (void)packet;
-            (void)packet_time;
-        }
-
         bool event_callback_registered_ = false;
-        bool packet_callback_connected_ = false;
-        bool raw_callback_connected_ = false;
+        bool main_rendered_callback_connected_ = false;
         bool file_changed_connected_ = false;
         bool session_active_ = false;
         bool session_aborted_ = false;
         bool recording_paused_ = false;
-        bool missing_packet_timing_logged_ = false;
         std::uint64_t next_sequence_ = 0;
-        std::deque<PendingFrame> pending_frames_{};
-        alpha_recorder::AlphaFrameMatcher matcher_{kMaxPendingFrames, kMaxPendingPackets, kMaxPendingBytes};
         std::filesystem::path recording_path_{};
         obs_video_info video_info_{};
+        AlphaPlaneExtractor alpha_extractor_{};
         AlphaMaskVideoWriter writer_{};
         obs_output_t *recording_output_ = nullptr;
         alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::MaskPngMov;

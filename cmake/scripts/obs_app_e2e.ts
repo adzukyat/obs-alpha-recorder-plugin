@@ -456,7 +456,7 @@ FPSInt=30
 FPSNum=30
 FPSDen=1
 ScaleType=bicubic
-ColorFormat=BGRA
+ColorFormat=NV12
 ColorSpace=709
 ColorRange=Partial
 

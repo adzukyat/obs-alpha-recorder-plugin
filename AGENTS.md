@@ -67,9 +67,10 @@ When enabled:
   - Determine the real recording file path.
   - Create the alpha mask movie alongside the recording.
 - During recording:
-  - Capture alpha-preserving raw Program frames.
+  - Extract the rendered Program texture's alpha on the GPU without changing
+    OBS's normal recording color format.
   - Convert alpha into visible grayscale luma and enqueue it for mask movie
-    encoding off the OBS raw-video callback path.
+    encoding off the OBS render callback path.
   - Pause alpha capture while OBS recording is paused or stopping.
 - On recording stop:
   - Finalize the alpha mask movie in the selected finalization format.
@@ -103,12 +104,14 @@ lifecycle wiring, settings, and automated control.
 
 Current alignment strategy:
 
-1. Validate OBS Color Format is alpha-preserving.
-2. Capture raw Program frames using `obs_add_raw_video_callback()` with BGRA
-   conversion.
+1. Keep OBS's normal recording color format independent of Alpha Recorder so
+   production recording can use hardware-friendly formats such as NV12/P010.
+2. Capture the rendered Program texture after OBS renders the main mix, extract
+   its alpha into an `GS_R8` mask texture on the GPU, then stage that one-byte
+   alpha plane for the mask writer.
 3. Pause capture on recording pause and on
    `OBS_FRONTEND_EVENT_RECORDING_STOPPING`.
-4. Encode each captured alpha plane as visible grayscale luma into the live
+4. Encode each extracted alpha plane as visible grayscale luma into the live
    alpha mask movie through a bounded asynchronous writer queue.
 5. Close the mask movie on recording stop or split rotation. The RGB recording
    is never decoded or modified by Alpha Recorder.
@@ -129,15 +132,18 @@ Required OBS integration points:
 - Recording output split handling:
   - `obs_output_get_signal_handler()`
   - `file_changed`
-- Raw video frames:
-  - `obs_add_raw_video_callback()` with BGRA conversion.
+- Program alpha extraction:
+  - `obs_add_main_rendered_callback()` / `obs_remove_main_rendered_callback()`
+  - `obs_get_main_texture()`
+  - `gs_texrender_create(GS_R8, ...)`
+  - `gs_stage_texture()` / `gs_stagesurface_map()`
 - Automation:
   - obs-websocket vendor registration during `obs_module_post_load()`.
   - Do not call obs-websocket vendor-request unregister APIs from
     `obs_module_unload()`; OBS shutdown can invalidate the cached
     obs-websocket proc handler before Alpha Recorder unloads.
 
-If raw callbacks produce only opaque alpha in a future OBS/runtime
+If the main Program texture produces only opaque alpha in a future OBS/runtime
 configuration, the fallback is a dedicated render path: render the active
 Program scene to an RGBA target that preserves alpha, then feed that into the
 same mask movie encoder pipeline.
@@ -154,6 +160,8 @@ Completed:
 - Runtime-aware finalization format defaults and availability filtering.
 - Runtime hook registration/unregistration based on current settings.
 - Recording lifecycle integration for start, pause, unpause, stopping, and stop.
+- GPU-side Program alpha extraction that does not require switching OBS's main
+  Color Format from NV12/P010 to RGBA.
 - Live alpha mask movie creation next to the OBS recording.
 - Bounded asynchronous mask movie encoding so slow fallback encoders abort the
   alpha output instead of blocking OBS recording.
@@ -223,6 +231,8 @@ The CMake target:
 - Enables Alpha Recorder through `CallVendorRequest` using
   `alpha_recorder.SetSettings`.
 - Starts and stops OBS recording through obs-websocket.
+- Uses OBS's default hardware-friendly NV12 color format in the app-level E2E
+  profile while Alpha Recorder extracts alpha through its own GPU-side path.
 - Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
@@ -236,7 +246,7 @@ CTest can register this slow app-level test when configured with
 ## Open Questions
 
 - Whether all supported OBS/runtime combinations preserve meaningful alpha in
-  the raw callback.
+  the main Program texture after rendering.
 - Whether the dedicated render fallback is needed for any common production
   scene setup.
 - How strict the exported-alpha frame count should be under severe encoder
