@@ -12,6 +12,7 @@
 #include <QLabel>
 #include <QMainWindow>
 #include <QMessageBox>
+#include <QPointer>
 #include <QStandardItemModel>
 #include <QVBoxLayout>
 
@@ -229,7 +230,7 @@ namespace
         QComboBox *finalizationFormatCombo_ = nullptr;
     };
 
-    QAction *settingsAction = nullptr;
+    QPointer<QAction> settingsAction = nullptr;
 
 } // namespace
 
@@ -260,10 +261,10 @@ extern "C" void obs_module_post_load(void)
 
 extern "C" void obs_module_unload(void)
 {
-    if (settingsAction != nullptr)
+    if (!settingsAction.isNull())
     {
         settingsAction->disconnect();
         settingsAction->setEnabled(false);
-        settingsAction = nullptr;
     }
+    settingsAction.clear();
 }

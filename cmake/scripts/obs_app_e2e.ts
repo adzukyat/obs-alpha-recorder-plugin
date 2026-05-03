@@ -112,16 +112,34 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
-function resolveObsExecutable(stageDir: string): { exe: string; cwd: string } {
+function resolveObsExecutable(stageDir: string): { exe: string; cwd: string; contentRoot: string; runtimeBin: string } {
   const candidates =
     platform === "darwin"
       ? [
-          { exe: join(stageDir, "MacOS", "OBS"), cwd: join(stageDir, "MacOS") },
-          { exe: join(stageDir, "bin", "obs"), cwd: join(stageDir, "bin") },
+          {
+            exe: join(stageDir, "OBS.app", "Contents", "MacOS", "OBS"),
+            cwd: join(stageDir, "OBS.app", "Contents", "MacOS"),
+            contentRoot: join(stageDir, "OBS.app", "Contents"),
+            runtimeBin: join(stageDir, "OBS.app", "Contents", "Frameworks"),
+          },
+          {
+            exe: join(stageDir, "MacOS", "OBS"),
+            cwd: join(stageDir, "MacOS"),
+            contentRoot: stageDir,
+            runtimeBin: join(stageDir, "Frameworks"),
+          },
+          { exe: join(stageDir, "bin", "obs"), cwd: join(stageDir, "bin"), contentRoot: stageDir, runtimeBin: join(stageDir, "bin") },
         ]
       : platform === "win32"
-        ? [{ exe: join(stageDir, "bin", "64bit", "obs64.exe"), cwd: join(stageDir, "bin", "64bit") }]
-        : [{ exe: join(stageDir, "bin", "obs"), cwd: join(stageDir, "bin") }];
+        ? [
+            {
+              exe: join(stageDir, "bin", "64bit", "obs64.exe"),
+              cwd: join(stageDir, "bin", "64bit"),
+              contentRoot: stageDir,
+              runtimeBin: join(stageDir, "bin", "64bit"),
+            },
+          ]
+        : [{ exe: join(stageDir, "bin", "obs"), cwd: join(stageDir, "bin"), contentRoot: stageDir, runtimeBin: join(stageDir, "bin") }];
 
   for (const candidate of candidates) {
     if (existsSync(candidate.exe)) {
@@ -344,19 +362,26 @@ async function main(): Promise<void> {
   const args = parseArgs(Bun.argv.slice(2));
   const port = args.port > 0 ? args.port : await freePort();
   const password = randomBytes(16).toString("hex");
-  const { exe: obsExe, cwd: obsCwd } = resolveObsExecutable(args.stageDir);
+  const { exe: obsExe, cwd: obsCwd, contentRoot, runtimeBin } = resolveObsExecutable(args.stageDir);
   const artifactRoot = join(args.repoRoot, "out", "e2e", "obs-app", new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, ""));
   mkdirSync(artifactRoot, { recursive: true });
 
-  const portableConfig = join(args.stageDir, "config", "obs-studio");
+  const homeRoot = join(artifactRoot, "home");
+  const portableConfig =
+    platform === "darwin" ? join(homeRoot, "Library", "Application Support", "obs-studio") : join(contentRoot, "config", "obs-studio");
+  if (platform === "darwin") {
+    mkdirSync(join(homeRoot, "Library", "Logs", "DiagnosticReports"), { recursive: true });
+  }
   const profile = "AlphaRecorderE2E";
   const collection = "AlphaRecorderE2E";
 
   writeText(join(portableConfig, "global.ini"), `[General]
 FirstRun=false
 Pre31Migrated=true
+LastVersion=536936449
 MaxLogs=10
 ProcessPriority=Normal
+MacOSPermissionsDialogLastShown=1
 
 [Basic]
 Profile=${profile}
@@ -365,11 +390,24 @@ SceneCollection=${collection}
 SceneCollectionFile=${collection}
 `);
 
+  writeText(join(portableConfig, "user.ini"), `[General]
+FirstRun=false
+ConfirmOnExit=false
+HotkeyFocusType=NeverDisableHotkeys
+
+[Basic]
+Profile=${profile}
+ProfileDir=${profile}
+SceneCollection=${collection}
+SceneCollectionFile=${collection}.json
+ConfigOnNewProfile=false
+`);
+
   writeText(join(portableConfig, "basic", "profiles", profile, "basic.ini"), `[General]
 Name=${profile}
 
 [Output]
-Mode=Advanced
+Mode=Simple
 FilenameFormatting=%CCYY-%MM-%DD %hh-%mm-%ss
 
 [AdvOut]
@@ -383,6 +421,19 @@ ApplyServiceSettings=true
 RecUseRescale=false
 TrackIndex=1
 RecSplitFileType=Time
+
+[SimpleOutput]
+FilePath=${artifactRoot.replaceAll("\\", "/")}
+RecFormat2=mkv
+VBitrate=2500
+ABitrate=160
+UseAdvanced=false
+Preset=veryfast
+RecQuality=Stream
+RecRB=false
+RecTracks=1
+StreamEncoder=x264
+RecEncoder=x264
 
 [Video]
 BaseCX=${args.width}
@@ -464,29 +515,34 @@ finalization_format=${args.finalizationFormat}
     ),
   );
 
-  const stageBin = platform === "win32" ? join(args.stageDir, "bin", "64bit") : join(args.stageDir, "bin");
+  const stageBin = runtimeBin;
   const env = {
     ...process.env,
+    ...(platform === "darwin" ? { CFFIXED_USER_HOME: homeRoot, HOME: homeRoot } : {}),
     PATH: `${stageBin}${platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
     DYLD_LIBRARY_PATH:
       platform === "darwin" ? `${stageBin}:${process.env.DYLD_LIBRARY_PATH ?? ""}` : process.env.DYLD_LIBRARY_PATH,
   };
 
+  const obsCommand = [
+    obsExe,
+    "--multi",
+    "--profile",
+    profile,
+    "--collection",
+    collection,
+    "--websocket_port",
+    String(port),
+    "--websocket_password",
+    password,
+    "--websocket_ipv4_only",
+  ];
+  if (platform !== "darwin") {
+    obsCommand.splice(1, 0, "--portable");
+  }
+
   const obs = spawn({
-    cmd: [
-      obsExe,
-      "--portable",
-      "--multi",
-      "--profile",
-      profile,
-      "--collection",
-      collection,
-      "--websocket_port",
-      String(port),
-      "--websocket_password",
-      password,
-      "--websocket_ipv4_only",
-    ],
+    cmd: obsCommand,
     cwd: obsCwd,
     env,
     stdout: "inherit",

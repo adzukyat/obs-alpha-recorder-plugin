@@ -227,6 +227,7 @@ extern "C" void obs_module_unload(void)
 #include <QLineEdit>
 #include <QMainWindow>
 #include <QMessageBox>
+#include <QPointer>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QVBoxLayout>
@@ -870,7 +871,7 @@ namespace
     };
 
     AlphaRecorderLauncherDialog *launcherDialog = nullptr;
-    QAction *launcherAction = nullptr;
+    QPointer<QAction> launcherAction = nullptr;
 
     void save_launcher_settings(obs_data_t *, bool saving, void *)
     {
@@ -930,12 +931,12 @@ extern "C" void obs_module_unload(void)
 
     obs_frontend_remove_save_callback(save_launcher_settings, nullptr);
 
-    if (launcherAction != nullptr)
+    if (!launcherAction.isNull())
     {
         launcherAction->disconnect();
         launcherAction->setEnabled(false);
-        launcherAction = nullptr;
     }
+    launcherAction.clear();
 
     if (launcherDialog != nullptr)
     {

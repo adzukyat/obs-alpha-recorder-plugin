@@ -186,6 +186,7 @@ Manual validation:
 Automated OBS app E2E:
 
 ```sh
+cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```
 
@@ -198,11 +199,15 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 
 The CMake target:
 
-- Builds and stages the plugin into a portable OBS tree.
-- Creates an isolated OBS profile and scene collection.
+- Builds and stages OBS plus the plugin into an isolated app/runtime tree.
+- On macOS, stages an app-style `OBS.app/Contents` tree and launches the
+  bundle executable rather than a loose standalone binary.
+- Creates an isolated OBS profile and scene collection. On macOS this uses an
+  isolated `HOME`/`CFFIXED_USER_HOME` because the pinned OBS app does not enable
+  portable mode.
 - Enables obs-websocket.
-- Launches real OBS (`obs64.exe` on Windows, `MacOS/OBS` or `bin/obs` on
-  macOS).
+- Launches real OBS (`obs64.exe` on Windows, `OBS.app/Contents/MacOS/OBS` on
+  macOS, or `bin/obs` for loose runtimes).
 - Enables Alpha Recorder through `CallVendorRequest` using
   `alpha_recorder.SetSettings`.
 - Starts and stops OBS recording through obs-websocket.

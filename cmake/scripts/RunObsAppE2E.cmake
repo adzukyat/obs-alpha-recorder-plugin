@@ -48,7 +48,7 @@ if(NOT SKIP_STAGE)
     )
 endif()
 
-set(BUN_EXECUTABLE "")
+unset(BUN_EXECUTABLE)
 if(WIN32 AND DEFINED ENV{USERPROFILE})
     file(GLOB _alpha_recorder_scoop_bun_paths LIST_DIRECTORIES false "$ENV{USERPROFILE}/scoop/apps/bun/*/bun.exe")
     list(FILTER _alpha_recorder_scoop_bun_paths EXCLUDE REGEX "/current/")
@@ -82,7 +82,17 @@ if(KEEP_OBS_OPEN)
     list(APPEND args "--keep-obs-open")
 endif()
 
-execute_process(
-    COMMAND "${BUN_EXECUTABLE}" ${args}
-    COMMAND_ERROR_IS_FATAL ANY
-)
+if(APPLE)
+    execute_process(
+        COMMAND /bin/sh -c "exec \"$0\" \"$@\"" "${BUN_EXECUTABLE}" ${args}
+        RESULT_VARIABLE run_result
+    )
+else()
+    execute_process(
+        COMMAND "${BUN_EXECUTABLE}" ${args}
+        RESULT_VARIABLE run_result
+    )
+endif()
+if(NOT run_result EQUAL 0)
+    message(FATAL_ERROR "OBS app E2E failed with exit code ${run_result}")
+endif()

@@ -511,30 +511,33 @@ namespace
                 packet_callback_connected_ = false;
                 raw_callback_connected_ = false;
                 file_changed_connected_ = false;
+            }
 
-                if (recording_output != nullptr)
+            if (recording_output != nullptr)
+            {
+                if (disconnect_file_changed)
                 {
-                    if (disconnect_file_changed)
+                    signal_handler_t *signal_handler = obs_output_get_signal_handler(recording_output);
+                    if (signal_handler != nullptr)
                     {
-                        signal_handler_t *signal_handler = obs_output_get_signal_handler(recording_output);
-                        if (signal_handler != nullptr)
-                        {
-                            signal_handler_disconnect(signal_handler, "file_changed", &RecordingSessionController::on_file_changed,
-                                                      this);
-                        }
-                    }
-
-                    if (disconnect_packet_callback)
-                    {
-                        obs_output_remove_packet_callback(recording_output, &RecordingSessionController::on_packet, this);
-                    }
-
-                    if (disconnect_raw_callback)
-                    {
-                        obs_remove_raw_video_callback(&RecordingSessionController::on_raw_video, this);
+                        signal_handler_disconnect(signal_handler, "file_changed", &RecordingSessionController::on_file_changed,
+                                                  this);
                     }
                 }
 
+                if (disconnect_packet_callback)
+                {
+                    obs_output_remove_packet_callback(recording_output, &RecordingSessionController::on_packet, this);
+                }
+
+                if (disconnect_raw_callback)
+                {
+                    obs_remove_raw_video_callback(&RecordingSessionController::on_raw_video, this);
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
                 if (!finalize_current_segment_locked(&finalize_error))
                 {
                     finalize_failed = true;
