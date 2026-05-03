@@ -113,16 +113,20 @@ Current alignment strategy:
 3. Capture the rendered Program texture after OBS renders the main mix, extract
    its alpha into an `GS_R8` mask texture on the GPU, then stage that one-byte
    alpha plane into a short pending-frame queue.
-4. Drain pending alpha frames into the live mask writer only as
-   `obs_output_get_total_frames()` advances, so the mask follows OBS's actual
-   recorded-video cadence rather than every rendered frame.
+4. Queue video packet timestamps from the active recording output and match
+   them against the pending alpha-frame queue, sorted by packet PTS, before
+   writing mask frames. Both alpha frames and packet timestamps may be queued
+   before the alpha movie path is available; this preserves startup frames on
+   platforms where OBS begins accepting recorded video before
+   `OBS_FRONTEND_EVENT_RECORDING_STARTED`.
 5. Pause capture on recording pause. Do not pause on
    `OBS_FRONTEND_EVENT_RECORDING_STOPPING`; keep capturing until
    `OBS_FRONTEND_EVENT_RECORDING_STOPPED` so stop-edge frames can reconcile.
 6. Close the mask movie on recording stop or split rotation. The RGB recording
    is never decoded or modified by Alpha Recorder.
 
-This intentionally avoids brittle dependence on encoder packet callbacks.
+Packet callbacks are used only as the recorded-video cadence/timestamp source;
+the RGB recording is still never decoded or modified by Alpha Recorder.
 
 Required OBS integration points:
 
@@ -144,6 +148,9 @@ Required OBS integration points:
   - `obs_get_main_texture()`
   - `gs_texture_create(..., GS_R8, ..., GS_RENDER_TARGET)`
   - `gs_stage_texture()` / `gs_stagesurface_map()`
+- Recorded-video cadence:
+  - `obs_output_add_packet_callback()` /
+    `obs_output_remove_packet_callback()`
 - Automation:
   - obs-websocket vendor registration during `obs_module_post_load()`.
   - Do not call obs-websocket vendor-request unregister APIs from
