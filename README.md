@@ -13,6 +13,10 @@ NVENC (`mask_hevc_nvenc`, `.mp4`), and HEVC AMF (`mask_hevc_amf`, `.mp4`). The
 mask movie is 8-bit grayscale content encoded as visible luma, not a video with
 an alpha channel.
 
+Mask encoding runs behind a bounded asynchronous queue. If the selected mask
+encoder cannot keep up, Alpha Recorder aborts the mask movie output instead of
+blocking or slowing the main OBS recording.
+
 Scenario files live only under `tests/e2e/scenarios`. They are inputs for the
 deterministic E2E harness, not part of the shipping plugin path.
 
@@ -157,7 +161,8 @@ plugins, FFmpeg tools, obs-websocket plugin, and `bun` on PATH.
 Implemented in the core library and live OBS workflow:
 
 - pair admission logic with all-or-nothing frame-pair acceptance
-- live alpha mask movie encoding as 8-bit grayscale PNG MOV or HEVC
+- live alpha mask movie encoding as 8-bit grayscale PNG MOV or HEVC, behind a
+  bounded asynchronous writer queue
 - OBS recording lifecycle hooks, settings persistence, Tools menu integration,
   and obs-websocket vendor automation
 - raw Program frame capture through OBS's alpha-preserving video callback path

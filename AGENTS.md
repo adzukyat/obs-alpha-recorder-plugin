@@ -63,7 +63,8 @@ When enabled:
   - Create the alpha mask movie alongside the recording.
 - During recording:
   - Capture alpha-preserving raw Program frames.
-  - Convert alpha into visible grayscale luma and encode it into the mask movie.
+  - Convert alpha into visible grayscale luma and enqueue it for mask movie
+    encoding off the OBS raw-video callback path.
   - Pause alpha capture while OBS recording is paused or stopping.
 - On recording stop:
   - Finalize the alpha mask movie in the selected finalization format.
@@ -103,7 +104,7 @@ Current alignment strategy:
 3. Pause capture on recording pause and on
    `OBS_FRONTEND_EVENT_RECORDING_STOPPING`.
 4. Encode each captured alpha plane as visible grayscale luma into the live
-   alpha mask movie.
+   alpha mask movie through a bounded asynchronous writer queue.
 5. Close the mask movie on recording stop or split rotation. The RGB recording
    is never decoded or modified by Alpha Recorder.
 
@@ -148,6 +149,8 @@ Completed:
 - Runtime hook registration/unregistration based on current settings.
 - Recording lifecycle integration for start, pause, unpause, stopping, and stop.
 - Live alpha mask movie creation next to the OBS recording.
+- Bounded asynchronous mask movie encoding so slow fallback encoders abort the
+  alpha output instead of blocking OBS recording.
 - Alpha mask movie finalization on stop and split rotation.
 - File split handling through OBS `file_changed`.
 - obs-websocket vendor API for test automation:

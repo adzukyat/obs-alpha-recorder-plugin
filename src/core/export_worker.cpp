@@ -2,14 +2,19 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <limits>
+#include <mutex>
+#include <queue>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
+#include <vector>
 
 extern "C"
 {
@@ -25,6 +30,8 @@ namespace alpha_recorder::obs
 {
     namespace
     {
+        constexpr std::size_t kMaxQueuedMaskFrames = 4U;
+        constexpr std::size_t kMaxQueuedMaskBytes = 64U * 1024U * 1024U;
 
         bool set_error(std::string *error_message, std::string message)
         {
@@ -119,7 +126,7 @@ namespace alpha_recorder::obs
             case FinalizationFormat::MaskPngMov:
                 encoder.gop_size = 1;
                 encoder.pix_fmt = AV_PIX_FMT_GRAY8;
-                (void)av_opt_set_int(encoder.priv_data, "compression_level", 1, 0);
+                (void)av_opt_set_int(encoder.priv_data, "compression_level", 0, 0);
                 return true;
 
             case FinalizationFormat::MaskHevcNvenc:
@@ -199,6 +206,12 @@ namespace alpha_recorder::obs
 
     struct AlphaMaskVideoWriter::Impl
     {
+        struct QueuedFrame
+        {
+            std::vector<std::uint8_t> alpha{};
+            std::uint32_t stride = 0;
+        };
+
         std::filesystem::path output_path{};
         AVFormatContext *format = nullptr;
         AVCodecContext *encoder = nullptr;
@@ -206,9 +219,19 @@ namespace alpha_recorder::obs
         AVFrame *frame = nullptr;
         std::uint64_t frame_count = 0;
         bool header_written = false;
+        bool accepting_frames = false;
+        bool stop_requested = false;
+        bool worker_failed = false;
+        std::size_t queued_bytes = 0;
+        std::string worker_error{};
+        std::queue<QueuedFrame> queued_frames{};
+        std::mutex mutex{};
+        std::condition_variable condition{};
+        std::thread worker{};
 
         ~Impl()
         {
+            stop_worker(nullptr);
             av_frame_free(&frame);
             avcodec_free_context(&encoder);
             if (format != nullptr)
@@ -219,6 +242,208 @@ namespace alpha_recorder::obs
                 }
                 avformat_free_context(format);
             }
+        }
+
+        bool encode_frame(const std::uint8_t *alpha, std::uint32_t stride, std::string *error_message) noexcept
+        {
+            if (encoder == nullptr || frame == nullptr)
+            {
+                return set_error(error_message, "Alpha Recorder mask video writer is not open.");
+            }
+
+            if (av_frame_make_writable(frame) < 0)
+            {
+                return set_error(error_message, "Alpha Recorder could not make the mask video frame writable.");
+            }
+
+            if (!copy_alpha_to_frame(*frame, alpha, stride, error_message))
+            {
+                return false;
+            }
+
+            if (frame_count > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+            {
+                return set_error(error_message, "Alpha Recorder mask video frame count overflowed.");
+            }
+
+            frame->pts = static_cast<std::int64_t>(frame_count);
+            int ret = avcodec_send_frame(encoder, frame);
+            if (ret < 0)
+            {
+                return set_error(error_message, std::string{"Alpha Recorder failed to encode a mask video frame: "} +
+                                                    av_error_message(ret));
+            }
+
+            AVPacket *packet = av_packet_alloc();
+            if (packet == nullptr)
+            {
+                return set_error(error_message, "Alpha Recorder could not allocate a mask video packet.");
+            }
+
+            while (true)
+            {
+                ret = avcodec_receive_packet(encoder, packet);
+                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                {
+                    av_packet_free(&packet);
+                    ++frame_count;
+                    return true;
+                }
+
+                if (ret < 0)
+                {
+                    av_packet_free(&packet);
+                    return set_error(error_message, std::string{"Alpha Recorder failed while retrieving a mask video packet: "} +
+                                                        av_error_message(ret));
+                }
+
+                packet->stream_index = video_stream->index;
+                packet->pos = -1;
+                av_packet_rescale_ts(packet, encoder->time_base, video_stream->time_base);
+                ret = av_interleaved_write_frame(format, packet);
+                av_packet_unref(packet);
+                if (ret < 0)
+                {
+                    av_packet_free(&packet);
+                    return set_error(error_message, std::string{"Alpha Recorder failed while writing a mask video packet: "} +
+                                                        av_error_message(ret));
+                }
+            }
+        }
+
+        bool drain_encoder(std::string *error_message) noexcept
+        {
+            if (encoder != nullptr)
+            {
+                int ret = avcodec_send_frame(encoder, nullptr);
+                if (ret < 0 && ret != AVERROR_EOF)
+                {
+                    return set_error(error_message, std::string{"Alpha Recorder failed to flush the mask video encoder: "} +
+                                                        av_error_message(ret));
+                }
+
+                AVPacket *packet = av_packet_alloc();
+                if (packet == nullptr)
+                {
+                    return set_error(error_message, "Alpha Recorder could not allocate a mask video flush packet.");
+                }
+
+                while (true)
+                {
+                    ret = avcodec_receive_packet(encoder, packet);
+                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                    {
+                        break;
+                    }
+
+                    if (ret < 0)
+                    {
+                        av_packet_free(&packet);
+                        return set_error(error_message, std::string{"Alpha Recorder failed while draining the mask video encoder: "} +
+                                                            av_error_message(ret));
+                    }
+
+                    packet->stream_index = video_stream->index;
+                    packet->pos = -1;
+                    av_packet_rescale_ts(packet, encoder->time_base, video_stream->time_base);
+                    ret = av_interleaved_write_frame(format, packet);
+                    av_packet_unref(packet);
+                    if (ret < 0)
+                    {
+                        av_packet_free(&packet);
+                        return set_error(error_message, std::string{"Alpha Recorder failed while writing a flushed mask video packet: "} +
+                                                            av_error_message(ret));
+                    }
+                }
+                av_packet_free(&packet);
+            }
+
+            if (format != nullptr && header_written && av_write_trailer(format) < 0)
+            {
+                return set_error(error_message, "Alpha Recorder failed to finalize the mask video.");
+            }
+
+            header_written = false;
+            return true;
+        }
+
+        void run_worker() noexcept
+        {
+            while (true)
+            {
+                QueuedFrame queued_frame{};
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    condition.wait(lock, [this]() {
+                        return stop_requested || worker_failed || !queued_frames.empty();
+                    });
+
+                    if ((stop_requested || worker_failed) && queued_frames.empty())
+                    {
+                        break;
+                    }
+
+                    queued_frame = std::move(queued_frames.front());
+                    queued_frames.pop();
+                    queued_bytes -= queued_frame.alpha.size();
+                }
+
+                std::string error_message;
+                if (!encode_frame(queued_frame.alpha.data(), queued_frame.stride, &error_message))
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    worker_failed = true;
+                    accepting_frames = false;
+                    worker_error = error_message.empty() ? "Alpha Recorder failed to encode an alpha mask frame." : std::move(error_message);
+                    queued_bytes = 0;
+                    queued_frames = {};
+                    condition.notify_all();
+                    break;
+                }
+            }
+
+            std::string finalize_error;
+            const bool finalized = drain_encoder(&finalize_error);
+            std::lock_guard<std::mutex> lock(mutex);
+            accepting_frames = false;
+            if (!finalized && !worker_failed)
+            {
+                worker_failed = true;
+                worker_error = finalize_error.empty() ? "Alpha Recorder failed to finalize the mask video." : std::move(finalize_error);
+            }
+            condition.notify_all();
+        }
+
+        void start_worker()
+        {
+            accepting_frames = true;
+            stop_requested = false;
+            worker_failed = false;
+            worker_error.clear();
+            worker = std::thread{[this]() { run_worker(); }};
+        }
+
+        bool stop_worker(std::string *error_message) noexcept
+        {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                accepting_frames = false;
+                stop_requested = true;
+                condition.notify_all();
+            }
+
+            if (worker.joinable())
+            {
+                worker.join();
+            }
+
+            std::lock_guard<std::mutex> lock(mutex);
+            if (worker_failed)
+            {
+                return set_error(error_message, worker_error.empty() ? "Alpha Recorder failed to write the mask video." : worker_error);
+            }
+
+            return true;
         }
     };
 
@@ -350,6 +575,7 @@ namespace alpha_recorder::obs
                                                     av_error_message(ret));
             }
 
+            impl->start_worker();
             impl_ = impl;
             return true;
         }
@@ -370,64 +596,58 @@ namespace alpha_recorder::obs
             return set_error(error_message, "Alpha Recorder mask video writer is not open.");
         }
 
-        if (av_frame_make_writable(impl_->frame) < 0)
+        if (alpha == nullptr || stride < static_cast<std::uint32_t>(impl_->encoder->width))
         {
-            return set_error(error_message, "Alpha Recorder could not make the mask video frame writable.");
+            return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
         }
 
-        if (!copy_alpha_to_frame(*impl_->frame, alpha, stride, error_message))
+        const std::size_t row_bytes = static_cast<std::size_t>(impl_->encoder->width);
+        const std::size_t frame_bytes = row_bytes * static_cast<std::size_t>(impl_->encoder->height);
+        if (impl_->encoder->height != 0 && frame_bytes / static_cast<std::size_t>(impl_->encoder->height) != row_bytes)
         {
-            return false;
+            return set_error(error_message, "Alpha Recorder received invalid mask video dimensions.");
         }
 
-        if (impl_->frame_count > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+        std::vector<std::uint8_t> queued_alpha(frame_bytes);
+        for (int row = 0; row < impl_->encoder->height; ++row)
         {
-            return set_error(error_message, "Alpha Recorder mask video frame count overflowed.");
+            const std::uint8_t *const source = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
+            std::uint8_t *const dest = queued_alpha.data() + (static_cast<std::size_t>(row) * row_bytes);
+            std::copy(source, source + row_bytes, dest);
         }
 
-        impl_->frame->pts = static_cast<std::int64_t>(impl_->frame_count);
-        int ret = avcodec_send_frame(impl_->encoder, impl_->frame);
-        if (ret < 0)
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (impl_->worker_failed)
         {
-            return set_error(error_message, std::string{"Alpha Recorder failed to encode a mask video frame: "} +
-                                                av_error_message(ret));
+            return set_error(error_message, impl_->worker_error.empty() ? "Alpha Recorder failed to encode the mask video." : impl_->worker_error);
         }
 
-        AVPacket *packet = av_packet_alloc();
-        if (packet == nullptr)
+        if (!impl_->accepting_frames || impl_->stop_requested)
         {
-            return set_error(error_message, "Alpha Recorder could not allocate a mask video packet.");
+            return set_error(error_message, "Alpha Recorder mask video writer is closing.");
         }
 
-        while (true)
+        if (impl_->queued_frames.size() >= kMaxQueuedMaskFrames ||
+            queued_alpha.size() > kMaxQueuedMaskBytes ||
+            impl_->queued_bytes > kMaxQueuedMaskBytes - queued_alpha.size())
         {
-            ret = avcodec_receive_packet(impl_->encoder, packet);
-            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            impl_->accepting_frames = false;
+            impl_->stop_requested = true;
+            impl_->worker_failed = true;
+            impl_->worker_error = "Alpha Recorder alpha mask encoder could not keep up; aborting alpha mask generation to protect the main OBS recording.";
+            while (!impl_->queued_frames.empty())
             {
-                av_packet_free(&packet);
-                ++impl_->frame_count;
-                return true;
+                impl_->queued_frames.pop();
             }
-
-            if (ret < 0)
-            {
-                av_packet_free(&packet);
-                return set_error(error_message, std::string{"Alpha Recorder failed while retrieving a mask video packet: "} +
-                                                    av_error_message(ret));
-            }
-
-            packet->stream_index = impl_->video_stream->index;
-            packet->pos = -1;
-            av_packet_rescale_ts(packet, impl_->encoder->time_base, impl_->video_stream->time_base);
-            ret = av_interleaved_write_frame(impl_->format, packet);
-            av_packet_unref(packet);
-            if (ret < 0)
-            {
-                av_packet_free(&packet);
-                return set_error(error_message, std::string{"Alpha Recorder failed while writing a mask video packet: "} +
-                                                    av_error_message(ret));
-            }
+            impl_->queued_bytes = 0;
+            impl_->condition.notify_all();
+            return set_error(error_message, impl_->worker_error);
         }
+
+        impl_->queued_bytes += queued_alpha.size();
+        impl_->queued_frames.push(Impl::QueuedFrame{std::move(queued_alpha), static_cast<std::uint32_t>(impl_->encoder->width)});
+        impl_->condition.notify_one();
+        return true;
     }
 
     bool AlphaMaskVideoWriter::close(std::string *error_message) noexcept
@@ -439,60 +659,7 @@ namespace alpha_recorder::obs
 
         Impl *impl = impl_;
         impl_ = nullptr;
-        bool success = true;
-
-        if (impl->encoder != nullptr)
-        {
-            int ret = avcodec_send_frame(impl->encoder, nullptr);
-            if (ret < 0 && ret != AVERROR_EOF)
-            {
-                success = set_error(error_message, std::string{"Alpha Recorder failed to flush the mask video encoder: "} +
-                                                       av_error_message(ret));
-            }
-
-            AVPacket *packet = av_packet_alloc();
-            if (packet == nullptr)
-            {
-                success = set_error(error_message, "Alpha Recorder could not allocate a mask video flush packet.");
-            }
-            else
-            {
-                while (success)
-                {
-                    ret = avcodec_receive_packet(impl->encoder, packet);
-                    if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                    {
-                        break;
-                    }
-
-                    if (ret < 0)
-                    {
-                        success = set_error(error_message, std::string{"Alpha Recorder failed while draining the mask video encoder: "} +
-                                                           av_error_message(ret));
-                        break;
-                    }
-
-                    packet->stream_index = impl->video_stream->index;
-                    packet->pos = -1;
-                    av_packet_rescale_ts(packet, impl->encoder->time_base, impl->video_stream->time_base);
-                    ret = av_interleaved_write_frame(impl->format, packet);
-                    av_packet_unref(packet);
-                    if (ret < 0)
-                    {
-                        success = set_error(error_message, std::string{"Alpha Recorder failed while writing a flushed mask video packet: "} +
-                                                           av_error_message(ret));
-                        break;
-                    }
-                }
-                av_packet_free(&packet);
-            }
-        }
-
-        if (success && impl->format != nullptr && impl->header_written && av_write_trailer(impl->format) < 0)
-        {
-            success = set_error(error_message, "Alpha Recorder failed to finalize the mask video.");
-        }
-
+        const bool success = impl->stop_worker(error_message);
         delete impl;
         return success;
     }
