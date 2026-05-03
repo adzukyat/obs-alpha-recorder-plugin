@@ -147,8 +147,9 @@ namespace alpha_recorder::obs
             return;
         }
 
-        (void)obs_websocket_vendor_unregister_request(g_vendor, kRequestGetSettings);
-        (void)obs_websocket_vendor_unregister_request(g_vendor, kRequestSetSettings);
+        // obs-websocket exposes unregister through a cached proc-handler pointer.
+        // During OBS shutdown that handler may already be tearing down, especially
+        // on Windows, so avoid calling back into obs-websocket from module unload.
         g_vendor = nullptr;
     }
 

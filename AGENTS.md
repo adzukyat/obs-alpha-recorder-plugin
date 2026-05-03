@@ -127,6 +127,9 @@ Required OBS integration points:
   - `obs_add_raw_video_callback()` with BGRA conversion.
 - Automation:
   - obs-websocket vendor registration during `obs_module_post_load()`.
+  - Do not call obs-websocket vendor-request unregister APIs from
+    `obs_module_unload()`; OBS shutdown can invalidate the cached
+    obs-websocket proc handler before Alpha Recorder unloads.
 
 If raw callbacks produce only opaque alpha in a future OBS/runtime
 configuration, the fallback is a dedicated render path: render the active
