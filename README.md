@@ -177,7 +177,8 @@ Implemented in the core library and live OBS workflow:
 - deterministic E2E scenarios that validate RGB raw artifacts, alpha mask
   artifacts, and split-rotation behavior through the OBS module boundary
 - cross-platform OBS app E2E harness that verifies RGB and alpha mask movie
-  outputs
+  outputs, including frame-by-frame sync between a moving colored object and
+  its grayscale alpha mask on the PNG MOV path
 
 The test-only scenario path remains confined to the E2E harness; the shipping
 plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder

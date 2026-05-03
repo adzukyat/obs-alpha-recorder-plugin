@@ -3,9 +3,11 @@
 #include "recording_session_controller_gate.hpp"
 
 #include <algorithm>
-#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -28,8 +30,6 @@ namespace
 {
 
     using alpha_recorder::obs::AlphaMaskVideoWriter;
-
-    constexpr std::size_t kAlphaStageSurfaceCount = 3U;
 
     constexpr std::string_view kAlphaExtractEffect = R"(
 uniform float4x4 ViewProj;
@@ -202,12 +202,9 @@ technique Draw
 
             image_param_ = gs_effect_get_param_by_name(effect_, "image");
             mask_texture_ = gs_texture_create(width, height, GS_R8, 1, nullptr, GS_RENDER_TARGET);
-            for (gs_stagesurf_t *&surface : stage_surfaces_)
-            {
-                surface = gs_stagesurface_create(width, height, GS_R8);
-            }
+            stage_surface_ = gs_stagesurface_create(width, height, GS_R8);
 
-            if (image_param_ == nullptr || mask_texture_ == nullptr || !stage_surfaces_ready())
+            if (image_param_ == nullptr || mask_texture_ == nullptr || stage_surface_ == nullptr)
             {
                 error_message = "Alpha Recorder could not allocate GPU resources for alpha extraction.";
                 destroy();
@@ -216,14 +213,13 @@ technique Draw
 
             width_ = width;
             height_ = height;
-            next_stage_index_ = 0U;
-            staged_frame_count_ = 0U;
             return true;
         }
 
-        bool capture_latest(std::vector<std::uint8_t> &alpha, std::string &error_message)
+        bool capture_latest(std::vector<std::uint8_t> &alpha, std::uint64_t &timestamp, std::string &error_message)
         {
             alpha.clear();
+            timestamp = 0U;
 
             gs_texture_t *program_texture = obs_get_main_texture();
             if (program_texture == nullptr)
@@ -231,14 +227,14 @@ technique Draw
                 return true;
             }
 
-            if (staged_frame_count_ > 0U)
+            if (has_staged_frame_)
             {
-                const std::size_t map_index = (next_stage_index_ + kAlphaStageSurfaceCount - 1U) % kAlphaStageSurfaceCount;
-                map_staged_surface(map_index, alpha, error_message);
+                map_staged_surface(alpha, error_message);
                 if (!error_message.empty())
                 {
                     return false;
                 }
+                timestamp = staged_timestamp_;
             }
 
             if (!render_alpha_mask(program_texture))
@@ -246,25 +242,19 @@ technique Draw
                 return false;
             }
 
-            gs_stage_texture(stage_surfaces_[next_stage_index_], mask_texture_);
-            next_stage_index_ = (next_stage_index_ + 1U) % kAlphaStageSurfaceCount;
-            if (staged_frame_count_ < kAlphaStageSurfaceCount)
-            {
-                ++staged_frame_count_;
-            }
+            gs_stage_texture(stage_surface_, mask_texture_);
+            staged_timestamp_ = obs_get_video_frame_time();
+            has_staged_frame_ = true;
 
             return true;
         }
 
         void destroy() noexcept
         {
-            for (gs_stagesurf_t *&surface : stage_surfaces_)
+            if (stage_surface_ != nullptr)
             {
-                if (surface != nullptr)
-                {
-                    gs_stagesurface_destroy(surface);
-                    surface = nullptr;
-                }
+                gs_stagesurface_destroy(stage_surface_);
+                stage_surface_ = nullptr;
             }
 
             if (mask_texture_ != nullptr)
@@ -282,22 +272,16 @@ technique Draw
             image_param_ = nullptr;
             width_ = 0U;
             height_ = 0U;
-            next_stage_index_ = 0U;
-            staged_frame_count_ = 0U;
+            staged_timestamp_ = 0U;
+            has_staged_frame_ = false;
         }
 
     private:
-        bool stage_surfaces_ready() const noexcept
-        {
-            return std::all_of(stage_surfaces_.begin(), stage_surfaces_.end(),
-                               [](const gs_stagesurf_t *surface) { return surface != nullptr; });
-        }
-
-        void map_staged_surface(std::size_t index, std::vector<std::uint8_t> &alpha, std::string &error_message)
+        void map_staged_surface(std::vector<std::uint8_t> &alpha, std::string &error_message)
         {
             std::uint8_t *data = nullptr;
             std::uint32_t linesize = 0U;
-            if (!gs_stagesurface_map(stage_surfaces_[index], &data, &linesize))
+            if (!gs_stagesurface_map(stage_surface_, &data, &linesize))
             {
                 error_message = "Alpha Recorder could not map the staged alpha frame.";
                 return;
@@ -305,17 +289,20 @@ technique Draw
 
             if (data == nullptr || linesize < width_)
             {
-                gs_stagesurface_unmap(stage_surfaces_[index]);
+                gs_stagesurface_unmap(stage_surface_);
                 error_message = "Alpha Recorder received an invalid staged alpha frame.";
                 return;
             }
 
             copy_alpha_plane(alpha, data, linesize, width_, height_);
-            gs_stagesurface_unmap(stage_surfaces_[index]);
+            gs_stagesurface_unmap(stage_surface_);
         }
 
         bool render_alpha_mask(gs_texture_t *program_texture)
         {
+            gs_texture_t *previous_render_target = gs_get_render_target();
+            gs_zstencil_t *previous_zstencil_target = gs_get_zstencil_target();
+
             gs_set_render_target(mask_texture_, nullptr);
             vec4 clear_color;
             vec4_set(&clear_color, 0.0F, 0.0F, 0.0F, 1.0F);
@@ -330,19 +317,33 @@ technique Draw
                 gs_draw_sprite(program_texture, 0, width_, height_);
             }
             gs_enable_blending(true);
-            gs_set_render_target(program_texture, nullptr);
+            gs_set_render_target(previous_render_target, previous_zstencil_target);
             return true;
         }
 
         gs_effect_t *effect_ = nullptr;
         gs_eparam_t *image_param_ = nullptr;
         gs_texture_t *mask_texture_ = nullptr;
-        std::array<gs_stagesurf_t *, kAlphaStageSurfaceCount> stage_surfaces_{};
+        gs_stagesurf_t *stage_surface_ = nullptr;
         std::uint32_t width_ = 0U;
         std::uint32_t height_ = 0U;
-        std::size_t next_stage_index_ = 0U;
-        std::size_t staged_frame_count_ = 0U;
+        std::uint64_t staged_timestamp_ = 0U;
+        bool has_staged_frame_ = false;
     };
+
+    struct AlphaFrame
+    {
+        std::uint64_t timestamp = 0U;
+        std::shared_ptr<std::vector<std::uint8_t>> alpha{};
+
+        [[nodiscard]] bool empty() const noexcept
+        {
+            return !alpha || alpha->empty();
+        }
+    };
+
+    // OBS's raw video output reads from a six-frame cache; main-rendered sees the newest texture.
+    constexpr std::size_t kVideoOutputCacheFrameLatency = 5U;
 
     class RecordingSessionController
     {
@@ -384,6 +385,7 @@ technique Draw
             switch (event)
             {
             case OBS_FRONTEND_EVENT_RECORDING_STARTING:
+                prepare_capture_session();
                 break;
 
             case OBS_FRONTEND_EVENT_RECORDING_STARTED:
@@ -399,7 +401,6 @@ technique Draw
                 break;
 
             case OBS_FRONTEND_EVENT_RECORDING_STOPPING:
-                set_recording_paused(true);
                 break;
 
             case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
@@ -422,6 +423,11 @@ technique Draw
             static_cast<RecordingSessionController *>(data)->on_main_rendered();
         }
 
+        static void on_raw_video(void *data, video_data *frame)
+        {
+            static_cast<RecordingSessionController *>(data)->on_raw_video(frame);
+        }
+
         static void on_file_changed(void *data, calldata_t *params)
         {
             static_cast<RecordingSessionController *>(data)->on_file_changed(params);
@@ -439,7 +445,7 @@ technique Draw
             recording_paused_ = paused;
         }
 
-        bool start_session()
+        bool prepare_capture_session()
         {
             const alpha_recorder::obs::Settings settings = alpha_recorder::obs::load_settings(obs_frontend_get_user_config());
             if (!settings.enabled)
@@ -449,6 +455,65 @@ technique Draw
 
             std::lock_guard<std::mutex> lock(mutex_);
             if (session_active_)
+            {
+                return true;
+            }
+
+            obs_output_t *recording_output = obs_frontend_get_recording_output();
+            if (recording_output == nullptr)
+            {
+                log_and_show_error("Alpha Recorder could not access the active recording output.", true);
+                return false;
+            }
+
+            obs_video_info video_info = {};
+            if (!obs_get_video_info(&video_info))
+            {
+                log_and_show_error("Alpha Recorder could not read the OBS video configuration.", true);
+                return false;
+            }
+
+            recording_output_ = obs_output_get_ref(recording_output);
+            if (recording_output_ == nullptr)
+            {
+                log_and_show_error("Alpha Recorder could not retain a reference to the recording output.", true);
+                return false;
+            }
+
+            finalization_format_ = settings.finalization_format;
+            session_active_ = true;
+            session_aborted_ = false;
+            recording_paused_ = obs_frontend_recording_paused();
+            video_info_ = video_info;
+            recording_path_.clear();
+            next_sequence_ = 0;
+            cadence_target_ = 0;
+            cadence_started_ = false;
+            last_alpha_frame_.alpha.reset();
+            last_alpha_frame_.timestamp = 0U;
+            last_captured_alpha_frame_.alpha.reset();
+            last_captured_alpha_frame_.timestamp = 0U;
+            pending_alpha_frames_.clear();
+            pending_cadence_timestamps_.clear();
+            observed_raw_timestamps_.clear();
+
+            obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
+            main_rendered_callback_connected_ = true;
+            obs_add_raw_video_callback(nullptr, &RecordingSessionController::on_raw_video, this);
+            raw_video_callback_connected_ = true;
+            return true;
+        }
+
+        bool start_session()
+        {
+            const alpha_recorder::obs::Settings settings = alpha_recorder::obs::load_settings(obs_frontend_get_user_config());
+            if (!settings.enabled)
+            {
+                return true;
+            }
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (writer_.is_open())
             {
                 return true;
             }
@@ -464,11 +529,14 @@ technique Draw
                 }
             }
 
-            obs_video_info video_info = {};
-            if (!obs_get_video_info(&video_info))
+            obs_video_info video_info = video_info_;
+            if (video_info.output_width == 0U || video_info.output_height == 0U)
             {
-                log_and_show_error("Alpha Recorder could not read the OBS video configuration.", true);
-                return false;
+                if (!obs_get_video_info(&video_info))
+                {
+                    log_and_show_error("Alpha Recorder could not read the OBS video configuration.", true);
+                    return false;
+                }
             }
 
             char *recording_path_text = obs_frontend_get_current_record_output_path();
@@ -513,6 +581,10 @@ technique Draw
             {
                 obs_output_release(recording_output_);
                 recording_output_ = nullptr;
+                session_active_ = false;
+                pending_alpha_frames_.clear();
+                pending_cadence_timestamps_.clear();
+                observed_raw_timestamps_.clear();
                 return false;
             }
 
@@ -521,17 +593,29 @@ technique Draw
             recording_paused_ = obs_frontend_recording_paused();
             video_info_ = video_info;
             recording_path_ = recording_path;
-            next_sequence_ = 0;
 
             signal_handler_t *signal_handler = obs_output_get_signal_handler(recording_output_);
-            if (signal_handler != nullptr)
+            if (signal_handler != nullptr && !file_changed_connected_)
             {
                 signal_handler_connect(signal_handler, "file_changed", &RecordingSessionController::on_file_changed, this);
                 file_changed_connected_ = true;
             }
 
-            obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
-            main_rendered_callback_connected_ = true;
+            if (!main_rendered_callback_connected_)
+            {
+                obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
+                main_rendered_callback_connected_ = true;
+            }
+            if (!raw_video_callback_connected_)
+            {
+                obs_add_raw_video_callback(nullptr, &RecordingSessionController::on_raw_video, this);
+                raw_video_callback_connected_ = true;
+            }
+
+            if (recording_output_ != nullptr)
+            {
+                drain_cadence_locked();
+            }
             return true;
         }
 
@@ -578,17 +662,163 @@ technique Draw
             return true;
         }
 
+        void remember_pending_alpha_frame_locked(AlphaFrame frame)
+        {
+            constexpr std::size_t kMaxPendingFrames = 240U;
+            pending_alpha_frames_.push_back(std::move(frame));
+            while (pending_alpha_frames_.size() > kMaxPendingFrames)
+            {
+                pending_alpha_frames_.pop_front();
+            }
+        }
+
+        void remember_pending_cadence_locked(std::uint64_t timestamp)
+        {
+            constexpr std::size_t kMaxPendingFrames = 240U;
+            pending_cadence_timestamps_.push_back(timestamp);
+            while (pending_cadence_timestamps_.size() > kMaxPendingFrames)
+            {
+                pending_cadence_timestamps_.pop_front();
+            }
+        }
+
+        void remember_observed_raw_timestamp_locked(std::uint64_t timestamp)
+        {
+            constexpr std::size_t kMaxObservedFrames = 240U;
+            observed_raw_timestamps_.push_back(timestamp);
+            while (observed_raw_timestamps_.size() > kMaxObservedFrames)
+            {
+                observed_raw_timestamps_.pop_front();
+            }
+        }
+
+        bool write_alpha_frame_locked(const AlphaFrame &frame, std::string &error_message)
+        {
+            if (frame.empty() || !writer_.write_frame(frame.alpha->data(), video_info_.output_width, &error_message))
+            {
+                session_aborted_ = true;
+                if (error_message.empty())
+                {
+                    error_message = "Alpha Recorder failed to write an alpha mask frame.";
+                }
+                return false;
+            }
+
+            last_alpha_frame_ = frame;
+            ++next_sequence_;
+            return true;
+        }
+
+        bool select_alpha_for_timestamp_locked(std::uint64_t timestamp, AlphaFrame &frame)
+        {
+            (void)timestamp;
+
+            if (pending_alpha_frames_.empty())
+            {
+                return false;
+            }
+
+            if (last_alpha_frame_.empty() && pending_alpha_frames_.size() <= kVideoOutputCacheFrameLatency)
+            {
+                return false;
+            }
+
+            frame = std::move(pending_alpha_frames_.front());
+            pending_alpha_frames_.pop_front();
+            return true;
+        }
+
+        void drain_cadence_locked()
+        {
+            if (!writer_.is_open())
+            {
+                return;
+            }
+
+            std::string error_message;
+            while (!pending_cadence_timestamps_.empty())
+            {
+                AlphaFrame alpha_frame{};
+                if (select_alpha_for_timestamp_locked(pending_cadence_timestamps_.front(), alpha_frame))
+                {
+                    pending_cadence_timestamps_.pop_front();
+                    if (!write_alpha_frame_locked(alpha_frame, error_message))
+                    {
+                        pending_alpha_frames_.clear();
+                        pending_cadence_timestamps_.clear();
+                        log_and_show_error(error_message, false);
+                        return;
+                    }
+                    continue;
+                }
+
+                return;
+            }
+        }
+
+        std::uint64_t recorded_video_frame_target_locked(obs_output_t *recording_output, bool include_stop_grace = false) const
+        {
+            if (recording_output == nullptr)
+            {
+                return 0U;
+            }
+
+            const int output_frames = obs_output_get_total_frames(recording_output);
+            if (output_frames <= 0)
+            {
+                return 0U;
+            }
+
+            return static_cast<std::uint64_t>(output_frames) + (include_stop_grace ? 1U : 0U);
+        }
+
+        void reconcile_output_frame_count_locked(obs_output_t *recording_output, std::string &error_message)
+        {
+            if (recording_output == nullptr || !writer_.is_open())
+            {
+                return;
+            }
+
+            const std::uint64_t output_frames = recorded_video_frame_target_locked(recording_output);
+            if (output_frames == 0U)
+            {
+                return;
+            }
+
+            drain_cadence_locked();
+            if (last_alpha_frame_.empty())
+            {
+                return;
+            }
+
+            while (next_sequence_ < output_frames)
+            {
+                if (!writer_.write_frame(last_alpha_frame_.alpha->data(), video_info_.output_width, &error_message))
+                {
+                    session_aborted_ = true;
+                    if (error_message.empty())
+                    {
+                        error_message = "Alpha Recorder failed to duplicate the final alpha mask frame.";
+                    }
+                    return;
+                }
+                ++next_sequence_;
+            }
+        }
+
         void stop_session(bool show_popup)
         {
             obs_output_t *recording_output = nullptr;
             bool disconnect_main_rendered_callback = false;
+            bool disconnect_raw_video_callback = false;
             bool disconnect_file_changed = false;
             bool finalize_failed = false;
             std::string finalize_error;
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!session_active_ && !writer_.is_open() && recording_output_ == nullptr)
+                if (!session_active_ && !writer_.is_open() && recording_output_ == nullptr &&
+                    !main_rendered_callback_connected_ && !raw_video_callback_connected_ && !file_changed_connected_)
                 {
                     recording_paused_ = false;
                     return;
@@ -599,14 +829,20 @@ technique Draw
                 recording_output = recording_output_;
                 recording_output_ = nullptr;
                 disconnect_main_rendered_callback = main_rendered_callback_connected_;
+                disconnect_raw_video_callback = raw_video_callback_connected_;
                 disconnect_file_changed = file_changed_connected_;
                 main_rendered_callback_connected_ = false;
+                raw_video_callback_connected_ = false;
                 file_changed_connected_ = false;
             }
 
             if (disconnect_main_rendered_callback)
             {
                 obs_remove_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
+            }
+            if (disconnect_raw_video_callback)
+            {
+                obs_remove_raw_video_callback(&RecordingSessionController::on_raw_video, this);
             }
 
             if (recording_output != nullptr)
@@ -625,11 +861,23 @@ technique Draw
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                reconcile_output_frame_count_locked(recording_output, finalize_error);
+                if (!finalize_error.empty())
+                {
+                    finalize_failed = true;
+                }
                 if (!finalize_current_segment_locked(&finalize_error))
                 {
                     finalize_failed = true;
                 }
 
+                last_alpha_frame_.alpha.reset();
+                last_alpha_frame_.timestamp = 0U;
+                last_captured_alpha_frame_.alpha.reset();
+                last_captured_alpha_frame_.timestamp = 0U;
+                pending_alpha_frames_.clear();
+                pending_cadence_timestamps_.clear();
+                observed_raw_timestamps_.clear();
                 obs_enter_graphics();
                 alpha_extractor_.destroy();
                 obs_leave_graphics();
@@ -705,17 +953,18 @@ technique Draw
         void on_main_rendered()
         {
             std::vector<std::uint8_t> alpha;
+            std::uint64_t alpha_timestamp = 0U;
             std::string error_message;
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!alpha_recorder::obs::recording_input_is_allowed(session_active_, session_aborted_, writer_.is_open(), recording_paused_))
+                if (!session_active_ || session_aborted_ || recording_paused_ || recording_output_ == nullptr)
                 {
                     return;
                 }
 
                 if (!alpha_extractor_.ensure(video_info_.output_width, video_info_.output_height, error_message) ||
-                    !alpha_extractor_.capture_latest(alpha, error_message))
+                    !alpha_extractor_.capture_latest(alpha, alpha_timestamp, error_message))
                 {
                     session_aborted_ = true;
                     if (error_message.empty())
@@ -725,15 +974,9 @@ technique Draw
                 }
                 else if (!alpha.empty())
                 {
-                    if (!writer_.write_frame(alpha.data(), video_info_.output_width, &error_message))
-                    {
-                        session_aborted_ = true;
-                        if (error_message.empty())
-                        {
-                            error_message = "Alpha Recorder failed to write an alpha mask frame.";
-                        }
-                    }
-                    ++next_sequence_;
+                    last_captured_alpha_frame_ = AlphaFrame{alpha_timestamp, std::make_shared<std::vector<std::uint8_t>>(std::move(alpha))};
+                    remember_pending_alpha_frame_locked(last_captured_alpha_frame_);
+                    drain_cadence_locked();
                 }
             }
 
@@ -743,13 +986,62 @@ technique Draw
             }
         }
 
+        void on_raw_video(video_data *frame)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (frame == nullptr || !session_active_ || session_aborted_ || recording_paused_ || recording_output_ == nullptr)
+            {
+                return;
+            }
+
+            remember_observed_raw_timestamp_locked(frame->timestamp);
+
+            const std::uint64_t output_frames = recorded_video_frame_target_locked(recording_output_);
+            if (output_frames == 0U || output_frames <= cadence_target_)
+            {
+                return;
+            }
+
+            if (!cadence_started_)
+            {
+                cadence_started_ = true;
+                const std::uint64_t callback_order_allowance = 1U;
+                const std::uint64_t timestamps_to_keep = output_frames + callback_order_allowance;
+                while (observed_raw_timestamps_.size() > timestamps_to_keep)
+                {
+                    observed_raw_timestamps_.pop_front();
+                }
+            }
+
+            while (cadence_target_ < output_frames)
+            {
+                if (observed_raw_timestamps_.empty())
+                {
+                    break;
+                }
+
+                remember_pending_cadence_locked(observed_raw_timestamps_.front());
+                observed_raw_timestamps_.pop_front();
+                ++cadence_target_;
+            }
+            drain_cadence_locked();
+        }
+
         bool event_callback_registered_ = false;
         bool main_rendered_callback_connected_ = false;
+        bool raw_video_callback_connected_ = false;
         bool file_changed_connected_ = false;
         bool session_active_ = false;
         bool session_aborted_ = false;
         bool recording_paused_ = false;
+        bool cadence_started_ = false;
         std::uint64_t next_sequence_ = 0;
+        std::uint64_t cadence_target_ = 0;
+        AlphaFrame last_alpha_frame_{};
+        AlphaFrame last_captured_alpha_frame_{};
+        std::deque<AlphaFrame> pending_alpha_frames_{};
+        std::deque<std::uint64_t> pending_cadence_timestamps_{};
+        std::deque<std::uint64_t> observed_raw_timestamps_{};
         std::filesystem::path recording_path_{};
         obs_video_info video_info_{};
         AlphaPlaneExtractor alpha_extractor_{};

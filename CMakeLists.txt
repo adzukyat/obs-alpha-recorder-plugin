@@ -221,6 +221,7 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
     add_library(alpha_recorder_e2e_output MODULE
         src/obs/plugin.cpp
         src/obs/obs_output_bridge.cpp
+        src/obs/e2e_moving_alpha_source.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_e2e_output)
     alpha_recorder_apply_warnings(alpha_recorder_e2e_output)

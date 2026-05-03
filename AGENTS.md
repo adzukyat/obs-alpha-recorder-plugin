@@ -69,9 +69,10 @@ When enabled:
 - During recording:
   - Extract the rendered Program texture's alpha on the GPU without changing
     OBS's normal recording color format.
-  - Convert alpha into visible grayscale luma and enqueue it for mask movie
-    encoding off the OBS render callback path.
-  - Pause alpha capture while OBS recording is paused or stopping.
+  - Queue captured alpha planes and write them to the mask movie only as OBS's
+    recording output frame count advances.
+  - Pause alpha capture while OBS recording is paused; keep stop-edge capture
+    active until OBS reports recording stopped.
 - On recording stop:
   - Finalize the alpha mask movie in the selected finalization format.
 
@@ -106,14 +107,19 @@ Current alignment strategy:
 
 1. Keep OBS's normal recording color format independent of Alpha Recorder so
    production recording can use hardware-friendly formats such as NV12/P010.
-2. Capture the rendered Program texture after OBS renders the main mix, extract
+2. Pre-arm Program alpha capture on
+   `OBS_FRONTEND_EVENT_RECORDING_STARTING`, before the recording path is
+   available, so startup frames are not missed.
+3. Capture the rendered Program texture after OBS renders the main mix, extract
    its alpha into an `GS_R8` mask texture on the GPU, then stage that one-byte
-   alpha plane for the mask writer.
-3. Pause capture on recording pause and on
-   `OBS_FRONTEND_EVENT_RECORDING_STOPPING`.
-4. Encode each extracted alpha plane as visible grayscale luma into the live
-   alpha mask movie through a bounded asynchronous writer queue.
-5. Close the mask movie on recording stop or split rotation. The RGB recording
+   alpha plane into a short pending-frame queue.
+4. Drain pending alpha frames into the live mask writer only as
+   `obs_output_get_total_frames()` advances, so the mask follows OBS's actual
+   recorded-video cadence rather than every rendered frame.
+5. Pause capture on recording pause. Do not pause on
+   `OBS_FRONTEND_EVENT_RECORDING_STOPPING`; keep capturing until
+   `OBS_FRONTEND_EVENT_RECORDING_STOPPED` so stop-edge frames can reconcile.
+6. Close the mask movie on recording stop or split rotation. The RGB recording
    is never decoded or modified by Alpha Recorder.
 
 This intentionally avoids brittle dependence on encoder packet callbacks.
@@ -121,6 +127,7 @@ This intentionally avoids brittle dependence on encoder packet callbacks.
 Required OBS integration points:
 
 - Frontend events:
+  - `OBS_FRONTEND_EVENT_RECORDING_STARTING`
   - `OBS_FRONTEND_EVENT_RECORDING_STARTED`
   - `OBS_FRONTEND_EVENT_RECORDING_PAUSED`
   - `OBS_FRONTEND_EVENT_RECORDING_UNPAUSED`
@@ -135,7 +142,7 @@ Required OBS integration points:
 - Program alpha extraction:
   - `obs_add_main_rendered_callback()` / `obs_remove_main_rendered_callback()`
   - `obs_get_main_texture()`
-  - `gs_texrender_create(GS_R8, ...)`
+  - `gs_texture_create(..., GS_R8, ..., GS_RENDER_TARGET)`
   - `gs_stage_texture()` / `gs_stagesurface_map()`
 - Automation:
   - obs-websocket vendor registration during `obs_module_post_load()`.
@@ -235,6 +242,9 @@ The CMake target:
   profile while Alpha Recorder extracts alpha through its own GPU-side path.
 - Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
+- Adds a test-only moving colored object over a transparent background, then
+  decodes RGB and PNG MOV alpha frames and verifies the moving mask bounds match
+  frame-by-frame.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
 - For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports

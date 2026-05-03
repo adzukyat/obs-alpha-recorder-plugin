@@ -206,6 +206,7 @@ namespace alpha_recorder::obs
     void register_websocket_vendor_api() noexcept;
     void unregister_websocket_vendor_api() noexcept;
     bool register_output_module() noexcept;
+    bool register_e2e_sources() noexcept;
     bool initialize_module() noexcept;
 
 } // namespace alpha_recorder::obs

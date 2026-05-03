@@ -15,6 +15,7 @@ type Args = {
   recordSeconds: number;
   width: number;
   height: number;
+  fps: number;
   finalizationFormat: string;
   keepObsOpen: boolean;
 };
@@ -26,8 +27,9 @@ function parseArgs(argv: string[]): Args {
     configuration: "RelWithDebInfo",
     port: 0,
     recordSeconds: 5,
-    width: 1280,
-    height: 720,
+    width: 1920,
+    height: 1080,
+    fps: 60,
     finalizationFormat: "mask_png_mov",
     keepObsOpen: false,
   };
@@ -66,6 +68,10 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--height":
         args.height = Number(value);
+        ++index;
+        break;
+      case "--fps":
+        args.fps = Number(value);
         ++index;
         break;
       case "--finalization-format":
@@ -353,6 +359,14 @@ function checkedProcess(tool: string, args: string[], timeoutSeconds: number): v
   }
 }
 
+function checkedOutput(tool: string, args: string[], timeoutSeconds: number): Uint8Array {
+  const result = spawnSync({ cmd: [tool, ...args], stdout: "pipe", stderr: "pipe", timeout: timeoutSeconds * 1000 });
+  if (result.exitCode !== 0) {
+    throw new Error(`${tool} failed: ${new TextDecoder().decode(result.stderr)}`);
+  }
+  return result.stdout;
+}
+
 async function checkedProcessWithRetry(tool: string, args: string[], timeoutSeconds: number): Promise<void> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let lastError: unknown = undefined;
@@ -368,6 +382,108 @@ async function checkedProcessWithRetry(tool: string, args: string[], timeoutSeco
   throw lastError;
 }
 
+type Bounds = {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+  count: number;
+};
+
+function emptyBounds(): Bounds {
+  return { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY, maxX: -1, maxY: -1, count: 0 };
+}
+
+function boundsText(bounds: Bounds): string {
+  if (bounds.count === 0) {
+    return "empty";
+  }
+  return `${bounds.minX},${bounds.minY}-${bounds.maxX},${bounds.maxY} count=${bounds.count}`;
+}
+
+function rgbFrameBounds(frame: Uint8Array, width: number, height: number): Bounds {
+  const bounds = emptyBounds();
+  for (let y = 0; y < height; ++y) {
+    for (let x = 0; x < width; ++x) {
+      const offset = (y * width + x) * 3;
+      const r = frame[offset];
+      const g = frame[offset + 1];
+      const b = frame[offset + 2];
+      if (r + g + b > 120) {
+        bounds.minX = Math.min(bounds.minX, x);
+        bounds.minY = Math.min(bounds.minY, y);
+        bounds.maxX = Math.max(bounds.maxX, x);
+        bounds.maxY = Math.max(bounds.maxY, y);
+        bounds.count += 1;
+      }
+    }
+  }
+  return bounds;
+}
+
+function grayFrameBounds(frame: Uint8Array, width: number, height: number): Bounds {
+  const bounds = emptyBounds();
+  for (let y = 0; y < height; ++y) {
+    for (let x = 0; x < width; ++x) {
+      const value = frame[y * width + x];
+      if (value > 128) {
+        bounds.minX = Math.min(bounds.minX, x);
+        bounds.minY = Math.min(bounds.minY, y);
+        bounds.maxX = Math.max(bounds.maxX, x);
+        bounds.maxY = Math.max(bounds.maxY, y);
+        bounds.count += 1;
+      }
+    }
+  }
+  return bounds;
+}
+
+function requireSimilarBounds(frameIndex: number, rgb: Bounds, alpha: Bounds): void {
+  const tolerance = 2;
+  if (rgb.count === 0 || alpha.count === 0) {
+    throw new Error(`Frame ${frameIndex} did not contain both RGB and alpha masks: rgb=${boundsText(rgb)} alpha=${boundsText(alpha)}`);
+  }
+
+  const deltas = [
+    Math.abs(rgb.minX - alpha.minX),
+    Math.abs(rgb.minY - alpha.minY),
+    Math.abs(rgb.maxX - alpha.maxX),
+    Math.abs(rgb.maxY - alpha.maxY),
+  ];
+  if (deltas.some((delta) => delta > tolerance)) {
+    throw new Error(`Frame ${frameIndex} RGB/alpha mask bounds differ: rgb=${boundsText(rgb)} alpha=${boundsText(alpha)}`);
+  }
+}
+
+function verifyRgbAlphaFrameSync(ffmpeg: string, rgbPath: string, alphaPath: string, width: number, height: number): void {
+  const verifyWidth = Math.min(width, 320);
+  const verifyHeight = Math.max(2, Math.round((height * verifyWidth) / width / 2) * 2);
+  const scaleFilter = `scale=${verifyWidth}:${verifyHeight}:flags=neighbor`;
+  const rgbBytes = checkedOutput(ffmpeg, ["-v", "error", "-i", rgbPath, "-an", "-vf", scaleFilter, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], 180);
+  const alphaBytes = checkedOutput(ffmpeg, ["-v", "error", "-i", alphaPath, "-an", "-vf", scaleFilter, "-f", "rawvideo", "-pix_fmt", "gray", "-"], 180);
+  const rgbFrameSize = verifyWidth * verifyHeight * 3;
+  const alphaFrameSize = verifyWidth * verifyHeight;
+
+  if (rgbBytes.length % rgbFrameSize !== 0) {
+    throw new Error(`Decoded RGB byte count is not frame-aligned: ${rgbBytes.length}`);
+  }
+  if (alphaBytes.length % alphaFrameSize !== 0) {
+    throw new Error(`Decoded alpha byte count is not frame-aligned: ${alphaBytes.length}`);
+  }
+
+  const rgbFrames = rgbBytes.length / rgbFrameSize;
+  const alphaFrames = alphaBytes.length / alphaFrameSize;
+  if (alphaFrames < rgbFrames || alphaFrames > rgbFrames + 1) {
+    throw new Error(`Decoded RGB/alpha frame counts differ beyond the tolerated trailing alpha frame: rgb=${rgbFrames} alpha=${alphaFrames}`);
+  }
+
+  for (let frame = 0; frame < rgbFrames; ++frame) {
+    const rgb = rgbFrameBounds(rgbBytes.subarray(frame * rgbFrameSize, (frame + 1) * rgbFrameSize), verifyWidth, verifyHeight);
+    const alpha = grayFrameBounds(alphaBytes.subarray(frame * alphaFrameSize, (frame + 1) * alphaFrameSize), verifyWidth, verifyHeight);
+    requireSimilarBounds(frame, rgb, alpha);
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(Bun.argv.slice(2));
   const port = args.port > 0 ? args.port : await freePort();
@@ -379,6 +495,7 @@ async function main(): Promise<void> {
   const homeRoot = join(artifactRoot, "home");
   const portableConfig =
     platform === "darwin" ? join(homeRoot, "Library", "Application Support", "obs-studio") : join(contentRoot, "config", "obs-studio");
+  const simpleVideoEncoder = platform === "darwin" ? "apple_h264" : "x264";
   if (platform === "darwin") {
     mkdirSync(join(homeRoot, "Library", "Logs", "DiagnosticReports"), { recursive: true });
   }
@@ -437,13 +554,14 @@ FilePath=${artifactRoot.replaceAll("\\", "/")}
 RecFormat2=mkv
 VBitrate=2500
 ABitrate=160
-UseAdvanced=false
-Preset=veryfast
+UseAdvanced=true
+Preset=ultrafast
+x264Settings=tune=zerolatency bframes=0 sync-lookahead=0 rc-lookahead=0
 RecQuality=Stream
 RecRB=false
 RecTracks=1
-StreamEncoder=x264
-RecEncoder=x264
+StreamEncoder=${simpleVideoEncoder}
+RecEncoder=${simpleVideoEncoder}
 
 [Video]
 BaseCX=${args.width}
@@ -451,9 +569,9 @@ BaseCY=${args.height}
 OutputCX=${args.width}
 OutputCY=${args.height}
 FPSType=0
-FPSCommon=30
-FPSInt=30
-FPSNum=30
+FPSCommon=${args.fps}
+FPSInt=${args.fps}
+FPSNum=${args.fps}
 FPSDen=1
 ScaleType=bicubic
 ColorFormat=NV12
@@ -583,6 +701,20 @@ finalization_format=${args.finalizationFormat}
       throw new Error(`Alpha Recorder did not accept finalization_format=${args.finalizationFormat}: ${JSON.stringify(settings)}`);
     }
 
+    await socket.request("CreateInput", {
+      sceneName: "Scene",
+      inputName: "AlphaRecorderMovingAlpha",
+      inputKind: "alpha_recorder_e2e_moving_alpha",
+      inputSettings: {
+        width: args.width,
+        height: args.height,
+        box_size: Math.max(32, Math.min(96, Math.floor(Math.min(args.width, args.height) / 4))),
+        step: 17,
+        color: 0xff00ffff,
+      },
+      sceneItemEnabled: true,
+    });
+
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
     await socket.request("StartRecord");
     await waitForRecordState(socket, true);
@@ -658,6 +790,10 @@ finalization_format=${args.finalizationFormat}
       }
     } else if (alphaStream.codec_name !== "png") {
       throw new Error(`Alpha movie probe did not report PNG MOV: ${JSON.stringify(alphaProbe)}`);
+    }
+
+    if (expectedFinalizationFormat === "mask_png_mov") {
+      verifyRgbAlphaFrameSync(ffmpeg, rgbPath, alphaPath, args.width, args.height);
     }
 
     console.log(

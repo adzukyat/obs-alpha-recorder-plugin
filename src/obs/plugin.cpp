@@ -26,7 +26,7 @@ namespace alpha_recorder::obs
     bool initialize_module() noexcept
     {
 #if defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
-        return register_output_module();
+        return register_output_module() && register_e2e_sources();
 #else
         return register_runtime_hooks();
 #endif

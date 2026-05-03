@@ -10,8 +10,9 @@ set(OBS_ROOT "$ENV{OBS_ROOT}" CACHE PATH "OBS runtime root")
 set(CONFIGURATION "RelWithDebInfo" CACHE STRING "Build configuration")
 set(PORT 0 CACHE STRING "obs-websocket port, or 0 for an ephemeral port")
 set(RECORD_SECONDS 5 CACHE STRING "Recording duration")
-set(WIDTH 1280 CACHE STRING "Canvas width")
-set(HEIGHT 720 CACHE STRING "Canvas height")
+set(WIDTH 1920 CACHE STRING "Canvas width")
+set(HEIGHT 1080 CACHE STRING "Canvas height")
+set(FPS 60 CACHE STRING "Recording FPS")
 set(FINALIZATION_FORMAT "mask_png_mov" CACHE STRING "Alpha Recorder finalization format")
 set(SKIP_BUILD OFF CACHE BOOL "Skip plugin build before OBS app E2E")
 set(SKIP_STAGE OFF CACHE BOOL "Skip staging before OBS app E2E")
@@ -30,7 +31,7 @@ endif()
 
 if(NOT SKIP_BUILD)
     execute_process(
-        COMMAND "${CMAKE_COMMAND}" --build "${BUILD_DIR}" --config "${CONFIGURATION}" --target alpha_recorder_plugin alpha_recorder_frontend
+        COMMAND "${CMAKE_COMMAND}" --build "${BUILD_DIR}" --config "${CONFIGURATION}" --target alpha_recorder_plugin alpha_recorder_frontend alpha_recorder_e2e_output
         COMMAND_ERROR_IS_FATAL ANY
     )
 endif()
@@ -76,6 +77,7 @@ set(args
     "--record-seconds" "${RECORD_SECONDS}"
     "--width" "${WIDTH}"
     "--height" "${HEIGHT}"
+    "--fps" "${FPS}"
     "--finalization-format" "${FINALIZATION_FORMAT}"
 )
 if(KEEP_OBS_OPEN)
