@@ -1,4 +1,5 @@
 #include "alpha_recorder/plugin.hpp"
+#include "alpha_recorder/export_worker.hpp"
 
 #include <string_view>
 
@@ -32,7 +33,12 @@ namespace alpha_recorder::obs
             return settings;
         }
 
-        settings.enabled = config_get_bool(config, settings_section().data(), settings_enabled_key().data());
+        if (config_has_user_value(config, settings_section().data(), settings_enabled_key().data()))
+        {
+            settings.enabled = config_get_bool(config, settings_section().data(), settings_enabled_key().data());
+        }
+
+        settings.finalization_format = preferred_runtime_finalization_format();
 
         const char *stored_format = config_get_string(config, settings_section().data(), settings_finalization_format_key().data());
         if (stored_format != nullptr)
@@ -41,7 +47,11 @@ namespace alpha_recorder::obs
             const bool has_user_value = config_has_user_value(config, settings_section().data(), settings_finalization_format_key().data());
             if (try_parse_finalization_format(std::string_view{stored_format}, parsed_format))
             {
-                settings.finalization_format = normalize_finalization_format(parsed_format);
+                const FinalizationFormat normalized_format = normalize_finalization_format(parsed_format);
+                if (finalization_format_runtime_available(normalized_format))
+                {
+                    settings.finalization_format = normalized_format;
+                }
             }
 
             if (has_user_value && finalization_format_config_value(settings.finalization_format) != std::string_view{stored_format})

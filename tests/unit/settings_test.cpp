@@ -13,7 +13,7 @@
 int main()
 {
     const alpha_recorder::obs::Settings defaults = alpha_recorder::obs::default_settings();
-    if (defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov)
+    if (!defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov)
     {
         std::cerr << "default settings are incorrect\n";
         return 1;
@@ -114,7 +114,7 @@ int main()
     }
 
     config_t *config = nullptr;
-    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_hevc_amf\n") != CONFIG_SUCCESS || config == nullptr)
+    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory config string\n";
         return 14;
@@ -122,10 +122,25 @@ int main()
 
     const alpha_recorder::obs::Settings loaded_settings = alpha_recorder::obs::load_settings(config);
     config_close(config);
-    if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskHevcAmf)
+    if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov)
     {
-        std::cerr << "lossless hevc config values were not preserved by the loader\n";
+        std::cerr << "valid config values were not preserved by the loader\n";
         return 15;
+    }
+
+    if (config_open_string(&config, "[AlphaRecorder]\n") != CONFIG_SUCCESS || config == nullptr)
+    {
+        std::cerr << "failed to open an in-memory default config string\n";
+        return 16;
+    }
+
+    const alpha_recorder::obs::Settings missing_key_settings = alpha_recorder::obs::load_settings(config);
+    config_close(config);
+    if (!missing_key_settings.enabled ||
+        missing_key_settings.finalization_format != alpha_recorder::obs::preferred_runtime_finalization_format())
+    {
+        std::cerr << "missing settings did not use enabled and preferred runtime defaults\n";
+        return 17;
     }
 
     const std::filesystem::path temp_root = std::filesystem::temp_directory_path() / "alpha_recorder_settings_test";
@@ -153,7 +168,12 @@ int main()
 
     const alpha_recorder::obs::Settings rewritten_settings = alpha_recorder::obs::load_settings(file_config);
     const char *rewritten_format = config_get_string(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data());
-    if (!rewritten_settings.enabled || rewritten_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc || rewritten_format == nullptr || std::string{rewritten_format} != "mask_hevc_nvenc")
+    const alpha_recorder::obs::FinalizationFormat expected_rewritten_format =
+        alpha_recorder::obs::finalization_format_runtime_available(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc)
+            ? alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc
+            : alpha_recorder::obs::preferred_runtime_finalization_format();
+    const std::string expected_rewritten_text{alpha_recorder::obs::finalization_format_config_value(expected_rewritten_format)};
+    if (!rewritten_settings.enabled || rewritten_settings.finalization_format != expected_rewritten_format || rewritten_format == nullptr || std::string{rewritten_format} != expected_rewritten_text)
     {
         std::cerr << "lossless hevc config values were not preserved in the persisted config\n";
         config_close(file_config);
@@ -170,7 +190,7 @@ int main()
     }
 
     const std::string config_text((std::istreambuf_iterator<char>(config_stream)), std::istreambuf_iterator<char>());
-    if (config_text.find("finalization_format=mask_hevc_nvenc") == std::string::npos)
+    if (config_text.find("finalization_format=" + expected_rewritten_text) == std::string::npos)
     {
         std::cerr << "the hevc finalization format was not written back to disk\n";
         return 44;

@@ -92,6 +92,17 @@ namespace alpha_recorder::obs
             return nullptr;
         }
 
+        AlphaMaskVideoWriterConfig capability_probe_config(FinalizationFormat format)
+        {
+            AlphaMaskVideoWriterConfig config{};
+            config.finalization_format = format;
+            config.width = 16U;
+            config.height = 16U;
+            config.fps_num = 30U;
+            config.fps_den = 1U;
+            return config;
+        }
+
         bool validate_dimensions(std::uint32_t width, std::uint32_t height, std::string *error_message)
         {
             if (width == 0U || height == 0U || width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
@@ -695,6 +706,40 @@ namespace alpha_recorder::obs
                                              " is not available in the bundled FFmpeg stack");
             }
 
+            if (format == FinalizationFormat::MaskHevcNvenc || format == FinalizationFormat::MaskHevcAmf)
+            {
+                const AVCodec *const encoder = select_output_encoder(format);
+                AVCodecContext *context = avcodec_alloc_context3(encoder);
+                if (context == nullptr)
+                {
+                    return set_error(reason, std::string{finalization_format_display_name(format)} +
+                                                 " could not allocate an FFmpeg encoder context");
+                }
+
+                std::string configure_error;
+                const AlphaMaskVideoWriterConfig probe_config = capability_probe_config(format);
+                bool available = configure_encoder(*context, *encoder, probe_config, &configure_error);
+                if (available)
+                {
+                    const int ret = avcodec_open2(context, encoder, nullptr);
+                    if (ret < 0)
+                    {
+                        available = false;
+                        configure_error = std::string{finalization_format_display_name(format)} +
+                                          " could not open on this system: " + av_error_message(ret);
+                    }
+                }
+
+                avcodec_free_context(&context);
+                if (!available)
+                {
+                    return set_error(reason, configure_error.empty()
+                                                 ? std::string{finalization_format_display_name(format)} +
+                                                       " could not open on this system"
+                                                 : configure_error);
+                }
+            }
+
             if (reason != nullptr)
             {
                 reason->clear();
@@ -709,6 +754,20 @@ namespace alpha_recorder::obs
         {
             return set_error(reason, "finalization capability check failed.");
         }
+    }
+
+    FinalizationFormat preferred_runtime_finalization_format() noexcept
+    {
+        for (const FinalizationFormat format : {FinalizationFormat::MaskHevcNvenc, FinalizationFormat::MaskHevcAmf,
+                                                FinalizationFormat::MaskPngMov})
+        {
+            if (finalization_format_runtime_available(format))
+            {
+                return format;
+            }
+        }
+
+        return finalization_format_default();
     }
 
 } // namespace alpha_recorder::obs

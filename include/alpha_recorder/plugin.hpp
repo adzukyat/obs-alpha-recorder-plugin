@@ -66,7 +66,7 @@ namespace alpha_recorder::obs
 
     [[nodiscard]] inline constexpr Settings default_settings() noexcept
     {
-        return Settings{false, finalization_format_default()};
+        return Settings{true, finalization_format_default()};
     }
 
     [[nodiscard]] inline std::uint64_t frame_pts_from_elapsed_ns(std::uint64_t elapsed_ns,

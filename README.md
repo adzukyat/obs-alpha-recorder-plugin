@@ -13,6 +13,11 @@ NVENC (`mask_hevc_nvenc`, `.mp4`), and HEVC AMF (`mask_hevc_amf`, `.mp4`). The
 mask movie is 8-bit grayscale content encoded as visible luma, not a video with
 an alpha channel.
 
+Alpha Recorder defaults to enabled. If no finalization format has been saved,
+it prefers an available hardware HEVC encoder and falls back to PNG MOV. HEVC
+options are available only when the matching runtime encoder can actually open
+on the current machine.
+
 Mask encoding runs behind a bounded asynchronous queue. If the selected mask
 encoder cannot keep up, Alpha Recorder aborts the mask movie output instead of
 blocking or slowing the main OBS recording.

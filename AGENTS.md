@@ -26,6 +26,9 @@ path that can run without desktop automation.
 - Settings include:
   - Enabled toggle.
   - Finalization Format dropdown.
+- Missing settings default to Enabled ON.
+- When no finalization format has been saved, the plugin prefers an available
+  hardware HEVC encoder before falling back to PNG MOV.
 - Settings can also be driven by obs-websocket vendor API for automated E2E:
   - Vendor: `alpha_recorder`
   - Requests: `GetSettings`, `SetSettings`
@@ -40,6 +43,8 @@ path that can run without desktop automation.
   - `mask_png_mov` -> lossless grayscale PNG MOV `.mov`
   - `mask_hevc_nvenc` -> HEVC NVENC `.mp4`
   - `mask_hevc_amf` -> HEVC AMF `.mp4`
+- HEVC options are exposed only when the matching runtime encoder can actually
+  open on the current machine; encoder-name presence alone is not enough.
 - Legacy raw sidecar and manifest primitives remain for synthetic/non-UI E2E
   support, but the shipping OBS runtime writes the playable alpha mask movie
   directly.
@@ -146,6 +151,7 @@ Completed:
 
 - `Tools > Alpha Recorder Settings` dialog with Enabled and Finalization Format.
 - OBS user config persistence for enabled state and finalization format.
+- Runtime-aware finalization format defaults and availability filtering.
 - Runtime hook registration/unregistration based on current settings.
 - Recording lifecycle integration for start, pause, unpause, stopping, and stop.
 - Live alpha mask movie creation next to the OBS recording.
