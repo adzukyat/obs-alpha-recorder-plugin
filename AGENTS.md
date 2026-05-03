@@ -8,8 +8,12 @@ do not forget to update `AGENTS.md` in the same change.
 
 Alpha Recorder is an OBS plugin that follows the normal OBS recording lifecycle:
 
-> When the user records in OBS, also write an alpha sidecar and finalize it into
-> a separate alpha movie aligned with the recorded video.
+> When the user records in OBS, also write a separate grayscale alpha-mask movie
+> aligned with the recorded video.
+
+The finalized alpha movie is a standalone grayscale mask video: the captured
+alpha values are encoded as visible pixel intensity. It is not expected to carry
+its own transparency/alpha channel.
 
 The design prioritizes OBS-native UX, minimal configuration, and a real OBS E2E
 path that can run without desktop automation.
@@ -33,19 +37,19 @@ path that can run without desktop automation.
 - The finalization format is persisted in OBS user config under
   `AlphaRecorder.finalization_format`.
 - Supported finalization formats currently include:
-  - `prores_4444` -> Apple ProRes 4444 `.mov`
-  - `lossless_hevc` -> Lossless HEVC `.mp4`
-- The intermediate sidecar stores alpha as a lossless R8 plane, one byte per
-  pixel.
-- Sidecar records are compressed with LZ4 blocks.
-- Sidecar and manifest files are internal artifacts, but intentionally remain
-  next to the recording for recovery and debugging.
+  - `mask_prores_422` -> Apple ProRes 422 `.mov`
+  - `mask_hevc_nvenc` -> HEVC NVENC `.mp4`
+  - `mask_hevc_amf` -> HEVC AMF `.mp4`
+- Legacy raw sidecar and manifest primitives remain for synthetic/non-UI E2E
+  support, but the shipping OBS runtime writes the playable alpha mask movie
+  directly.
 
 ## Non-Goals
 
 - Replacing OBS's recording UX.
 - Shipping one combined RGB+alpha file as the user's primary recording.
-- Requiring NVIDIA-only HEVC alpha-layer.
+- Requiring NVIDIA-only HEVC alpha-layer or any other video-level alpha channel
+  for the finalized mask movie.
 - Requiring desktop automation for the automated OBS app E2E path.
 - External capture apps.
 
@@ -56,44 +60,40 @@ When enabled:
 - On recording start:
   - Start an alpha session bound to the active OBS recording.
   - Determine the real recording file path.
-  - Create sidecar and manifest alongside the recording.
+  - Create the alpha mask movie alongside the recording.
 - During recording:
   - Capture alpha-preserving raw Program frames.
-  - Convert alpha into R8 records and append them to the sidecar.
+  - Convert alpha into visible grayscale luma and encode it into the mask movie.
   - Pause alpha capture while OBS recording is paused or stopping.
 - On recording stop:
-  - Finalize sidecar and manifest.
-  - Export a separate alpha movie in the selected finalization format.
+  - Finalize the alpha mask movie in the selected finalization format.
 
 When disabled:
 
 - Runtime hooks are removed.
-- No alpha sidecar, manifest, or alpha movie is created.
+- No alpha mask movie is created.
 
 The plugin follows OBS's recording path and naming rules. If OBS records
 `C:\Recordings\MyRec.mkv`, Alpha Recorder writes:
 
-- `C:\Recordings\MyRec.alpha.sidecar`
-- `C:\Recordings\MyRec.alpha.manifest.json`
-- `C:\Recordings\MyRec.alpha.mov` for ProRes 4444, or
-  `C:\Recordings\MyRec.alpha.mp4` for Lossless HEVC.
+- `C:\Recordings\MyRec.alpha.mov` for ProRes 422, or
+  `C:\Recordings\MyRec.alpha.mp4` for HEVC NVENC/AMF.
 
 Failure behavior:
 
 - If the alpha session cannot start or finalize, log details and show the user a
   modal error when the failure is user-visible.
-- If the alpha pipeline cannot keep up, gracefully abort alpha sidecar
-  generation, log the error, mark overload in the manifest, and do not stop the
-  main OBS recording.
-- If finalization fails on record stop, log the error and preserve the raw LZ4
-  sidecar plus manifest so recovery remains possible.
+- If the alpha pipeline cannot keep up, gracefully abort alpha mask movie
+  generation, log the error, and do not stop the main OBS recording.
+- If finalization fails on record stop, log the error and leave any partial mask
+  movie as a debugging artifact.
 - The main OBS recording must remain the highest-priority artifact.
 
 ## Technical Design
 
-The repo contains core primitives for admission gating, sidecar writing,
-manifest writing, sidecar reading, and finalization export. The OBS integration
-adds live capture, lifecycle wiring, settings, and automated control.
+The repo contains core primitives for admission gating, legacy sidecar support,
+settings, and live mask movie encoding. The OBS integration adds live capture,
+lifecycle wiring, settings, and automated control.
 
 Current alignment strategy:
 
@@ -102,10 +102,10 @@ Current alignment strategy:
    conversion.
 3. Pause capture on recording pause and on
    `OBS_FRONTEND_EVENT_RECORDING_STOPPING`.
-4. Write R8/LZ4 alpha records into the sidecar.
-5. During export, decode the completed RGB recording and combine it with the
-   sidecar records. The export path tolerates OBS/frame tail mismatches as long
-   as usable RGB/alpha frames were processed.
+4. Encode each captured alpha plane as visible grayscale luma into the live
+   alpha mask movie.
+5. Close the mask movie on recording stop or split rotation. The RGB recording
+   is never decoded or modified by Alpha Recorder.
 
 This intentionally avoids brittle dependence on encoder packet callbacks.
 
@@ -131,14 +131,10 @@ Required OBS integration points:
 If raw callbacks produce only opaque alpha in a future OBS/runtime
 configuration, the fallback is a dedicated render path: render the active
 Program scene to an RGBA target that preserves alpha, then feed that into the
-same sidecar and finalization pipeline.
+same mask movie encoder pipeline.
 
-After OBS stops recording, the plugin:
-
-1. Parses the completed manifest.
-2. Reads the LZ4/R8 sidecar records.
-3. Decodes the RGB recording.
-4. Encodes a separate alpha movie using the selected finalization format.
+After OBS stops recording, the plugin finalizes the live alpha mask movie using
+the selected finalization format.
 
 ## Current Status
 
@@ -148,8 +144,8 @@ Completed:
 - OBS user config persistence for enabled state and finalization format.
 - Runtime hook registration/unregistration based on current settings.
 - Recording lifecycle integration for start, pause, unpause, stopping, and stop.
-- Sidecar and manifest creation next to the OBS recording.
-- Sidecar finalization and alpha movie export.
+- Live alpha mask movie creation next to the OBS recording.
+- Alpha mask movie finalization on stop and split rotation.
 - File split handling through OBS `file_changed`.
 - obs-websocket vendor API for test automation:
   - `alpha_recorder.GetSettings`
@@ -164,6 +160,9 @@ Completed:
   - `cmake/scripts/obs_app_e2e.ts`
 - Deterministic split-rotation E2E scenario registered in CTest:
   - `tests/e2e/scenarios/split_rotation.scenario`
+- HEVC OBS app E2E targets:
+  - `alpha_recorder_run_obs_app_e2e_hevc_nvenc`
+  - `alpha_recorder_run_obs_app_e2e_hevc_amf`
 - Optional CTest registration behind:
   - `ALPHA_RECORDER_ENABLE_OBS_APP_E2E`
 - OBS staging updates that copy the full OBS plugin set before overlaying Alpha
@@ -182,13 +181,19 @@ Manual validation:
 - Enable/disable from `Tools > Alpha Recorder Settings`.
 - Start and stop OBS recording.
 - Confirm the RGB recording still exists and plays.
-- Confirm the sidecar and manifest exist and have non-zero frame counts.
-- Confirm the final alpha movie exists and plays.
+- Confirm the alpha mask movie exists and plays.
 
 Automated OBS app E2E:
 
 ```sh
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
+```
+
+HEVC OBS app E2E:
+
+```sh
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_hevc_amf
 ```
 
 The CMake target:
@@ -201,10 +206,12 @@ The CMake target:
 - Enables Alpha Recorder through `CallVendorRequest` using
   `alpha_recorder.SetSettings`.
 - Starts and stops OBS recording through obs-websocket.
-- Waits for RGB recording, sidecar, manifest, and alpha movie outputs.
-- Validates manifest counts and sidecar size.
+- Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
-- Verifies the ProRes alpha movie reports `prores` with `yuva444p10le`.
+- Verifies the ProRes alpha movie reports `prores` and does not use an alpha
+  pixel format.
+- For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports
+  `hevc`, and the output does not use an alpha pixel format.
 
 CTest can register this slow app-level test when configured with
 `ALPHA_RECORDER_ENABLE_OBS_APP_E2E=ON`.

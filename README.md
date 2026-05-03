@@ -3,14 +3,15 @@
 `alpha_recorder` is an OBS native plugin that follows the normal OBS recording
 lifecycle. Enable it from Tools -> Alpha Recorder Settings, then use OBS Start
 Recording / Stop Recording as usual. When enabled, it captures alpha-preserving
-Program frames, writes a lossless alpha sidecar and manifest beside each
-recording, and exports a separate alpha movie aligned with the recorded video.
-On stop, and whenever OBS signals `file_changed` for a split recording, it
-finalizes the current segment and exports it with the selected format.
+Program frames and writes a playable grayscale alpha-mask movie beside each
+recording while OBS records the normal RGB video. On stop, and whenever OBS
+signals `file_changed` for a split recording, it finalizes the current mask
+movie segment.
 
-Supported finalization formats are Apple ProRes 4444 (`.mov`) and Lossless HEVC
-(`.mp4`). If export fails, the raw sidecar and manifest remain beside the
-recording for recovery.
+Supported mask formats are Apple ProRes 422 (`mask_prores_422`, `.mov`), HEVC
+NVENC (`mask_hevc_nvenc`, `.mp4`), and HEVC AMF (`mask_hevc_amf`, `.mp4`). The
+mask movie is 8-bit grayscale content encoded as visible luma, not a video with
+an alpha channel.
 
 Scenario files live only under `tests/e2e/scenarios`. They are inputs for the
 deterministic E2E harness, not part of the shipping plugin path.
@@ -30,8 +31,8 @@ source and build trees.
 The current tree is intentionally minimal. It provides:
 
 - OBS recording lifecycle hooks plus a Tools menu settings dialog
-- a core static library for pair gating, sidecar writing/reading, manifest
-  writing/reading, and finalization export
+- a core static library for pair gating, legacy sidecar primitives, settings,
+  and live mask movie encoding
 - unit test executables registered with CTest
 - deterministic E2E executables and CMake-native staging helpers
 - a cross-platform OBS app E2E path driven by CMake and obs-websocket
@@ -101,7 +102,7 @@ ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L unit --output
 ```
 
 E2E tests are deterministic CTest executables. The host loads the staged
-`alpha_recorder_e2e.dll` module, produces RGB raw and alpha sidecar artifacts,
+`alpha_recorder_e2e.dll` module, produces RGB raw and alpha mask artifacts,
 and the verifier parses those files rather than checking file existence alone.
 The scenario files under `tests/e2e/scenarios` are E2E-only inputs.
 
@@ -110,7 +111,7 @@ ctest --test-dir .\out\build\windows-x64-msvc -C RelWithDebInfo -L e2e --output-
 ```
 
 The E2E host starts libobs, loads the staged `alpha_recorder_e2e.dll` module,
-and the verifier checks the generated RGB, sidecar, and manifest artifacts.
+and the verifier checks the generated RGB and alpha mask artifacts.
 
 The CMake target `alpha_recorder_run_e2e` stages the OBS tree and runs the
 deterministic E2E CTest label with the staged runtime on the environment path.
@@ -121,7 +122,7 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 
 The real OBS app E2E path launches portable OBS, enables Alpha Recorder through
 obs-websocket, starts and stops recording, then verifies the RGB recording,
-sidecar, manifest, and exported alpha movie.
+and exported alpha mask movie.
 
 ```sh
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
@@ -156,19 +157,15 @@ plugins, FFmpeg tools, obs-websocket plugin, and `bun` on PATH.
 Implemented in the core library and live OBS workflow:
 
 - pair admission logic with all-or-nothing frame-pair acceptance
-- alpha sidecar container writing with LZ4-compressed payload blocks and index
-  entries
-- sidecar reading and alpha movie finalization export
-- manifest/session summary serialization and parsing with atomic manifest
-  replacement
+- live alpha mask movie encoding as 8-bit grayscale ProRes 422 or HEVC
 - OBS recording lifecycle hooks, settings persistence, Tools menu integration,
   and obs-websocket vendor automation
 - raw Program frame capture through OBS's alpha-preserving video callback path
 - split recording handling through OBS `file_changed`
-- deterministic E2E scenarios that validate the RGB raw artifact, alpha sidecar,
-  manifest content, and split-rotation behavior through the OBS module boundary
-- cross-platform OBS app E2E harness that verifies RGB, sidecar, manifest, and
-  exported alpha movie outputs
+- deterministic E2E scenarios that validate RGB raw artifacts, alpha mask
+  artifacts, and split-rotation behavior through the OBS module boundary
+- cross-platform OBS app E2E harness that verifies RGB and alpha mask movie
+  outputs
 
 The test-only scenario path remains confined to the E2E harness; the shipping
 plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder

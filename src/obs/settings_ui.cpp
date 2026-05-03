@@ -15,6 +15,7 @@
 #include <QStandardItemModel>
 #include <QVBoxLayout>
 
+#include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
 
 #ifdef _WIN32
@@ -82,6 +83,12 @@ namespace
     {
         Settings normalized_settings = settings;
         normalized_settings.finalization_format = alpha_recorder::obs::normalize_finalization_format(normalized_settings.finalization_format);
+        std::string unavailableReason;
+        if (!alpha_recorder::obs::finalization_format_runtime_available(normalized_settings.finalization_format, &unavailableReason))
+        {
+            error_message = QString::fromUtf8(unavailableReason.data(), static_cast<int>(unavailableReason.size()));
+            return false;
+        }
 
         config_t *config = obs_frontend_get_user_config();
         if (config == nullptr)
@@ -137,7 +144,8 @@ namespace
             for (const auto &option : alpha_recorder::obs::finalization_format_options)
             {
                 QString itemText = QString::fromUtf8(option.display_name.data(), static_cast<int>(option.display_name.size()));
-                const bool supported = alpha_recorder::obs::finalization_format_is_supported(option.value);
+                std::string unsupportedReason;
+                const bool supported = alpha_recorder::obs::finalization_format_runtime_available(option.value, &unsupportedReason);
                 if (!supported)
                 {
                     itemText += " (unsupported)";
@@ -152,8 +160,7 @@ namespace
                         if (QStandardItem *item = itemModel->item(finalizationFormatCombo_->count() - 1))
                         {
                             item->setEnabled(false);
-                            const std::string_view unsupported_reason = alpha_recorder::obs::finalization_format_export_unsupported_reason(option.value);
-                            item->setToolTip(QString::fromUtf8(unsupported_reason.data(), static_cast<int>(unsupported_reason.size())));
+                            item->setToolTip(QString::fromUtf8(unsupportedReason.data(), static_cast<int>(unsupportedReason.size())));
                         }
                     }
                 }

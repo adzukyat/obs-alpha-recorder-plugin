@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 
@@ -8,14 +9,42 @@
 namespace alpha_recorder::obs
 {
 
-    struct FinalizationExportRequest
+    struct AlphaMaskVideoWriterConfig
     {
-        std::filesystem::path recording_path{};
-        std::filesystem::path sidecar_path{};
-        std::filesystem::path manifest_path{};
-        FinalizationFormat finalization_format = FinalizationFormat::ProRes4444;
+        std::filesystem::path output_path{};
+        FinalizationFormat finalization_format = FinalizationFormat::MaskProRes422;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        std::uint32_t fps_num = 30;
+        std::uint32_t fps_den = 1;
     };
 
-    bool export_completed_recording(const FinalizationExportRequest &request, std::string *error_message = nullptr) noexcept;
+    class AlphaMaskVideoWriter
+    {
+    public:
+        AlphaMaskVideoWriter() noexcept = default;
+        ~AlphaMaskVideoWriter() noexcept;
+
+        AlphaMaskVideoWriter(const AlphaMaskVideoWriter &) = delete;
+        AlphaMaskVideoWriter &operator=(const AlphaMaskVideoWriter &) = delete;
+
+        [[nodiscard]] bool open(const AlphaMaskVideoWriterConfig &config,
+                                std::string *error_message = nullptr) noexcept;
+        [[nodiscard]] bool write_frame(const std::uint8_t *alpha,
+                                       std::uint32_t stride,
+                                       std::string *error_message = nullptr) noexcept;
+        [[nodiscard]] bool close(std::string *error_message = nullptr) noexcept;
+
+        [[nodiscard]] bool is_open() const noexcept;
+        [[nodiscard]] const std::filesystem::path &path() const noexcept;
+        [[nodiscard]] std::uint64_t frame_count() const noexcept;
+
+    private:
+        struct Impl;
+        Impl *impl_ = nullptr;
+    };
+
+    [[nodiscard]] bool finalization_format_runtime_available(FinalizationFormat format,
+                                                              std::string *reason = nullptr) noexcept;
 
 } // namespace alpha_recorder::obs

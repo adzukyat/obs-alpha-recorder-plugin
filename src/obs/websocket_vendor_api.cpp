@@ -1,3 +1,4 @@
+#include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
 
 #include <obs-frontend-api.h>
@@ -36,6 +37,23 @@ namespace alpha_recorder::obs
                                 finalization_format_config_value(settings.finalization_format).data());
             obs_data_set_string(response, "finalization_format_display_name",
                                 finalization_format_display_name(settings.finalization_format).data());
+            obs_data_t *formats = obs_data_create();
+            for (const FinalizationFormatOption &option : finalization_format_options)
+            {
+                std::string reason;
+                const bool available = finalization_format_runtime_available(option.value, &reason);
+                obs_data_t *format = obs_data_create();
+                obs_data_set_string(format, "display_name", std::string{option.display_name}.c_str());
+                obs_data_set_bool(format, "available", available);
+                if (!available)
+                {
+                    obs_data_set_string(format, "unavailable_reason", reason.c_str());
+                }
+                obs_data_set_obj(formats, std::string{option.config_value}.c_str(), format);
+                obs_data_release(format);
+            }
+            obs_data_set_obj(response, "finalization_formats", formats);
+            obs_data_release(formats);
         }
 
         void get_settings_request(obs_data_t *, obs_data_t *response, void *)
@@ -72,6 +90,13 @@ namespace alpha_recorder::obs
                 if (format_text == nullptr || !try_parse_finalization_format(format_text, parsed_format))
                 {
                     write_error(response, "Unsupported finalization_format.");
+                    return;
+                }
+
+                std::string unavailable_reason;
+                if (!finalization_format_runtime_available(parsed_format, &unavailable_reason))
+                {
+                    write_error(response, std::string{"Unsupported finalization_format: "} + unavailable_reason);
                     return;
                 }
 

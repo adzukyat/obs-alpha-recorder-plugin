@@ -450,6 +450,28 @@ if(_alpha_recorder_build_full_targets)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
         VERBATIM
     )
+    add_custom_target(alpha_recorder_run_obs_app_e2e_hevc_nvenc
+        COMMAND ${CMAKE_COMMAND}
+            "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DSTAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage-hevc-nvenc"
+            "-DOBS_ROOT=${OBS_ROOT}"
+            "-DCONFIGURATION=$<CONFIG>"
+            "-DFINALIZATION_FORMAT=mask_hevc_nvenc"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
+        VERBATIM
+    )
+    add_custom_target(alpha_recorder_run_obs_app_e2e_hevc_amf
+        COMMAND ${CMAKE_COMMAND}
+            "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DSTAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage-hevc-amf"
+            "-DOBS_ROOT=${OBS_ROOT}"
+            "-DCONFIGURATION=$<CONFIG>"
+            "-DFINALIZATION_FORMAT=mask_hevc_amf"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
+        VERBATIM
+    )
 endif()
 
 install(TARGETS alpha_recorder_e2e_scenario ARCHIVE DESTINATION lib)

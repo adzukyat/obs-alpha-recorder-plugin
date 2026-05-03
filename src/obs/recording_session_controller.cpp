@@ -3,7 +3,6 @@
 #include "alpha_recorder/frame_pair.hpp"
 #include "alpha_recorder/plugin.hpp"
 #include "recording_session_controller_gate.hpp"
-#include "alpha_recorder/sidecar_writer.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -33,7 +32,7 @@
 namespace
 {
 
-    using alpha_recorder::AlphaLosslessWriter;
+    using alpha_recorder::obs::AlphaMaskVideoWriter;
     using alpha_recorder::FramePair;
 
     constexpr std::size_t kMaxPendingFrames = 120U;
@@ -433,27 +432,34 @@ namespace
             session_aborted_ = true;
             pending_frames_.clear();
             matcher_.clear();
-            writer_.mark_overload();
-
             error_message.assign(message.data(), message.size());
             if (!writer_.close())
             {
-                error_message += " Alpha Recorder also failed to finalize the current alpha sidecar.";
+                error_message += " Alpha Recorder also failed to finalize the current alpha mask movie.";
             }
         }
 
         bool open_segment_locked(const std::filesystem::path &recording_path, const obs_video_info &video_info, bool show_popup)
         {
-            const std::filesystem::path sidecar_path = alpha_recorder::obs::recording_sidecar_path(recording_path);
-            const std::filesystem::path manifest_path = alpha_recorder::obs::recording_manifest_path(recording_path);
+            const std::filesystem::path mask_path = alpha_recorder::obs::recording_alpha_movie_path(recording_path, finalization_format_);
 
-            if (!writer_.open(sidecar_path, manifest_path))
+            alpha_recorder::obs::AlphaMaskVideoWriterConfig config{};
+            config.output_path = mask_path;
+            config.finalization_format = finalization_format_;
+            config.width = video_info.output_width;
+            config.height = video_info.output_height;
+            config.fps_num = video_info.fps_num;
+            config.fps_den = video_info.fps_den;
+
+            std::string writer_error;
+            if (!writer_.open(config, &writer_error))
             {
-                log_and_show_error(std::string{"Alpha Recorder could not open the sidecar for recording path: "} + recording_path.generic_string(), show_popup);
+                log_and_show_error(writer_error.empty() ? std::string{"Alpha Recorder could not open the alpha mask movie for recording path: "} +
+                                                              recording_path.generic_string()
+                                                        : writer_error,
+                                   show_popup);
                 return false;
             }
-
-            writer_.set_finalization_format(alpha_recorder::obs::finalization_format_config_value(finalization_format_));
 
             video_info_ = video_info;
             recording_path_ = recording_path;
@@ -463,43 +469,19 @@ namespace
             return true;
         }
 
-        bool finalize_current_segment_locked(alpha_recorder::obs::FinalizationExportRequest *export_request)
+        bool finalize_current_segment_locked(std::string *error_message)
         {
-            if (export_request != nullptr)
-            {
-                *export_request = {};
-            }
-
             if (!writer_.is_open())
             {
                 return true;
             }
 
-            if (!writer_.close())
+            if (!writer_.close(error_message))
             {
                 return false;
             }
 
-            if (export_request != nullptr)
-            {
-                export_request->recording_path = recording_path_;
-                export_request->sidecar_path = writer_.path();
-                export_request->manifest_path = writer_.manifest_path();
-                export_request->finalization_format = finalization_format_;
-            }
-
             return true;
-        }
-
-        void export_finalized_segment(const alpha_recorder::obs::FinalizationExportRequest &export_request, bool show_popup)
-        {
-            std::string export_error;
-            if (!alpha_recorder::obs::export_completed_recording(export_request, &export_error))
-            {
-                log_and_show_error(export_error.empty() ? "Alpha Recorder failed to export the completed alpha recording."
-                                                        : export_error,
-                                   show_popup);
-            }
         }
 
         void stop_session(bool show_popup)
@@ -509,8 +491,7 @@ namespace
             bool disconnect_raw_callback = false;
             bool disconnect_file_changed = false;
             bool finalize_failed = false;
-            bool export_requested = false;
-            alpha_recorder::obs::FinalizationExportRequest export_request{};
+            std::string finalize_error;
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -554,13 +535,9 @@ namespace
                     }
                 }
 
-                if (!finalize_current_segment_locked(&export_request))
+                if (!finalize_current_segment_locked(&finalize_error))
                 {
                     finalize_failed = true;
-                }
-                else if (!export_request.recording_path.empty())
-                {
-                    export_requested = true;
                 }
 
                 pending_frames_.clear();
@@ -575,19 +552,10 @@ namespace
 
             if (finalize_failed)
             {
-                log_and_show_error("Alpha Recorder failed to finalize the current alpha sidecar.", show_popup);
+                log_and_show_error(finalize_error.empty() ? "Alpha Recorder failed to finalize the current alpha mask movie."
+                                                          : finalize_error,
+                                   show_popup);
                 return;
-            }
-
-            if (export_requested)
-            {
-                std::string export_error;
-                if (!alpha_recorder::obs::export_completed_recording(export_request, &export_error))
-                {
-                    log_and_show_error(export_error.empty() ? "Alpha Recorder failed to export the completed alpha recording."
-                                                            : export_error,
-                                       show_popup);
-                }
             }
         }
 
@@ -606,8 +574,6 @@ namespace
             }
 
             std::string error_message;
-            alpha_recorder::obs::FinalizationExportRequest export_request{};
-            bool export_requested = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!session_active_ || session_aborted_)
@@ -623,13 +589,12 @@ namespace
 
                 if (writer_.is_open())
                 {
-                    if (finalize_current_segment_locked(&export_request))
+                    if (!finalize_current_segment_locked(&error_message))
                     {
-                        export_requested = !export_request.recording_path.empty();
-                    }
-                    else
-                    {
-                        error_message = "Alpha Recorder failed to finalize the current split sidecar segment.";
+                        if (error_message.empty())
+                        {
+                            error_message = "Alpha Recorder failed to finalize the current split alpha mask movie.";
+                        }
                     }
                 }
 
@@ -644,11 +609,6 @@ namespace
             if (!error_message.empty())
             {
                 log_and_show_error(error_message, false);
-            }
-
-            if (export_requested)
-            {
-                export_finalized_segment(export_request, false);
             }
         }
 
@@ -668,32 +628,23 @@ namespace
                     return;
                 }
 
-                PendingFrame pending_frame;
-                pending_frame.pair.sequence = next_sequence_++;
-                pending_frame.pair.pts = 0;
-                pending_frame.pair.rgb.bytes = {0U};
-                pending_frame.pair.rgb.width = 1U;
-                pending_frame.pair.rgb.height = 1U;
-                pending_frame.pair.rgb.stride = 1U;
-                pending_frame.pair.alpha.width = video_info_.output_width;
-                pending_frame.pair.alpha.height = video_info_.output_height;
-                pending_frame.pair.alpha.stride = video_info_.output_width;
-                pending_frame.pair.alpha.bytes = extract_alpha_plane(frame, video_info_);
-                pending_frame.composition_timestamp_ns = frame->timestamp;
-
-                if (pending_frame.pair.alpha.bytes.empty())
+                std::vector<std::uint8_t> alpha = extract_alpha_plane(frame, video_info_);
+                if (alpha.empty())
                 {
                     return;
                 }
 
-                pending_frame.pair.pts = pending_frame.composition_timestamp_ns;
-                if (!writer_.write_pair(pending_frame.pair))
+                if (!writer_.write_frame(alpha.data(), video_info_.output_width, &error_message))
                 {
                     session_aborted_ = true;
                     pending_frames_.clear();
                     matcher_.clear();
-                    error_message = "Alpha Recorder failed to write an alpha frame.";
+                    if (error_message.empty())
+                    {
+                        error_message = "Alpha Recorder failed to write an alpha mask frame.";
+                    }
                 }
+                ++next_sequence_;
             }
 
             if (!error_message.empty())
@@ -704,80 +655,8 @@ namespace
 
         void on_packet(struct encoder_packet *packet, struct encoder_packet_time *packet_time)
         {
-            if (packet == nullptr || packet->type != OBS_ENCODER_VIDEO)
-            {
-                return;
-            }
-
-            const std::int64_t packet_pts = (packet_time != nullptr) ? packet_time->pts : packet->pts;
-            if (packet_pts < 0)
-            {
-                return;
-            }
-
-            std::string error_message;
-            bool should_log_missing_packet_timing = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!alpha_recorder::obs::recording_input_is_allowed(session_active_, session_aborted_, writer_.is_open(), recording_paused_))
-                {
-                    return;
-                }
-
-                const std::uint64_t matched_pts = static_cast<std::uint64_t>(packet_pts);
-                std::optional<std::uint64_t> packet_cts{};
-                if (packet_time == nullptr && !missing_packet_timing_logged_)
-                {
-                    missing_packet_timing_logged_ = true;
-                    should_log_missing_packet_timing = true;
-                }
-
-                alpha_recorder::AlphaFrameMatch match{};
-                if (matcher_.add_packet(packet_cts, matched_pts, match))
-                {
-                    auto frame_it = std::find_if(pending_frames_.begin(), pending_frames_.end(), [&match](const PendingFrame &pending_frame)
-                                                 { return pending_frame.composition_timestamp_ns == match.frame_cts; });
-
-                    if (frame_it == pending_frames_.end())
-                    {
-                        session_aborted_ = true;
-                        pending_frames_.clear();
-                        matcher_.clear();
-                        error_message = "Alpha Recorder lost a matched pending alpha frame.";
-                        goto end_lock_packet;
-                    }
-
-                    PendingFrame pending_frame = std::move(*frame_it);
-                    pending_frames_.erase(frame_it);
-                    pending_frame.pair.pts = match.packet_pts;
-
-                    if (!writer_.write_pair(pending_frame.pair))
-                    {
-                        session_aborted_ = true;
-                        pending_frames_.clear();
-                        matcher_.clear();
-                        error_message = "Alpha Recorder failed to write a packet-matched alpha frame.";
-                    }
-
-                    goto end_lock_packet;
-                }
-
-                if (matcher_.overflowed())
-                {
-                    abort_overflow_locked("Alpha Recorder aborted alpha capture because the pending-packet queue overflowed.", error_message);
-                }
-            }
-
-        end_lock_packet:
-            if (should_log_missing_packet_timing)
-            {
-                blog(LOG_WARNING, "Alpha Recorder packet timing metadata is unavailable; falling back to FIFO alpha matching.");
-            }
-
-            if (!error_message.empty())
-            {
-                log_and_show_error(error_message, false);
-            }
+            (void)packet;
+            (void)packet_time;
         }
 
         bool event_callback_registered_ = false;
@@ -793,9 +672,9 @@ namespace
         alpha_recorder::AlphaFrameMatcher matcher_{kMaxPendingFrames, kMaxPendingPackets, kMaxPendingBytes};
         std::filesystem::path recording_path_{};
         obs_video_info video_info_{};
-        AlphaLosslessWriter writer_{};
+        AlphaMaskVideoWriter writer_{};
         obs_output_t *recording_output_ = nullptr;
-        alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::ProRes4444;
+        alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::MaskProRes422;
         std::mutex mutex_{};
     };
 

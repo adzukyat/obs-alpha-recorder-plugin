@@ -122,9 +122,21 @@ namespace
 
     bool initialize_obs(const std::filesystem::path &stage_dir, std::string &error_message)
     {
+#ifdef __APPLE__
+        const std::filesystem::path bin_dir = std::filesystem::exists(stage_dir / "Frameworks")
+                                                  ? stage_dir / "Frameworks"
+                                                  : stage_dir / "bin";
+        const std::filesystem::path plugin_dir = std::filesystem::exists(stage_dir / "PlugIns")
+                                                     ? stage_dir / "PlugIns"
+                                                     : stage_dir / "obs-plugins";
+        const std::filesystem::path data_dir = std::filesystem::exists(stage_dir / "Resources")
+                                                   ? stage_dir / "Resources"
+                                                   : stage_dir / "data";
+#else
         const std::filesystem::path bin_dir = stage_dir / "bin" / "64bit";
         const std::filesystem::path plugin_dir = stage_dir / "obs-plugins" / "64bit";
         const std::filesystem::path data_dir = stage_dir / "data";
+#endif
 
         if (!std::filesystem::exists(bin_dir))
         {
@@ -188,7 +200,11 @@ namespace
         video_info.output_height = 720;
         video_info.fps_num = 30000;
         video_info.fps_den = 1001;
+#ifdef __APPLE__
+        video_info.graphics_module = "libobs-opengl.dylib";
+#else
         video_info.graphics_module = "libobs-opengl.dll";
+#endif
         video_info.output_format = VIDEO_FORMAT_RGBA;
 
         if (obs_reset_video(&video_info) != OBS_VIDEO_SUCCESS)
@@ -209,7 +225,19 @@ namespace
             return false;
         }
 
+#ifdef __APPLE__
+        std::filesystem::path plugin_path = plugin_dir / "alpha_recorder_e2e.plugin";
+        if (!std::filesystem::exists(plugin_path))
+        {
+            plugin_path = plugin_dir / "alpha_recorder_e2e.dylib";
+        }
+        else
+        {
+            plugin_path /= "Contents/MacOS/alpha_recorder_e2e";
+        }
+#else
         const std::filesystem::path plugin_path = plugin_dir / "alpha_recorder_e2e.dll";
+#endif
         if (!std::filesystem::exists(plugin_path))
         {
             error_message.assign("stage dir is missing the alpha_recorder plugin: ");

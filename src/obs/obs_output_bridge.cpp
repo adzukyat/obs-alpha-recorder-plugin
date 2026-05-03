@@ -73,6 +73,7 @@ namespace
         const std::filesystem::path manifest_path = alpha_recorder::e2e::resolve_artifact_path(output_root, scenario.alpha_manifest);
 
         alpha_recorder::AlphaLosslessWriter sidecar_writer;
+        alpha_recorder::obs::AlphaMaskVideoWriter mask_writer;
         std::ofstream rgb_stream;
 
         auto open_segment = [&](int split_index) -> bool
@@ -92,6 +93,17 @@ namespace
 
             if (!sidecar_writer.open(current_sidecar, current_manifest))
                 return false;
+            const alpha_recorder::FramePair first_pair = alpha_recorder::e2e::make_test_pair(0);
+            alpha_recorder::obs::AlphaMaskVideoWriterConfig mask_config{};
+            mask_config.output_path = current_sidecar.string() + ".alpha.mov";
+            mask_config.finalization_format = alpha_recorder::obs::FinalizationFormat::MaskProRes422;
+            mask_config.width = first_pair.alpha.width;
+            mask_config.height = first_pair.alpha.height;
+            mask_config.fps_num = 25U;
+            mask_config.fps_den = 1U;
+            std::string mask_error;
+            if (!mask_writer.open(mask_config, &mask_error))
+                return false;
             rgb_stream.open(current_rgb, std::ios::binary | std::ios::trunc);
             return rgb_stream.is_open();
         };
@@ -102,19 +114,16 @@ namespace
             std::filesystem::path current_rgb = std::filesystem::path(rgb_path.string() + suffix.string());
             std::filesystem::path current_sidecar = std::filesystem::path(sidecar_path.string() + suffix.string());
             std::filesystem::path current_manifest = std::filesystem::path(manifest_path.string() + suffix.string());
+            (void)current_rgb;
+            (void)current_sidecar;
+            (void)current_manifest;
 
             rgb_stream.flush();
             rgb_stream.close();
             sidecar_writer.close();
 
-            alpha_recorder::obs::FinalizationExportRequest req;
-            req.recording_path = current_rgb;
-            req.sidecar_path = current_sidecar;
-            req.manifest_path = current_manifest;
-            req.finalization_format = alpha_recorder::obs::FinalizationFormat::ProRes4444;
-
             std::string export_error;
-            if (!alpha_recorder::obs::export_completed_recording(req, &export_error))
+            if (!mask_writer.close(&export_error))
             {
                 return export_error;
             }
@@ -155,6 +164,13 @@ namespace
             if (!sidecar_writer.write_pair(pair))
             {
                 return std::string{"failed to write alpha sidecar record for sequence "} + std::to_string(pair.sequence);
+            }
+
+            std::string mask_error;
+            if (!mask_writer.write_frame(pair.alpha.bytes.data(), pair.alpha.stride, &mask_error))
+            {
+                return mask_error.empty() ? std::string{"failed to write alpha mask frame for sequence "} + std::to_string(pair.sequence)
+                                          : mask_error;
             }
 
             rgb_stream.write(reinterpret_cast<const char *>(pair.rgb.bytes.data()), static_cast<std::streamsize>(pair.rgb.bytes.size()));

@@ -12,6 +12,7 @@ set(PORT 0 CACHE STRING "obs-websocket port, or 0 for an ephemeral port")
 set(RECORD_SECONDS 5 CACHE STRING "Recording duration")
 set(WIDTH 1280 CACHE STRING "Canvas width")
 set(HEIGHT 720 CACHE STRING "Canvas height")
+set(FINALIZATION_FORMAT "mask_prores_422" CACHE STRING "Alpha Recorder finalization format")
 set(SKIP_BUILD OFF CACHE BOOL "Skip plugin build before OBS app E2E")
 set(SKIP_STAGE OFF CACHE BOOL "Skip staging before OBS app E2E")
 set(KEEP_OBS_OPEN OFF CACHE BOOL "Keep OBS open after the E2E run")
@@ -75,6 +76,7 @@ set(args
     "--record-seconds" "${RECORD_SECONDS}"
     "--width" "${WIDTH}"
     "--height" "${HEIGHT}"
+    "--finalization-format" "${FINALIZATION_FORMAT}"
 )
 if(KEEP_OBS_OPEN)
     list(APPEND args "--keep-obs-open")

@@ -12,14 +12,15 @@ namespace alpha_recorder::obs
 
     enum class FinalizationFormat
     {
-        ProRes4444,
-        LosslessHevc,
+        MaskProRes422,
+        MaskHevcNvenc,
+        MaskHevcAmf,
     };
 
     struct Settings
     {
         bool enabled = false;
-        FinalizationFormat finalization_format = FinalizationFormat::ProRes4444;
+        FinalizationFormat finalization_format = FinalizationFormat::MaskProRes422;
     };
 
     struct FinalizationFormatOption
@@ -46,7 +47,7 @@ namespace alpha_recorder::obs
 
     [[nodiscard]] inline constexpr FinalizationFormat finalization_format_default() noexcept
     {
-        return FinalizationFormat::ProRes4444;
+        return FinalizationFormat::MaskProRes422;
     }
 
     [[nodiscard]] inline std::filesystem::path recording_sidecar_path(const std::filesystem::path &recording_path)
@@ -85,17 +86,19 @@ namespace alpha_recorder::obs
                ((remainder * static_cast<std::uint64_t>(fps_num)) / denominator);
     }
 
-    inline constexpr std::array<FinalizationFormatOption, 2> finalization_format_options{{
-        {FinalizationFormat::ProRes4444, "prores_4444", "Apple ProRes 4444"},
-        {FinalizationFormat::LosslessHevc, "lossless_hevc", "Lossless HEVC"},
+    inline constexpr std::array<FinalizationFormatOption, 3> finalization_format_options{{
+        {FinalizationFormat::MaskProRes422, "mask_prores_422", "Apple ProRes 422 Mask"},
+        {FinalizationFormat::MaskHevcNvenc, "mask_hevc_nvenc", "HEVC NVENC Mask"},
+        {FinalizationFormat::MaskHevcAmf, "mask_hevc_amf", "HEVC AMF Mask"},
     }};
 
     [[nodiscard]] inline constexpr std::string_view finalization_format_export_unsupported_reason(FinalizationFormat format) noexcept
     {
         switch (format)
         {
-        case FinalizationFormat::ProRes4444:
-        case FinalizationFormat::LosslessHevc:
+        case FinalizationFormat::MaskProRes422:
+        case FinalizationFormat::MaskHevcNvenc:
+        case FinalizationFormat::MaskHevcAmf:
             return {};
         }
 
@@ -116,10 +119,11 @@ namespace alpha_recorder::obs
     {
         switch (format)
         {
-        case FinalizationFormat::ProRes4444:
+        case FinalizationFormat::MaskProRes422:
             return ".mov";
 
-        case FinalizationFormat::LosslessHevc:
+        case FinalizationFormat::MaskHevcNvenc:
+        case FinalizationFormat::MaskHevcAmf:
             return ".mp4";
         }
 
@@ -132,6 +136,14 @@ namespace alpha_recorder::obs
         std::filesystem::path output_path = sidecar_path;
         output_path.replace_extension(finalization_format_output_extension(format));
         return output_path;
+    }
+
+    [[nodiscard]] inline std::filesystem::path recording_alpha_movie_path(const std::filesystem::path &recording_path,
+                                                                          FinalizationFormat format)
+    {
+        std::filesystem::path movie_path = recording_path;
+        movie_path.replace_extension(std::string{".alpha"} + std::string{finalization_format_output_extension(format)});
+        return movie_path;
     }
 
     [[nodiscard]] inline std::string_view finalization_format_config_value(FinalizationFormat format) noexcept
@@ -169,6 +181,18 @@ namespace alpha_recorder::obs
                 format = option.value;
                 return true;
             }
+        }
+
+        if (value == "prores_4444")
+        {
+            format = FinalizationFormat::MaskProRes422;
+            return true;
+        }
+
+        if (value == "lossless_hevc")
+        {
+            format = FinalizationFormat::MaskHevcNvenc;
+            return true;
         }
 
         return false;

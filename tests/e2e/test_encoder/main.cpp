@@ -1194,8 +1194,6 @@ int main(int argc, char **argv)
             return 22;
         }
 
-        const std::filesystem::path sidecar_relative = std::filesystem::path(scenario.alpha_sidecar.string() + suffix);
-        const std::filesystem::path manifest_relative = std::filesystem::path(scenario.alpha_manifest.string() + suffix);
         const std::uintmax_t sidecar_size = std::filesystem::file_size(sidecar_path);
 
         ManifestFields manifest_fields;
@@ -1206,8 +1204,8 @@ int main(int argc, char **argv)
             return 23;
         }
 
-        const std::string expected_sidecar_path = sidecar_relative.generic_string();
-        const std::string expected_manifest_path = manifest_relative.generic_string();
+        const std::string expected_sidecar_path = sidecar_path.generic_string();
+        const std::string expected_manifest_path = manifest_path.generic_string();
 
         if (manifest_fields.schema != "alpha_recorder.session_summary.v1" || manifest_fields.container_format_version != alpha_recorder::alpha_container_format_version || manifest_fields.project_name != "alpha_recorder" || manifest_fields.project_version != "0.1.0" || manifest_fields.sidecar_path != expected_sidecar_path || manifest_fields.manifest_path != expected_manifest_path || manifest_fields.pair_count != target_pair_count || manifest_fields.record_count != target_pair_count || manifest_fields.first_sequence != first_sequence || manifest_fields.last_sequence != last_sequence || manifest_fields.first_pts != first_pts || manifest_fields.last_pts != last_pts || manifest_fields.alpha_uncompressed_bytes != total_uncompressed_bytes || manifest_fields.alpha_compressed_bytes != total_compressed_bytes || manifest_fields.index_offset != index_offset || manifest_fields.index_entry_count != target_pair_count || manifest_fields.sidecar_size_bytes != sidecar_size)
         {

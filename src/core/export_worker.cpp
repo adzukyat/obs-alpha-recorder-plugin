@@ -1,18 +1,13 @@
 #include "alpha_recorder/export_worker.hpp"
 
-#include "alpha_recorder/manifest_writer.hpp"
-#include "alpha_recorder/sidecar_reader.hpp"
-
 #include <array>
-#include <chrono>
 #include <cstdint>
-#include <cerrno>
+#include <exception>
 #include <filesystem>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <utility>
 
 extern "C"
@@ -23,86 +18,16 @@ extern "C"
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
-#include <libswscale/swscale.h>
 }
 
-#if !defined(FF_PROFILE_HEVC_REXT) && defined(AV_PROFILE_HEVC_REXT)
-#define FF_PROFILE_HEVC_REXT AV_PROFILE_HEVC_REXT
-#endif
-
-#if !defined(FF_PROFILE_PRORES_4444) && defined(AV_PROFILE_PRORES_4444)
-#define FF_PROFILE_PRORES_4444 AV_PROFILE_PRORES_4444
-#endif
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
+#if !defined(FF_PROFILE_PRORES_STANDARD) && defined(AV_PROFILE_PRORES_STANDARD)
+#define FF_PROFILE_PRORES_STANDARD AV_PROFILE_PRORES_STANDARD
 #endif
 
 namespace alpha_recorder::obs
 {
     namespace
     {
-
-        struct InputContext
-        {
-            AVFormatContext *format = nullptr;
-            AVCodecContext *decoder = nullptr;
-            int video_stream_index = -1;
-
-            ~InputContext()
-            {
-                avcodec_free_context(&decoder);
-                if (format != nullptr)
-                {
-                    avformat_close_input(&format);
-                }
-            }
-        };
-
-        struct OutputContext
-        {
-            AVFormatContext *format = nullptr;
-            AVCodecContext *encoder = nullptr;
-            AVStream *video_stream = nullptr;
-
-            ~OutputContext()
-            {
-                avcodec_free_context(&encoder);
-
-                if (format != nullptr)
-                {
-                    if ((format->oformat->flags & AVFMT_NOFILE) == 0 && format->pb != nullptr)
-                    {
-                        avio_closep(&format->pb);
-                    }
-
-                    avformat_free_context(format);
-                }
-            }
-        };
-
-        struct FrameHolder
-        {
-            AVFrame *frame = nullptr;
-
-            ~FrameHolder()
-            {
-                av_frame_free(&frame);
-            }
-        };
-
-        struct SwsHolder
-        {
-            SwsContext *context = nullptr;
-
-            ~SwsHolder()
-            {
-                sws_freeContext(context);
-            }
-        };
 
         bool set_error(std::string *error_message, std::string message)
         {
@@ -124,27 +49,7 @@ namespace alpha_recorder::obs
 #ifdef _WIN32
         std::string path_to_utf8(const std::filesystem::path &path)
         {
-            const std::wstring native_path = path.native();
-            if (native_path.empty())
-            {
-                return {};
-            }
-
-            const int required_size = WideCharToMultiByte(CP_UTF8, 0, native_path.c_str(), static_cast<int>(native_path.size()),
-                                                          nullptr, 0, nullptr, nullptr);
-            if (required_size <= 0)
-            {
-                return {};
-            }
-
-            std::string text(static_cast<std::size_t>(required_size), '\0');
-            if (WideCharToMultiByte(CP_UTF8, 0, native_path.c_str(), static_cast<int>(native_path.size()), text.data(), required_size,
-                                    nullptr, nullptr) <= 0)
-            {
-                return {};
-            }
-
-            return text;
+            return path.u8string();
         }
 #else
         std::string path_to_utf8(const std::filesystem::path &path)
@@ -166,706 +71,421 @@ namespace alpha_recorder::obs
             return !error;
         }
 
-        bool validate_supported_format(FinalizationFormat format, std::string *error_message)
-        {
-            const std::string_view unsupported_reason = finalization_format_export_unsupported_reason(format);
-            if (!unsupported_reason.empty())
-            {
-                return set_error(error_message, std::string{"Alpha Recorder cannot export "} + std::string{finalization_format_display_name(format)} +
-                                                    ": " + std::string{unsupported_reason});
-            }
-
-            return true;
-        }
-
         const AVCodec *select_output_encoder(FinalizationFormat format)
         {
             switch (format)
             {
-            case FinalizationFormat::ProRes4444:
+            case FinalizationFormat::MaskProRes422:
                 if (const AVCodec *const prores_encoder = avcodec_find_encoder_by_name("prores_ks"))
                 {
                     return prores_encoder;
                 }
-
                 return avcodec_find_encoder(AV_CODEC_ID_PRORES);
 
-            case FinalizationFormat::LosslessHevc:
-                if (const AVCodec *const hevc_encoder = avcodec_find_encoder_by_name("hevc_nvenc"))
-                {
-                    return hevc_encoder;
-                }
+            case FinalizationFormat::MaskHevcNvenc:
+                return avcodec_find_encoder_by_name("hevc_nvenc");
 
-                return avcodec_find_encoder_by_name("nvenc_hevc");
+            case FinalizationFormat::MaskHevcAmf:
+                return avcodec_find_encoder_by_name("hevc_amf");
             }
 
             return nullptr;
         }
 
-        bool configure_hevc_encoder(AVCodecContext &encoder, std::string *error_message)
+        bool validate_dimensions(std::uint32_t width, std::uint32_t height, std::string *error_message)
         {
-            if (av_opt_set_int(encoder.priv_data, "profile", FF_PROFILE_HEVC_REXT, 0) < 0 ||
-                av_opt_set_int(encoder.priv_data, "preset", 10, 0) < 0 ||
-                av_opt_set_int(encoder.priv_data, "rc", 0, 0) < 0 || av_opt_set_int(encoder.priv_data, "qp", 0, 0) < 0 ||
-                av_opt_set_int(encoder.priv_data, "rgb_mode", 2, 0) < 0 || av_opt_set(encoder.priv_data, "alpha_mode", "straight", 0) < 0)
+            if (width == 0U || height == 0U || width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+                height > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
             {
-                return set_error(error_message, "Alpha Recorder could not configure the HEVC encoder.");
-            }
-
-            encoder.pix_fmt = AV_PIX_FMT_BGRA;
-            encoder.profile = FF_PROFILE_HEVC_REXT;
-            return true;
-        }
-
-        bool path_is_regular_file(const std::filesystem::path &path)
-        {
-            std::error_code error;
-            return std::filesystem::is_regular_file(path, error) && !error;
-        }
-
-        bool path_is_directory(const std::filesystem::path &path)
-        {
-            std::error_code error;
-            return std::filesystem::is_directory(path, error) && !error;
-        }
-
-        bool should_retry_open_error(int error_code) noexcept
-        {
-            return error_code == AVERROR(EACCES) || error_code == AVERROR(EPERM);
-        }
-
-        bool open_input(InputContext &input, const std::filesystem::path &recording_path, std::string *error_message)
-        {
-            const std::string recording_path_text = path_to_utf8(recording_path);
-            if (recording_path_text.empty())
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not convert the recording path: "} + recording_path.generic_string());
-            }
-
-            int ret = 0;
-            constexpr int max_open_attempts = 20;
-            for (int attempt = 1; attempt <= max_open_attempts; ++attempt)
-            {
-                ret = avformat_open_input(&input.format, recording_path_text.c_str(), nullptr, nullptr);
-                if (ret >= 0 || !should_retry_open_error(ret) || attempt == max_open_attempts)
-                {
-                    break;
-                }
-
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            }
-
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not open the recording file for export: "} +
-                                                    recording_path.generic_string() + " (" + av_error_message(ret) + ")");
-            }
-
-            ret = avformat_find_stream_info(input.format, nullptr);
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not read stream metadata from the recording: "} +
-                                                    recording_path.generic_string() + " (" + av_error_message(ret) + ")");
-            }
-
-            ret = av_find_best_stream(input.format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not find a video stream in the recording: "} +
-                                                    recording_path.generic_string() + " (" + av_error_message(ret) + ")");
-            }
-
-            input.video_stream_index = ret;
-
-            AVStream *const video_stream = input.format->streams[input.video_stream_index];
-            const AVCodec *const decoder = avcodec_find_decoder(video_stream->codecpar->codec_id);
-            if (decoder == nullptr)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not find a decoder for the recording video codec: "} +
-                                                    avcodec_get_name(video_stream->codecpar->codec_id));
-            }
-
-            input.decoder = avcodec_alloc_context3(decoder);
-            if (input.decoder == nullptr)
-            {
-                return set_error(error_message, "Alpha Recorder could not allocate a video decoder context.");
-            }
-
-            ret = avcodec_parameters_to_context(input.decoder, video_stream->codecpar);
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not initialize the video decoder context: "} +
-                                                    av_error_message(ret));
-            }
-
-            ret = avcodec_open2(input.decoder, decoder, nullptr);
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not open the video decoder: "} + av_error_message(ret));
+                return set_error(error_message, "Alpha Recorder received invalid mask video dimensions.");
             }
 
             return true;
         }
 
-        bool open_output(OutputContext &output, const InputContext &input, const std::filesystem::path &output_path, FinalizationFormat format,
-                         std::string *error_message)
+        bool configure_encoder(AVCodecContext &encoder, const AVCodec &codec, const AlphaMaskVideoWriterConfig &config,
+                               std::string *error_message)
         {
-            const std::string output_path_text = path_to_utf8(output_path);
-            if (output_path_text.empty())
+            (void)codec;
+            encoder.codec_type = AVMEDIA_TYPE_VIDEO;
+            encoder.codec_id = codec.id;
+            encoder.width = static_cast<int>(config.width);
+            encoder.height = static_cast<int>(config.height);
+            encoder.time_base = AVRational{static_cast<int>(config.fps_den == 0U ? 1U : config.fps_den),
+                                           static_cast<int>(config.fps_num == 0U ? 30U : config.fps_num)};
+            encoder.framerate = AVRational{static_cast<int>(config.fps_num == 0U ? 30U : config.fps_num),
+                                           static_cast<int>(config.fps_den == 0U ? 1U : config.fps_den)};
+            encoder.max_b_frames = 0;
+            encoder.color_range = AVCOL_RANGE_JPEG;
+            encoder.color_primaries = AVCOL_PRI_BT709;
+            encoder.color_trc = AVCOL_TRC_BT709;
+            encoder.colorspace = AVCOL_SPC_BT709;
+
+            switch (config.finalization_format)
             {
-                return set_error(error_message, std::string{"Alpha Recorder could not convert the export path: "} + output_path.generic_string());
+            case FinalizationFormat::MaskProRes422:
+                encoder.gop_size = 1;
+                encoder.pix_fmt = AV_PIX_FMT_YUV422P10LE;
+                encoder.profile = FF_PROFILE_PRORES_STANDARD;
+                (void)av_opt_set(encoder.priv_data, "profile", "2", 0);
+                return true;
+
+            case FinalizationFormat::MaskHevcNvenc:
+                encoder.gop_size = static_cast<int>(config.fps_num == 0U ? 30U : config.fps_num);
+                encoder.pix_fmt = AV_PIX_FMT_YUV420P;
+                (void)av_opt_set(encoder.priv_data, "preset", "lossless", 0);
+                (void)av_opt_set(encoder.priv_data, "tune", "lossless", 0);
+                (void)av_opt_set(encoder.priv_data, "rc", "constqp", 0);
+                (void)av_opt_set_int(encoder.priv_data, "qp", 0, 0);
+                return true;
+
+            case FinalizationFormat::MaskHevcAmf:
+                encoder.gop_size = static_cast<int>(config.fps_num == 0U ? 30U : config.fps_num);
+                encoder.pix_fmt = AV_PIX_FMT_YUV420P;
+                (void)av_opt_set(encoder.priv_data, "usage", "transcoding", 0);
+                (void)av_opt_set(encoder.priv_data, "quality", "quality", 0);
+                (void)av_opt_set_int(encoder.priv_data, "qp_i", 0, 0);
+                (void)av_opt_set_int(encoder.priv_data, "qp_p", 0, 0);
+                return true;
             }
 
-            if (!ensure_parent_directory(output_path))
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not create the export directory: "} +
-                                                    output_path.parent_path().generic_string());
-            }
-
-            int ret = avformat_alloc_output_context2(&output.format, nullptr, nullptr, output_path_text.c_str());
-            if (ret < 0 || output.format == nullptr)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not allocate the export container: "} + av_error_message(ret));
-            }
-
-            AVStream *const input_video_stream = input.format->streams[input.video_stream_index];
-            const AVRational time_base = input_video_stream->time_base;
-            if (time_base.num <= 0 || time_base.den <= 0)
-            {
-                return set_error(error_message, "Alpha Recorder could not determine a valid timestamp base for the recording video.");
-            }
-
-            av_dict_copy(&output.format->metadata, input.format->metadata, 0);
-
-            const AVCodec *const encoder = select_output_encoder(format);
-            if (encoder == nullptr)
-            {
-                if (format == FinalizationFormat::LosslessHevc)
-                {
-                    return set_error(error_message, "Alpha Recorder could not find an HEVC encoder in the bundled FFmpeg stack.");
-                }
-
-                return set_error(error_message, "Alpha Recorder could not find a ProRes encoder in the bundled FFmpeg stack.");
-            }
-
-            output.encoder = avcodec_alloc_context3(encoder);
-            if (output.encoder == nullptr)
-            {
-                return set_error(error_message, format == FinalizationFormat::LosslessHevc ? "Alpha Recorder could not allocate an HEVC encoder context." : "Alpha Recorder could not allocate a ProRes encoder context.");
-            }
-
-            output.encoder->codec_type = AVMEDIA_TYPE_VIDEO;
-            output.encoder->codec_id = encoder->id;
-            output.encoder->width = input_video_stream->codecpar->width;
-            output.encoder->height = input_video_stream->codecpar->height;
-            output.encoder->time_base = time_base;
-            output.encoder->framerate = input_video_stream->avg_frame_rate;
-            output.encoder->sample_aspect_ratio = input_video_stream->sample_aspect_ratio;
-            output.encoder->color_range = input_video_stream->codecpar->color_range;
-            output.encoder->color_primaries = input_video_stream->codecpar->color_primaries;
-            output.encoder->color_trc = input_video_stream->codecpar->color_trc;
-            output.encoder->colorspace = input_video_stream->codecpar->color_space;
-            output.encoder->chroma_sample_location = input_video_stream->codecpar->chroma_location;
-            output.encoder->gop_size = 1;
-            output.encoder->max_b_frames = 0;
-
-            if (format == FinalizationFormat::LosslessHevc)
-            {
-                if (!configure_hevc_encoder(*output.encoder, error_message))
-                {
-                    return false;
-                }
-            }
-            else
-            {
-                output.encoder->pix_fmt = AV_PIX_FMT_YUVA444P10LE;
-                output.encoder->profile = FF_PROFILE_PRORES_4444;
-            }
-
-            if ((output.format->oformat->flags & AVFMT_GLOBALHEADER) != 0)
-            {
-                output.encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-            }
-
-            ret = avcodec_open2(output.encoder, encoder, nullptr);
-            if (ret < 0)
-            {
-                return set_error(error_message,
-                                 format == FinalizationFormat::LosslessHevc ? std::string{"Alpha Recorder could not open the HEVC encoder: "} + av_error_message(ret) : std::string{"Alpha Recorder could not open the ProRes encoder: "} + av_error_message(ret));
-            }
-
-            output.video_stream = avformat_new_stream(output.format, encoder);
-            if (output.video_stream == nullptr)
-            {
-                return set_error(error_message, "Alpha Recorder could not allocate the export video stream.");
-            }
-
-            ret = avcodec_parameters_from_context(output.video_stream->codecpar, output.encoder);
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not configure the export video stream: "} +
-                                                    av_error_message(ret));
-            }
-
-            output.video_stream->time_base = time_base;
-            output.video_stream->sample_aspect_ratio = input_video_stream->sample_aspect_ratio;
-            output.video_stream->disposition = input_video_stream->disposition;
-            av_dict_copy(&output.video_stream->metadata, input_video_stream->metadata, 0);
-
-            output.video_stream->codecpar->codec_tag = 0;
-
-            if ((output.format->oformat->flags & AVFMT_NOFILE) == 0)
-            {
-                ret = avio_open(&output.format->pb, output_path_text.c_str(), AVIO_FLAG_WRITE);
-                if (ret < 0)
-                {
-                    return set_error(error_message, std::string{"Alpha Recorder could not open the export file: "} + output_path.generic_string() +
-                                                        " (" + av_error_message(ret) + ")");
-                }
-            }
-
-            ret = avformat_write_header(output.format, nullptr);
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not write the export container header: "} +
-                                                    av_error_message(ret));
-            }
-
-            return true;
+            return set_error(error_message, "Alpha Recorder received an unsupported mask format.");
         }
 
-        bool ensure_frame_buffers(FrameHolder &bgra_frame, FrameHolder &yuva_frame, int width, int height, std::string *error_message)
+        void fill_chroma_plane(std::uint8_t *data, int linesize, int width, int height, std::uint8_t value)
         {
-            if (bgra_frame.frame == nullptr)
+            for (int row = 0; row < height; ++row)
             {
-                bgra_frame.frame = av_frame_alloc();
-                if (bgra_frame.frame == nullptr)
+                std::uint8_t *const dest = data + (static_cast<std::size_t>(row) * static_cast<std::size_t>(linesize));
+                for (int column = 0; column < width; ++column)
                 {
-                    return set_error(error_message, "Alpha Recorder could not allocate a BGRA conversion frame.");
-                }
-
-                bgra_frame.frame->format = AV_PIX_FMT_BGRA;
-                bgra_frame.frame->width = width;
-                bgra_frame.frame->height = height;
-
-                const int ret = av_frame_get_buffer(bgra_frame.frame, 32);
-                if (ret < 0)
-                {
-                    return set_error(error_message, std::string{"Alpha Recorder could not allocate BGRA frame buffers: "} + av_error_message(ret));
-                }
-            }
-
-            if (yuva_frame.frame == nullptr)
-            {
-                yuva_frame.frame = av_frame_alloc();
-                if (yuva_frame.frame == nullptr)
-                {
-                    return set_error(error_message, "Alpha Recorder could not allocate a YUVA conversion frame.");
-                }
-
-                yuva_frame.frame->format = AV_PIX_FMT_YUVA444P10LE;
-                yuva_frame.frame->width = width;
-                yuva_frame.frame->height = height;
-
-                const int ret = av_frame_get_buffer(yuva_frame.frame, 32);
-                if (ret < 0)
-                {
-                    return set_error(error_message, std::string{"Alpha Recorder could not allocate YUVA frame buffers: "} + av_error_message(ret));
-                }
-            }
-
-            return true;
-        }
-
-        bool encode_frame(OutputContext &output, AVFrame *decoded_frame, const AlphaIndexEntry &entry, const AlphaSidecarFrame &alpha_frame,
-                          FrameHolder &bgra_frame, FrameHolder &yuva_frame, SwsHolder &source_to_bgra, SwsHolder &bgra_to_yuva,
-                          std::string *error_message)
-        {
-            if (decoded_frame == nullptr || decoded_frame->format == AV_PIX_FMT_NONE || decoded_frame->width <= 0 || decoded_frame->height <= 0)
-            {
-                return set_error(error_message, "Alpha Recorder could not determine the decoded video frame geometry.");
-            }
-
-            std::int64_t output_pts = decoded_frame->pts;
-            if (output_pts == AV_NOPTS_VALUE)
-            {
-                if (entry.pts > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-                {
-                    return set_error(error_message, "Alpha Recorder encountered an out-of-range presentation timestamp while exporting.");
-                }
-
-                output_pts = static_cast<std::int64_t>(entry.pts);
-            }
-
-            if (!ensure_frame_buffers(bgra_frame, yuva_frame, decoded_frame->width, decoded_frame->height, error_message))
-            {
-                return false;
-            }
-
-            const bool use_bgra_output = output.encoder->pix_fmt == AV_PIX_FMT_BGRA;
-
-            if (source_to_bgra.context == nullptr)
-            {
-                source_to_bgra.context = sws_getContext(decoded_frame->width, decoded_frame->height,
-                                                        static_cast<AVPixelFormat>(decoded_frame->format), decoded_frame->width,
-                                                        decoded_frame->height, AV_PIX_FMT_BGRA, SWS_BICUBIC, nullptr, nullptr, nullptr);
-                if (source_to_bgra.context == nullptr)
-                {
-                    return set_error(error_message, "Alpha Recorder could not create the source-to-BGRA conversion context.");
-                }
-            }
-
-            if (!use_bgra_output && bgra_to_yuva.context == nullptr)
-            {
-                bgra_to_yuva.context = sws_getContext(decoded_frame->width, decoded_frame->height, AV_PIX_FMT_BGRA, decoded_frame->width,
-                                                      decoded_frame->height, AV_PIX_FMT_YUVA444P10LE, SWS_BICUBIC, nullptr, nullptr, nullptr);
-                if (bgra_to_yuva.context == nullptr)
-                {
-                    return set_error(error_message, "Alpha Recorder could not create the BGRA-to-YUVA conversion context.");
-                }
-            }
-
-            if (av_frame_make_writable(bgra_frame.frame) < 0 || (!use_bgra_output && av_frame_make_writable(yuva_frame.frame) < 0))
-            {
-                return set_error(error_message, "Alpha Recorder could not obtain writable export frames.");
-            }
-
-            const int source_height = sws_scale(source_to_bgra.context, decoded_frame->data, decoded_frame->linesize, 0, decoded_frame->height,
-                                                bgra_frame.frame->data, bgra_frame.frame->linesize);
-            if (source_height <= 0)
-            {
-                return set_error(error_message, "Alpha Recorder could not convert a decoded video frame to BGRA.");
-            }
-
-            for (int row = 0; row < decoded_frame->height; ++row)
-            {
-                std::uint8_t *const dest_row = bgra_frame.frame->data[0] + (static_cast<std::size_t>(row) *
-                                                                            static_cast<std::size_t>(bgra_frame.frame->linesize[0]));
-                const std::uint8_t *const alpha_row = alpha_frame.alpha_bytes.data() +
-                                                      (static_cast<std::size_t>(row) * static_cast<std::size_t>(decoded_frame->width));
-
-                for (int column = 0; column < decoded_frame->width; ++column)
-                {
-                    dest_row[(static_cast<std::size_t>(column) * 4U) + 3U] = alpha_row[column];
-                }
-            }
-
-            AVFrame *export_frame = nullptr;
-            if (use_bgra_output)
-            {
-                bgra_frame.frame->pts = output_pts;
-                if (av_frame_copy_props(bgra_frame.frame, decoded_frame) < 0)
-                {
-                    return set_error(error_message, "Alpha Recorder could not preserve the decoded frame metadata for export.");
-                }
-
-                bgra_frame.frame->pts = output_pts;
-                export_frame = bgra_frame.frame;
-            }
-            else
-            {
-                const int export_height = sws_scale(bgra_to_yuva.context, bgra_frame.frame->data, bgra_frame.frame->linesize, 0,
-                                                    decoded_frame->height, yuva_frame.frame->data, yuva_frame.frame->linesize);
-                if (export_height <= 0)
-                {
-                    return set_error(error_message, "Alpha Recorder could not convert the alpha-masked frame for export.");
-                }
-
-                yuva_frame.frame->pts = output_pts;
-                if (av_frame_copy_props(yuva_frame.frame, decoded_frame) < 0)
-                {
-                    return set_error(error_message, "Alpha Recorder could not preserve the decoded frame metadata for export.");
-                }
-
-                yuva_frame.frame->pts = output_pts;
-                export_frame = yuva_frame.frame;
-            }
-
-            int ret = avcodec_send_frame(output.encoder, export_frame);
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder failed to encode a video frame: "} + av_error_message(ret));
-            }
-
-            AVPacket *packet = av_packet_alloc();
-            if (packet == nullptr)
-            {
-                return set_error(error_message, "Alpha Recorder could not allocate an encoded packet.");
-            }
-
-            while (true)
-            {
-                ret = avcodec_receive_packet(output.encoder, packet);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-                {
-                    av_packet_free(&packet);
-                    return true;
-                }
-
-                if (ret < 0)
-                {
-                    av_packet_free(&packet);
-                    return set_error(error_message, std::string{"Alpha Recorder failed while retrieving an encoded packet: "} + av_error_message(ret));
-                }
-
-                packet->stream_index = output.video_stream->index;
-                packet->pos = -1;
-                av_packet_rescale_ts(packet, output.encoder->time_base, output.video_stream->time_base);
-
-                ret = av_interleaved_write_frame(output.format, packet);
-                av_packet_unref(packet);
-                if (ret < 0)
-                {
-                    av_packet_free(&packet);
-                    return set_error(error_message, std::string{"Alpha Recorder failed while writing an exported video packet: "} + av_error_message(ret));
+                    dest[column] = value;
                 }
             }
         }
 
-        bool flush_encoder(OutputContext &output, std::string *error_message)
+        bool copy_alpha_to_frame(AVFrame &frame, const std::uint8_t *alpha, std::uint32_t stride, std::string *error_message)
         {
-            int ret = avcodec_send_frame(output.encoder, nullptr);
-            if (ret < 0 && ret != AVERROR_EOF)
+            if (alpha == nullptr || stride < static_cast<std::uint32_t>(frame.width))
             {
-                return set_error(error_message, std::string{"Alpha Recorder failed to flush the video encoder: "} + av_error_message(ret));
+                return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
             }
 
-            AVPacket *packet = av_packet_alloc();
-            if (packet == nullptr)
+            const AVPixelFormat format = static_cast<AVPixelFormat>(frame.format);
+            if (format == AV_PIX_FMT_YUV422P10LE)
             {
-                return set_error(error_message, "Alpha Recorder could not allocate a flush packet.");
+                for (int row = 0; row < frame.height; ++row)
+                {
+                    const std::uint8_t *const src = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
+                    auto *const dest = reinterpret_cast<std::uint16_t *>(frame.data[0] +
+                                                                         (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[0])));
+                    for (int column = 0; column < frame.width; ++column)
+                    {
+                        dest[column] = static_cast<std::uint16_t>(src[column]) << 2U;
+                    }
+                }
+
+                const int chroma_width = (frame.width + 1) / 2;
+                for (int plane = 1; plane <= 2; ++plane)
+                {
+                    for (int row = 0; row < frame.height; ++row)
+                    {
+                        auto *const dest = reinterpret_cast<std::uint16_t *>(frame.data[plane] +
+                                                                             (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[plane])));
+                        for (int column = 0; column < chroma_width; ++column)
+                        {
+                            dest[column] = 512U;
+                        }
+                    }
+                }
+                return true;
             }
 
-            while (true)
+            if (format == AV_PIX_FMT_YUV420P)
             {
-                ret = avcodec_receive_packet(output.encoder, packet);
-                if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+                for (int row = 0; row < frame.height; ++row)
                 {
-                    av_packet_free(&packet);
-                    return true;
+                    const std::uint8_t *const src = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
+                    std::uint8_t *const dest = frame.data[0] + (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[0]));
+                    for (int column = 0; column < frame.width; ++column)
+                    {
+                        dest[column] = src[column];
+                    }
                 }
 
-                if (ret < 0)
-                {
-                    av_packet_free(&packet);
-                    return set_error(error_message, std::string{"Alpha Recorder failed while draining the video encoder: "} + av_error_message(ret));
-                }
-
-                packet->stream_index = output.video_stream->index;
-                packet->pos = -1;
-                av_packet_rescale_ts(packet, output.encoder->time_base, output.video_stream->time_base);
-
-                ret = av_interleaved_write_frame(output.format, packet);
-                av_packet_unref(packet);
-                if (ret < 0)
-                {
-                    av_packet_free(&packet);
-                    return set_error(error_message, std::string{"Alpha Recorder failed while writing a flushed video packet: "} + av_error_message(ret));
-                }
+                fill_chroma_plane(frame.data[1], frame.linesize[1], (frame.width + 1) / 2, (frame.height + 1) / 2, 128U);
+                fill_chroma_plane(frame.data[2], frame.linesize[2], (frame.width + 1) / 2, (frame.height + 1) / 2, 128U);
+                return true;
             }
+
+            return set_error(error_message, "Alpha Recorder configured an unsupported mask pixel format.");
         }
 
     } // namespace
 
-    bool export_completed_recording(const FinalizationExportRequest &request, std::string *error_message) noexcept
+    struct AlphaMaskVideoWriter::Impl
     {
+        std::filesystem::path output_path{};
+        AVFormatContext *format = nullptr;
+        AVCodecContext *encoder = nullptr;
+        AVStream *video_stream = nullptr;
+        AVFrame *frame = nullptr;
+        std::uint64_t frame_count = 0;
+        bool header_written = false;
+
+        ~Impl()
+        {
+            av_frame_free(&frame);
+            avcodec_free_context(&encoder);
+            if (format != nullptr)
+            {
+                if ((format->oformat->flags & AVFMT_NOFILE) == 0 && format->pb != nullptr)
+                {
+                    avio_closep(&format->pb);
+                }
+                avformat_free_context(format);
+            }
+        }
+    };
+
+    AlphaMaskVideoWriter::~AlphaMaskVideoWriter() noexcept
+    {
+        (void)close(nullptr);
+    }
+
+    bool AlphaMaskVideoWriter::open(const AlphaMaskVideoWriterConfig &config, std::string *error_message) noexcept
+    {
+        (void)close(nullptr);
+
         try
         {
-            if (!validate_supported_format(request.finalization_format, error_message))
+            if (config.output_path.empty())
+            {
+                return set_error(error_message, "Alpha Recorder received an empty mask video path.");
+            }
+
+            if (!validate_dimensions(config.width, config.height, error_message))
             {
                 return false;
             }
 
-            if (request.recording_path.empty() || request.sidecar_path.empty() || request.manifest_path.empty())
+            if (!ensure_parent_directory(config.output_path))
             {
-                return set_error(error_message, "Alpha Recorder export received an incomplete file set.");
+                return set_error(error_message, std::string{"Alpha Recorder could not create the mask video directory: "} +
+                                                    config.output_path.parent_path().generic_string());
             }
 
-            if (!std::filesystem::exists(request.recording_path))
+            const AVCodec *const encoder = select_output_encoder(config.finalization_format);
+            if (encoder == nullptr)
             {
-                return set_error(error_message, std::string{"Alpha Recorder could not find the recorded video file: "} +
-                                                    request.recording_path.generic_string());
+                return set_error(error_message, std::string{"Alpha Recorder could not find "} +
+                                                    std::string{finalization_format_display_name(config.finalization_format)} +
+                                                    " in the bundled FFmpeg stack.");
             }
 
-            if (path_is_directory(request.recording_path))
+            auto *impl = new Impl{};
+            impl->output_path = config.output_path;
+            const std::string output_path_text = path_to_utf8(config.output_path);
+            int ret = avformat_alloc_output_context2(&impl->format, nullptr, nullptr, output_path_text.c_str());
+            if (ret < 0 || impl->format == nullptr)
             {
-                return set_error(error_message, std::string{"Alpha Recorder cannot export because OBS reported a recording folder instead of a video file: "} +
-                                                    request.recording_path.generic_string());
+                delete impl;
+                return set_error(error_message, std::string{"Alpha Recorder could not allocate the mask video container: "} +
+                                                    av_error_message(ret));
             }
 
-            if (!path_is_regular_file(request.recording_path))
+            impl->encoder = avcodec_alloc_context3(encoder);
+            if (impl->encoder == nullptr)
             {
-                return set_error(error_message, std::string{"Alpha Recorder cannot export because the recording path is not a regular file: "} +
-                                                    request.recording_path.generic_string());
+                delete impl;
+                return set_error(error_message, "Alpha Recorder could not allocate the mask video encoder.");
             }
 
-            ManifestWriter manifest_reader;
-            AlphaSessionSummary summary;
-            if (!manifest_reader.read(request.manifest_path, summary, error_message))
+            if (!configure_encoder(*impl->encoder, *encoder, config, error_message))
             {
+                delete impl;
                 return false;
             }
 
-            const std::string expected_format = std::string{finalization_format_config_value(request.finalization_format)};
-            if (summary.finalization_format != expected_format)
+            if ((impl->format->oformat->flags & AVFMT_GLOBALHEADER) != 0)
             {
-                return set_error(error_message, std::string{"Alpha Recorder manifest finalization format mismatch: expected "} +
-                                                    expected_format + ", got " + summary.finalization_format);
+                impl->encoder->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
             }
 
-            if (summary.sidecar_path != request.sidecar_path || summary.manifest_path != request.manifest_path)
+            ret = avcodec_open2(impl->encoder, encoder, nullptr);
+            if (ret < 0)
             {
-                return set_error(error_message, "Alpha Recorder manifest paths do not match the completed sidecar files.");
+                delete impl;
+                return set_error(error_message, std::string{"Alpha Recorder could not open the mask video encoder: "} +
+                                                    av_error_message(ret));
             }
 
-            AlphaSidecarReader sidecar_reader;
-            if (!sidecar_reader.open(request.sidecar_path, error_message))
+            impl->video_stream = avformat_new_stream(impl->format, encoder);
+            if (impl->video_stream == nullptr)
             {
-                return false;
+                delete impl;
+                return set_error(error_message, "Alpha Recorder could not allocate the mask video stream.");
             }
 
-            const std::vector<AlphaIndexEntry> &entries = sidecar_reader.index_entries();
-            if (summary.pair_count != entries.size())
+            ret = avcodec_parameters_from_context(impl->video_stream->codecpar, impl->encoder);
+            if (ret < 0)
             {
-                return set_error(error_message, "Alpha Recorder manifest and sidecar record counts do not match.");
+                delete impl;
+                return set_error(error_message, std::string{"Alpha Recorder could not configure the mask video stream: "} +
+                                                    av_error_message(ret));
             }
 
-            const std::filesystem::path output_path = finalization_output_path(request.sidecar_path, request.finalization_format);
+            impl->video_stream->time_base = impl->encoder->time_base;
+            impl->video_stream->codecpar->codec_tag = 0;
 
-            InputContext input;
-            if (!open_input(input, request.recording_path, error_message))
+            if ((impl->format->oformat->flags & AVFMT_NOFILE) == 0)
             {
-                return false;
+                ret = avio_open(&impl->format->pb, output_path_text.c_str(), AVIO_FLAG_WRITE);
+                if (ret < 0)
+                {
+                    delete impl;
+                    return set_error(error_message, std::string{"Alpha Recorder could not open the mask video file: "} +
+                                                        config.output_path.generic_string() + " (" + av_error_message(ret) + ")");
+                }
             }
 
-            OutputContext output;
-            if (!open_output(output, input, output_path, request.finalization_format, error_message))
+            ret = avformat_write_header(impl->format, nullptr);
+            if (ret < 0)
             {
-                return false;
+                delete impl;
+                return set_error(error_message, std::string{"Alpha Recorder could not write the mask video header: "} +
+                                                    av_error_message(ret));
             }
 
-            FrameHolder decoded_frame;
-            FrameHolder bgra_frame;
-            FrameHolder yuva_frame;
-            SwsHolder source_to_bgra;
-            SwsHolder bgra_to_yuva;
-            decoded_frame.frame = av_frame_alloc();
-            if (decoded_frame.frame == nullptr)
+            impl->header_written = true;
+            impl->frame = av_frame_alloc();
+            if (impl->frame == nullptr)
             {
-                return set_error(error_message, "Alpha Recorder could not allocate a decoded video frame.");
+                delete impl;
+                return set_error(error_message, "Alpha Recorder could not allocate a mask video frame.");
+            }
+
+            impl->frame->format = impl->encoder->pix_fmt;
+            impl->frame->width = impl->encoder->width;
+            impl->frame->height = impl->encoder->height;
+            ret = av_frame_get_buffer(impl->frame, 32);
+            if (ret < 0)
+            {
+                delete impl;
+                return set_error(error_message, std::string{"Alpha Recorder could not allocate mask video frame buffers: "} +
+                                                    av_error_message(ret));
+            }
+
+            impl_ = impl;
+            return true;
+        }
+        catch (const std::exception &ex)
+        {
+            return set_error(error_message, std::string{"Alpha Recorder failed to open the mask video writer: "} + ex.what());
+        }
+        catch (...)
+        {
+            return set_error(error_message, "Alpha Recorder failed to open the mask video writer.");
+        }
+    }
+
+    bool AlphaMaskVideoWriter::write_frame(const std::uint8_t *alpha, std::uint32_t stride, std::string *error_message) noexcept
+    {
+        if (impl_ == nullptr || impl_->encoder == nullptr || impl_->frame == nullptr)
+        {
+            return set_error(error_message, "Alpha Recorder mask video writer is not open.");
+        }
+
+        if (av_frame_make_writable(impl_->frame) < 0)
+        {
+            return set_error(error_message, "Alpha Recorder could not make the mask video frame writable.");
+        }
+
+        if (!copy_alpha_to_frame(*impl_->frame, alpha, stride, error_message))
+        {
+            return false;
+        }
+
+        if (impl_->frame_count > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+        {
+            return set_error(error_message, "Alpha Recorder mask video frame count overflowed.");
+        }
+
+        impl_->frame->pts = static_cast<std::int64_t>(impl_->frame_count);
+        int ret = avcodec_send_frame(impl_->encoder, impl_->frame);
+        if (ret < 0)
+        {
+            return set_error(error_message, std::string{"Alpha Recorder failed to encode a mask video frame: "} +
+                                                av_error_message(ret));
+        }
+
+        AVPacket *packet = av_packet_alloc();
+        if (packet == nullptr)
+        {
+            return set_error(error_message, "Alpha Recorder could not allocate a mask video packet.");
+        }
+
+        while (true)
+        {
+            ret = avcodec_receive_packet(impl_->encoder, packet);
+            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+            {
+                av_packet_free(&packet);
+                ++impl_->frame_count;
+                return true;
+            }
+
+            if (ret < 0)
+            {
+                av_packet_free(&packet);
+                return set_error(error_message, std::string{"Alpha Recorder failed while retrieving a mask video packet: "} +
+                                                    av_error_message(ret));
+            }
+
+            packet->stream_index = impl_->video_stream->index;
+            packet->pos = -1;
+            av_packet_rescale_ts(packet, impl_->encoder->time_base, impl_->video_stream->time_base);
+            ret = av_interleaved_write_frame(impl_->format, packet);
+            av_packet_unref(packet);
+            if (ret < 0)
+            {
+                av_packet_free(&packet);
+                return set_error(error_message, std::string{"Alpha Recorder failed while writing a mask video packet: "} +
+                                                    av_error_message(ret));
+            }
+        }
+    }
+
+    bool AlphaMaskVideoWriter::close(std::string *error_message) noexcept
+    {
+        if (impl_ == nullptr)
+        {
+            return true;
+        }
+
+        Impl *impl = impl_;
+        impl_ = nullptr;
+        bool success = true;
+
+        if (impl->encoder != nullptr)
+        {
+            int ret = avcodec_send_frame(impl->encoder, nullptr);
+            if (ret < 0 && ret != AVERROR_EOF)
+            {
+                success = set_error(error_message, std::string{"Alpha Recorder failed to flush the mask video encoder: "} +
+                                                       av_error_message(ret));
             }
 
             AVPacket *packet = av_packet_alloc();
             if (packet == nullptr)
             {
-                return set_error(error_message, "Alpha Recorder could not allocate an input packet buffer.");
-            }
-
-            std::size_t next_alpha_index = 0;
-            bool success = true;
-            bool alpha_exhausted = entries.empty();
-            while (success && !alpha_exhausted)
-            {
-                const int ret = av_read_frame(input.format, packet);
-                if (ret == AVERROR_EOF)
-                {
-                    break;
-                }
-
-                if (ret < 0)
-                {
-                    success = set_error(error_message, std::string{"Alpha Recorder failed while reading the recording file: "} + av_error_message(ret));
-                    break;
-                }
-
-                if (packet->stream_index == input.video_stream_index)
-                {
-                    int send_result = avcodec_send_packet(input.decoder, packet);
-                    av_packet_unref(packet);
-                    if (send_result < 0 && send_result != AVERROR(EAGAIN))
-                    {
-                        success = set_error(error_message, std::string{"Alpha Recorder failed to decode a video packet: "} + av_error_message(send_result));
-                        break;
-                    }
-
-                    while (true)
-                    {
-                        send_result = avcodec_receive_frame(input.decoder, decoded_frame.frame);
-                        if (send_result == AVERROR(EAGAIN) || send_result == AVERROR_EOF)
-                        {
-                            break;
-                        }
-
-                        if (send_result < 0)
-                        {
-                            success = set_error(error_message, std::string{"Alpha Recorder failed while decoding the recording video: "} +
-                                                                   av_error_message(send_result));
-                            break;
-                        }
-
-                        if (next_alpha_index >= entries.size())
-                        {
-                            av_frame_unref(decoded_frame.frame);
-                            alpha_exhausted = true;
-                            break;
-                        }
-
-                        const AlphaIndexEntry &entry = entries[next_alpha_index];
-                        AlphaSidecarFrame alpha_frame;
-                        if (!sidecar_reader.read_frame(entry, alpha_frame, error_message))
-                        {
-                            av_frame_unref(decoded_frame.frame);
-                            success = false;
-                            break;
-                        }
-
-                        const bool frame_encoded = encode_frame(output, decoded_frame.frame, entry, alpha_frame, bgra_frame, yuva_frame,
-                                                                source_to_bgra, bgra_to_yuva, error_message);
-                        av_frame_unref(decoded_frame.frame);
-                        if (!frame_encoded)
-                        {
-                            success = false;
-                            break;
-                        }
-
-                        ++next_alpha_index;
-                    }
-
-                    if (!success)
-                    {
-                        break;
-                    }
-
-                    if (alpha_exhausted)
-                    {
-                        break;
-                    }
-                }
-
-                av_packet_unref(packet);
-            }
-
-            av_packet_free(&packet);
-            if (!success)
-            {
-                return false;
-            }
-
-            if (alpha_exhausted || next_alpha_index >= entries.size())
-            {
-                alpha_exhausted = true;
+                success = set_error(error_message, "Alpha Recorder could not allocate a mask video flush packet.");
             }
             else
             {
-                int ret = avcodec_send_packet(input.decoder, nullptr);
-                if (ret < 0 && ret != AVERROR_EOF)
+                while (success)
                 {
-                    return set_error(error_message, std::string{"Alpha Recorder failed to flush the video decoder: "} + av_error_message(ret));
-                }
-
-                while (true)
-                {
-                    ret = avcodec_receive_frame(input.decoder, decoded_frame.frame);
+                    ret = avcodec_receive_packet(impl->encoder, packet);
                     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
                     {
                         break;
@@ -873,56 +493,80 @@ namespace alpha_recorder::obs
 
                     if (ret < 0)
                     {
-                        return set_error(error_message, std::string{"Alpha Recorder failed while draining the video decoder: "} + av_error_message(ret));
-                    }
-
-                    if (next_alpha_index >= entries.size())
-                    {
-                        av_frame_unref(decoded_frame.frame);
-                        alpha_exhausted = true;
+                        success = set_error(error_message, std::string{"Alpha Recorder failed while draining the mask video encoder: "} +
+                                                           av_error_message(ret));
                         break;
                     }
 
-                    const AlphaIndexEntry &entry = entries[next_alpha_index];
-                    AlphaSidecarFrame alpha_frame;
-                    if (!sidecar_reader.read_frame(entry, alpha_frame, error_message))
+                    packet->stream_index = impl->video_stream->index;
+                    packet->pos = -1;
+                    av_packet_rescale_ts(packet, impl->encoder->time_base, impl->video_stream->time_base);
+                    ret = av_interleaved_write_frame(impl->format, packet);
+                    av_packet_unref(packet);
+                    if (ret < 0)
                     {
-                        av_frame_unref(decoded_frame.frame);
-                        return false;
+                        success = set_error(error_message, std::string{"Alpha Recorder failed while writing a flushed mask video packet: "} +
+                                                           av_error_message(ret));
+                        break;
                     }
-
-                    const bool frame_encoded = encode_frame(output, decoded_frame.frame, entry, alpha_frame, bgra_frame, yuva_frame,
-                                                            source_to_bgra, bgra_to_yuva, error_message);
-                    av_frame_unref(decoded_frame.frame);
-                    if (!frame_encoded)
-                    {
-                        return false;
-                    }
-
-                    ++next_alpha_index;
                 }
+                av_packet_free(&packet);
             }
+        }
 
-            if (next_alpha_index == 0 && !entries.empty())
+        if (success && impl->format != nullptr && impl->header_written && av_write_trailer(impl->format) < 0)
+        {
+            success = set_error(error_message, "Alpha Recorder failed to finalize the mask video.");
+        }
+
+        delete impl;
+        return success;
+    }
+
+    bool AlphaMaskVideoWriter::is_open() const noexcept
+    {
+        return impl_ != nullptr;
+    }
+
+    const std::filesystem::path &AlphaMaskVideoWriter::path() const noexcept
+    {
+        static const std::filesystem::path empty_path{};
+        return impl_ == nullptr ? empty_path : impl_->output_path;
+    }
+
+    std::uint64_t AlphaMaskVideoWriter::frame_count() const noexcept
+    {
+        return impl_ == nullptr ? 0U : impl_->frame_count;
+    }
+
+    bool finalization_format_runtime_available(FinalizationFormat format, std::string *reason) noexcept
+    {
+        try
+        {
+            if (!finalization_format_is_supported(format))
             {
-                return set_error(error_message, "Alpha Recorder decoded fewer video frames than the sidecar contains.");
+                return set_error(reason, "unsupported finalization format");
             }
 
-            if (!flush_encoder(output, error_message))
+            if (select_output_encoder(format) == nullptr)
             {
-                return false;
+                return set_error(reason, std::string{finalization_format_display_name(format)} +
+                                             " is not available in the bundled FFmpeg stack");
             }
 
-            if (av_write_trailer(output.format) < 0)
+            if (reason != nullptr)
             {
-                return set_error(error_message, "Alpha Recorder failed to finalize the exported movie.");
+                reason->clear();
             }
-
             return true;
+        }
+        catch (const std::exception &ex)
+        {
+            return set_error(reason, std::string{"finalization capability check failed: "} + ex.what());
         }
         catch (...)
         {
-            return set_error(error_message, "Alpha Recorder export failed due to an unexpected error.");
+            return set_error(reason, "finalization capability check failed.");
         }
     }
 

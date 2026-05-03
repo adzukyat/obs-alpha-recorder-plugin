@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from "bun";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { platform } from "node:process";
 
@@ -15,6 +15,7 @@ type Args = {
   recordSeconds: number;
   width: number;
   height: number;
+  finalizationFormat: string;
   keepObsOpen: boolean;
 };
 
@@ -27,6 +28,7 @@ function parseArgs(argv: string[]): Args {
     recordSeconds: 5,
     width: 1280,
     height: 720,
+    finalizationFormat: "mask_prores_422",
     keepObsOpen: false,
   };
 
@@ -64,6 +66,10 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--height":
         args.height = Number(value);
+        ++index;
+        break;
+      case "--finalization-format":
+        args.finalizationFormat = value;
         ++index;
         break;
       case "--keep-obs-open":
@@ -399,7 +405,7 @@ ChannelSetup=Stereo
 
 [AlphaRecorder]
 enabled=false
-finalization_format=prores_4444
+finalization_format=${args.finalizationFormat}
 `);
 
   writeText(
@@ -490,11 +496,14 @@ finalization_format=prores_4444
   let socket: ObsWebSocket | undefined = undefined;
   try {
     socket = await ObsWebSocket.connect(port, password);
-    await requestWithStartupRetry(socket, "CallVendorRequest", {
+    const setSettings = await requestWithStartupRetry(socket, "CallVendorRequest", {
       vendorName: "alpha_recorder",
       requestType: "SetSettings",
-      requestData: { enabled: true, finalization_format: "prores_4444" },
+      requestData: { enabled: true, finalization_format: args.finalizationFormat },
     });
+    if (setSettings.responseData?.ok === false) {
+      throw new Error(`Alpha Recorder rejected settings: ${JSON.stringify(setSettings.responseData)}`);
+    }
     const settings = await requestWithStartupRetry(socket, "CallVendorRequest", {
       vendorName: "alpha_recorder",
       requestType: "GetSettings",
@@ -502,6 +511,9 @@ finalization_format=prores_4444
     });
     if (!settings.responseData?.enabled) {
       throw new Error("Alpha Recorder did not report enabled=true through the vendor API");
+    }
+    if (settings.responseData?.finalization_format !== args.finalizationFormat) {
+      throw new Error(`Alpha Recorder did not accept finalization_format=${args.finalizationFormat}: ${JSON.stringify(settings)}`);
     }
 
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
@@ -523,22 +535,11 @@ finalization_format=prores_4444
     }
 
     const basePath = rgbPath.replace(/\.[^.\\/]+$/, "");
-    const sidecarPath = `${basePath}.alpha.sidecar`;
-    const manifestPath = `${basePath}.alpha.manifest.json`;
-    const alphaPath = `${basePath}.alpha.mov`;
+    const alphaExtension = args.finalizationFormat === "mask_prores_422" ? ".mov" : ".mp4";
+    const alphaPath = `${basePath}.alpha${alphaExtension}`;
 
     await waitForPath(rgbPath, 30);
-    await waitForPath(sidecarPath, 60);
-    await waitForPath(manifestPath, 60);
     await waitForPath(alphaPath, 120);
-
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-    if (Number(manifest.pair_count) <= 0 || Number(manifest.record_count) !== Number(manifest.pair_count)) {
-      throw new Error(`Manifest counts are invalid: ${JSON.stringify(manifest)}`);
-    }
-    if (Number(manifest.sidecar_size_bytes) !== statSync(sidecarPath).size) {
-      throw new Error("Manifest sidecar_size_bytes does not match the sidecar file size");
-    }
 
     const ffprobe = findTool(stageBin, args.repoRoot, "ffprobe");
     const ffmpeg = findTool(stageBin, args.repoRoot, "ffmpeg");
@@ -580,8 +581,16 @@ finalization_format=prores_4444
     await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", alphaPath, "-frames:v", "1", "-f", "null", "-"], 180);
 
     const alphaStream = alphaProbe.streams?.[0] ?? {};
-    if (alphaStream.codec_name !== "prores" || alphaStream.pix_fmt !== "yuva444p10le") {
-      throw new Error(`Alpha movie probe did not report ProRes yuva444p10le: ${JSON.stringify(alphaProbe)}`);
+    const alphaPixFmt = String(alphaStream.pix_fmt ?? "");
+    if (alphaPixFmt.startsWith("yuva") || alphaPixFmt === "rgba" || alphaPixFmt === "bgra" || alphaPixFmt === "argb") {
+      throw new Error(`Alpha mask movie unexpectedly carries an alpha-capable pixel format: ${JSON.stringify(alphaProbe)}`);
+    }
+    if (args.finalizationFormat === "mask_hevc_nvenc" || args.finalizationFormat === "mask_hevc_amf") {
+      if (alphaStream.codec_name !== "hevc") {
+        throw new Error(`Alpha movie probe did not report HEVC: ${JSON.stringify(alphaProbe)}`);
+      }
+    } else if (alphaStream.codec_name !== "prores") {
+      throw new Error(`Alpha movie probe did not report ProRes: ${JSON.stringify(alphaProbe)}`);
     }
 
     console.log(
@@ -591,9 +600,6 @@ finalization_format=prores_4444
           artifactRoot,
           rgbPath,
           alphaPath,
-          sidecarPath,
-          manifestPath,
-          pairCount: manifest.pair_count,
           rgbProbe,
           alphaProbe,
         },

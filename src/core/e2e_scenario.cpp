@@ -278,7 +278,7 @@ namespace alpha_recorder::e2e
         }
 
         pair.alpha.width = 2U;
-        pair.alpha.height = static_cast<std::uint32_t>(2ULL + index);
+        pair.alpha.height = 2U;
         pair.alpha.stride = 2U;
         pair.alpha.bytes.resize(static_cast<std::size_t>(pair.alpha.stride) * pair.alpha.height);
         for (std::size_t byte_index = 0; byte_index < pair.alpha.bytes.size(); ++byte_index)
