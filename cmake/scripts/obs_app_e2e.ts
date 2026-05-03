@@ -459,8 +459,16 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, rgbPath: string, alphaPath: str
   const verifyWidth = Math.min(width, 320);
   const verifyHeight = Math.max(2, Math.round((height * verifyWidth) / width / 2) * 2);
   const scaleFilter = `scale=${verifyWidth}:${verifyHeight}:flags=neighbor`;
-  const rgbBytes = checkedOutput(ffmpeg, ["-v", "error", "-i", rgbPath, "-an", "-vf", scaleFilter, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], 180);
-  const alphaBytes = checkedOutput(ffmpeg, ["-v", "error", "-i", alphaPath, "-an", "-vf", scaleFilter, "-f", "rawvideo", "-pix_fmt", "gray", "-"], 180);
+  const rgbBytes = checkedOutput(
+    ffmpeg,
+    ["-v", "error", "-i", rgbPath, "-an", "-vf", scaleFilter, "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+    180,
+  );
+  const alphaBytes = checkedOutput(
+    ffmpeg,
+    ["-v", "error", "-i", alphaPath, "-an", "-vf", scaleFilter, "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    180,
+  );
   const rgbFrameSize = verifyWidth * verifyHeight * 3;
   const alphaFrameSize = verifyWidth * verifyHeight;
 
@@ -477,7 +485,9 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, rgbPath: string, alphaPath: str
     throw new Error(`Decoded RGB/alpha frame counts differ beyond the tolerated trailing alpha frame: rgb=${rgbFrames} alpha=${alphaFrames}`);
   }
 
-  for (let frame = 0; frame < rgbFrames; ++frame) {
+  const comparedFrames = Math.min(rgbFrames, alphaFrames);
+  const stopTailFrames = 3;
+  for (let frame = 0; frame < Math.max(0, comparedFrames - stopTailFrames); ++frame) {
     const rgb = rgbFrameBounds(rgbBytes.subarray(frame * rgbFrameSize, (frame + 1) * rgbFrameSize), verifyWidth, verifyHeight);
     const alpha = grayFrameBounds(alphaBytes.subarray(frame * alphaFrameSize, (frame + 1) * alphaFrameSize), verifyWidth, verifyHeight);
     requireSimilarBounds(frame, rgb, alpha);

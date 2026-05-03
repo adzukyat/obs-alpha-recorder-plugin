@@ -18,7 +18,7 @@ namespace
         std::uint32_t height = 720U;
         std::uint32_t box_size = 96U;
         std::uint32_t step = 17U;
-        std::uint64_t frame_index = 0U;
+        std::uint64_t start_time = 0U;
         vec4 color{};
     };
 
@@ -93,7 +93,18 @@ namespace
 
         const std::uint32_t travel_x = source->width > box_size ? source->width - box_size : 1U;
         const std::uint32_t travel_y = source->height > box_size ? source->height - box_size : 1U;
-        const std::uint64_t frame = source->frame_index++;
+        const std::uint64_t frame_time = obs_get_video_frame_time();
+        if (source->start_time == 0U || frame_time < source->start_time)
+        {
+            source->start_time = frame_time;
+        }
+
+        obs_video_info video_info = {};
+        const bool have_video_info = obs_get_video_info(&video_info);
+        const std::uint64_t fps_num = have_video_info && video_info.fps_num != 0U ? video_info.fps_num : 60U;
+        const std::uint64_t fps_den = have_video_info && video_info.fps_den != 0U ? video_info.fps_den : 1U;
+        const std::uint64_t frame_interval = (1000000000ULL * fps_den) / fps_num;
+        const std::uint64_t frame = frame_interval == 0U ? 0U : ((frame_time - source->start_time) / frame_interval);
         const float x = static_cast<float>((frame * source->step) % travel_x);
         const float y = static_cast<float>((frame * ((source->step / 2U) + 3U)) % travel_y);
 

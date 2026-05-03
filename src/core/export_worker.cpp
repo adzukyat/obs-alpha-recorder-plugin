@@ -30,8 +30,8 @@ namespace alpha_recorder::obs
 {
     namespace
     {
-        constexpr std::size_t kMaxQueuedMaskFrames = 4U;
-        constexpr std::size_t kMaxQueuedMaskBytes = 64U * 1024U * 1024U;
+        constexpr std::size_t kMaxQueuedMaskFrames = 16U;
+        constexpr std::size_t kMaxQueuedMaskBytes = 192U * 1024U * 1024U;
 
         bool set_error(std::string *error_message, std::string message)
         {
@@ -131,6 +131,7 @@ namespace alpha_recorder::obs
             encoder.color_primaries = AVCOL_PRI_BT709;
             encoder.color_trc = AVCOL_TRC_BT709;
             encoder.colorspace = AVCOL_SPC_BT709;
+            encoder.thread_count = 0;
 
             switch (config.finalization_format)
             {
