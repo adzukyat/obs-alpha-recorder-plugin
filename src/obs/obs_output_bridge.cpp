@@ -96,7 +96,7 @@ namespace
             const alpha_recorder::FramePair first_pair = alpha_recorder::e2e::make_test_pair(0);
             alpha_recorder::obs::AlphaMaskVideoWriterConfig mask_config{};
             mask_config.output_path = current_sidecar.string() + ".alpha.mov";
-            mask_config.finalization_format = alpha_recorder::obs::FinalizationFormat::MaskProRes422;
+            mask_config.finalization_format = alpha_recorder::obs::FinalizationFormat::MaskPngMov;
             mask_config.width = first_pair.alpha.width;
             mask_config.height = first_pair.alpha.height;
             mask_config.fps_num = 25U;

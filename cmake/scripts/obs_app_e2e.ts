@@ -28,7 +28,7 @@ function parseArgs(argv: string[]): Args {
     recordSeconds: 5,
     width: 1280,
     height: 720,
-    finalizationFormat: "mask_prores_422",
+    finalizationFormat: "mask_png_mov",
     keepObsOpen: false,
   };
 
@@ -85,6 +85,16 @@ function parseArgs(argv: string[]): Args {
   }
 
   return args;
+}
+
+function normalizedFinalizationFormat(format: string): string {
+  if (format === "mask_prores_422" || format === "prores_4444") {
+    return "mask_png_mov";
+  }
+  if (format === "lossless_hevc") {
+    return "mask_hevc_nvenc";
+  }
+  return format;
 }
 
 function writeText(path: string, text: string): void {
@@ -568,7 +578,8 @@ finalization_format=${args.finalizationFormat}
     if (!settings.responseData?.enabled) {
       throw new Error("Alpha Recorder did not report enabled=true through the vendor API");
     }
-    if (settings.responseData?.finalization_format !== args.finalizationFormat) {
+    const expectedFinalizationFormat = normalizedFinalizationFormat(args.finalizationFormat);
+    if (settings.responseData?.finalization_format !== expectedFinalizationFormat) {
       throw new Error(`Alpha Recorder did not accept finalization_format=${args.finalizationFormat}: ${JSON.stringify(settings)}`);
     }
 
@@ -591,7 +602,7 @@ finalization_format=${args.finalizationFormat}
     }
 
     const basePath = rgbPath.replace(/\.[^.\\/]+$/, "");
-    const alphaExtension = args.finalizationFormat === "mask_prores_422" ? ".mov" : ".mp4";
+    const alphaExtension = expectedFinalizationFormat === "mask_png_mov" ? ".mov" : ".mp4";
     const alphaPath = `${basePath}.alpha${alphaExtension}`;
 
     await waitForPath(rgbPath, 30);
@@ -641,12 +652,12 @@ finalization_format=${args.finalizationFormat}
     if (alphaPixFmt.startsWith("yuva") || alphaPixFmt === "rgba" || alphaPixFmt === "bgra" || alphaPixFmt === "argb") {
       throw new Error(`Alpha mask movie unexpectedly carries an alpha-capable pixel format: ${JSON.stringify(alphaProbe)}`);
     }
-    if (args.finalizationFormat === "mask_hevc_nvenc" || args.finalizationFormat === "mask_hevc_amf") {
+    if (expectedFinalizationFormat === "mask_hevc_nvenc" || expectedFinalizationFormat === "mask_hevc_amf") {
       if (alphaStream.codec_name !== "hevc") {
         throw new Error(`Alpha movie probe did not report HEVC: ${JSON.stringify(alphaProbe)}`);
       }
-    } else if (alphaStream.codec_name !== "prores") {
-      throw new Error(`Alpha movie probe did not report ProRes: ${JSON.stringify(alphaProbe)}`);
+    } else if (alphaStream.codec_name !== "png") {
+      throw new Error(`Alpha movie probe did not report PNG MOV: ${JSON.stringify(alphaProbe)}`);
     }
 
     console.log(

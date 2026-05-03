@@ -12,7 +12,7 @@ namespace alpha_recorder::obs
     struct AlphaMaskVideoWriterConfig
     {
         std::filesystem::path output_path{};
-        FinalizationFormat finalization_format = FinalizationFormat::MaskProRes422;
+        FinalizationFormat finalization_format = FinalizationFormat::MaskPngMov;
         std::uint32_t width = 0;
         std::uint32_t height = 0;
         std::uint32_t fps_num = 30;

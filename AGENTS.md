@@ -37,7 +37,7 @@ path that can run without desktop automation.
 - The finalization format is persisted in OBS user config under
   `AlphaRecorder.finalization_format`.
 - Supported finalization formats currently include:
-  - `mask_prores_422` -> Apple ProRes 422 `.mov`
+  - `mask_png_mov` -> lossless grayscale PNG MOV `.mov`
   - `mask_hevc_nvenc` -> HEVC NVENC `.mp4`
   - `mask_hevc_amf` -> HEVC AMF `.mp4`
 - Legacy raw sidecar and manifest primitives remain for synthetic/non-UI E2E
@@ -76,7 +76,7 @@ When disabled:
 The plugin follows OBS's recording path and naming rules. If OBS records
 `C:\Recordings\MyRec.mkv`, Alpha Recorder writes:
 
-- `C:\Recordings\MyRec.alpha.mov` for ProRes 422, or
+- `C:\Recordings\MyRec.alpha.mov` for PNG MOV, or
   `C:\Recordings\MyRec.alpha.mp4` for HEVC NVENC/AMF.
 
 Failure behavior:
@@ -216,7 +216,7 @@ The CMake target:
 - Starts and stops OBS recording through obs-websocket.
 - Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
-- Verifies the ProRes alpha movie reports `prores` and does not use an alpha
+- Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
 - For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports
   `hevc`, and the output does not use an alpha pixel format.

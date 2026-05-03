@@ -677,7 +677,7 @@ namespace
         obs_video_info video_info_{};
         AlphaMaskVideoWriter writer_{};
         obs_output_t *recording_output_ = nullptr;
-        alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::MaskProRes422;
+        alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::MaskPngMov;
         std::mutex mutex_{};
     };
 

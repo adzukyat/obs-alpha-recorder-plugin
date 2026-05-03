@@ -12,7 +12,7 @@ namespace alpha_recorder::obs
 
     enum class FinalizationFormat
     {
-        MaskProRes422,
+        MaskPngMov,
         MaskHevcNvenc,
         MaskHevcAmf,
     };
@@ -20,7 +20,7 @@ namespace alpha_recorder::obs
     struct Settings
     {
         bool enabled = false;
-        FinalizationFormat finalization_format = FinalizationFormat::MaskProRes422;
+        FinalizationFormat finalization_format = FinalizationFormat::MaskPngMov;
     };
 
     struct FinalizationFormatOption
@@ -47,7 +47,7 @@ namespace alpha_recorder::obs
 
     [[nodiscard]] inline constexpr FinalizationFormat finalization_format_default() noexcept
     {
-        return FinalizationFormat::MaskProRes422;
+        return FinalizationFormat::MaskPngMov;
     }
 
     [[nodiscard]] inline std::filesystem::path recording_sidecar_path(const std::filesystem::path &recording_path)
@@ -87,7 +87,7 @@ namespace alpha_recorder::obs
     }
 
     inline constexpr std::array<FinalizationFormatOption, 3> finalization_format_options{{
-        {FinalizationFormat::MaskProRes422, "mask_prores_422", "Apple ProRes 422 Mask"},
+        {FinalizationFormat::MaskPngMov, "mask_png_mov", "Lossless PNG MOV Mask"},
         {FinalizationFormat::MaskHevcNvenc, "mask_hevc_nvenc", "HEVC NVENC Mask"},
         {FinalizationFormat::MaskHevcAmf, "mask_hevc_amf", "HEVC AMF Mask"},
     }};
@@ -96,7 +96,7 @@ namespace alpha_recorder::obs
     {
         switch (format)
         {
-        case FinalizationFormat::MaskProRes422:
+        case FinalizationFormat::MaskPngMov:
         case FinalizationFormat::MaskHevcNvenc:
         case FinalizationFormat::MaskHevcAmf:
             return {};
@@ -119,7 +119,7 @@ namespace alpha_recorder::obs
     {
         switch (format)
         {
-        case FinalizationFormat::MaskProRes422:
+        case FinalizationFormat::MaskPngMov:
             return ".mov";
 
         case FinalizationFormat::MaskHevcNvenc:
@@ -183,9 +183,9 @@ namespace alpha_recorder::obs
             }
         }
 
-        if (value == "prores_4444")
+        if (value == "mask_prores_422" || value == "prores_4444")
         {
-            format = FinalizationFormat::MaskProRes422;
+            format = FinalizationFormat::MaskPngMov;
             return true;
         }
 

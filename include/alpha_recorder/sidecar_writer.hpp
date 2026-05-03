@@ -69,7 +69,7 @@ namespace alpha_recorder
     {
         std::string project_name{};
         std::string project_version{};
-        std::string finalization_format{"prores_4444"};
+        std::string finalization_format{"mask_png_mov"};
         std::filesystem::path sidecar_path{};
         std::filesystem::path manifest_path{};
         std::uint32_t container_format_version = alpha_container_format_version;

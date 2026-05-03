@@ -13,7 +13,7 @@
 int main()
 {
     const alpha_recorder::obs::Settings defaults = alpha_recorder::obs::default_settings();
-    if (defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskProRes422)
+    if (defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov)
     {
         std::cerr << "default settings are incorrect\n";
         return 1;
@@ -31,7 +31,7 @@ int main()
         return 3;
     }
 
-    if (alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskProRes422) != alpha_recorder::obs::FinalizationFormat::MaskProRes422 ||
+    if (alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskPngMov) != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
         alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc ||
         alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != alpha_recorder::obs::FinalizationFormat::MaskHevcAmf)
     {
@@ -39,7 +39,7 @@ int main()
         return 4;
     }
 
-    if (!alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskProRes422) ||
+    if (!alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskPngMov) ||
         !alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) ||
         !alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf))
     {
@@ -48,7 +48,7 @@ int main()
     }
 
     const std::filesystem::path alpha_sidecar = std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"};
-    if (alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskProRes422) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
+    if (alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskPngMov) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
         alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
         alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"})
     {
@@ -57,7 +57,7 @@ int main()
     }
 
     const std::filesystem::path recording_path = std::filesystem::path{"C:/Recordings/MyRec.mkv"};
-    if (alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskProRes422) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
+    if (alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskPngMov) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
         alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
         alpha_recorder::obs::recording_sidecar_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"} ||
         alpha_recorder::obs::recording_manifest_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.manifest.json"})
@@ -66,16 +66,17 @@ int main()
         return 7;
     }
 
-    if (alpha_recorder::obs::finalization_format_display_name(alpha_recorder::obs::FinalizationFormat::MaskProRes422) != "Apple ProRes 422 Mask")
+    if (alpha_recorder::obs::finalization_format_display_name(alpha_recorder::obs::FinalizationFormat::MaskPngMov) != "Lossless PNG MOV Mask")
     {
-        std::cerr << "prores display name mismatch\n";
+        std::cerr << "PNG display name mismatch\n";
         return 8;
     }
 
-    if (alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != "mask_hevc_nvenc" ||
+    if (alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskPngMov) != "mask_png_mov" ||
+        alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != "mask_hevc_nvenc" ||
         alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != "mask_hevc_amf")
     {
-        std::cerr << "lossless hevc config value mismatch\n";
+        std::cerr << "finalization format config value mismatch\n";
         return 9;
     }
 
@@ -91,14 +92,15 @@ int main()
         return 11;
     }
 
-    alpha_recorder::obs::FinalizationFormat parsed_format = alpha_recorder::obs::FinalizationFormat::MaskProRes422;
+    alpha_recorder::obs::FinalizationFormat parsed_format = alpha_recorder::obs::FinalizationFormat::MaskPngMov;
     if (!alpha_recorder::obs::try_parse_finalization_format("mask_hevc_amf", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskHevcAmf)
     {
         std::cerr << "failed to parse the hevc amf config value\n";
         return 12;
     }
 
-    if (!alpha_recorder::obs::try_parse_finalization_format("prores_4444", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskProRes422 ||
+    if (!alpha_recorder::obs::try_parse_finalization_format("mask_prores_422", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
+        !alpha_recorder::obs::try_parse_finalization_format("prores_4444", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
         !alpha_recorder::obs::try_parse_finalization_format("lossless_hevc", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc)
     {
         std::cerr << "legacy finalization format migration did not parse as expected\n";

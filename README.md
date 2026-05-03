@@ -8,7 +8,7 @@ recording while OBS records the normal RGB video. On stop, and whenever OBS
 signals `file_changed` for a split recording, it finalizes the current mask
 movie segment.
 
-Supported mask formats are Apple ProRes 422 (`mask_prores_422`, `.mov`), HEVC
+Supported mask formats are lossless PNG MOV (`mask_png_mov`, `.mov`), HEVC
 NVENC (`mask_hevc_nvenc`, `.mp4`), and HEVC AMF (`mask_hevc_amf`, `.mp4`). The
 mask movie is 8-bit grayscale content encoded as visible luma, not a video with
 an alpha channel.
@@ -157,7 +157,7 @@ plugins, FFmpeg tools, obs-websocket plugin, and `bun` on PATH.
 Implemented in the core library and live OBS workflow:
 
 - pair admission logic with all-or-nothing frame-pair acceptance
-- live alpha mask movie encoding as 8-bit grayscale ProRes 422 or HEVC
+- live alpha mask movie encoding as 8-bit grayscale PNG MOV or HEVC
 - OBS recording lifecycle hooks, settings persistence, Tools menu integration,
   and obs-websocket vendor automation
 - raw Program frame capture through OBS's alpha-preserving video callback path

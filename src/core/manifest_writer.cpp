@@ -297,7 +297,7 @@ namespace alpha_recorder
                 write_json_string(stream, summary.project_version);
                 stream << ",\n";
                 stream << "  \"finalization_format\": ";
-                write_json_string(stream, summary.finalization_format.empty() ? std::string_view{"prores_4444"} : std::string_view{summary.finalization_format});
+                write_json_string(stream, summary.finalization_format.empty() ? std::string_view{"mask_png_mov"} : std::string_view{summary.finalization_format});
                 stream << ",\n";
                 stream << "  \"sidecar_path\": ";
                 write_json_string(stream, summary.sidecar_path.generic_string());

@@ -1,5 +1,6 @@
 #include "alpha_recorder/export_worker.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <exception>
@@ -19,10 +20,6 @@ extern "C"
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
 }
-
-#if !defined(FF_PROFILE_PRORES_STANDARD) && defined(AV_PROFILE_PRORES_STANDARD)
-#define FF_PROFILE_PRORES_STANDARD AV_PROFILE_PRORES_STANDARD
-#endif
 
 namespace alpha_recorder::obs
 {
@@ -75,12 +72,8 @@ namespace alpha_recorder::obs
         {
             switch (format)
             {
-            case FinalizationFormat::MaskProRes422:
-                if (const AVCodec *const prores_encoder = avcodec_find_encoder_by_name("prores_ks"))
-                {
-                    return prores_encoder;
-                }
-                return avcodec_find_encoder(AV_CODEC_ID_PRORES);
+            case FinalizationFormat::MaskPngMov:
+                return avcodec_find_encoder(AV_CODEC_ID_PNG);
 
             case FinalizationFormat::MaskHevcNvenc:
                 return avcodec_find_encoder_by_name("hevc_nvenc");
@@ -123,11 +116,10 @@ namespace alpha_recorder::obs
 
             switch (config.finalization_format)
             {
-            case FinalizationFormat::MaskProRes422:
+            case FinalizationFormat::MaskPngMov:
                 encoder.gop_size = 1;
-                encoder.pix_fmt = AV_PIX_FMT_YUV422P10LE;
-                encoder.profile = FF_PROFILE_PRORES_STANDARD;
-                (void)av_opt_set(encoder.priv_data, "profile", "2", 0);
+                encoder.pix_fmt = AV_PIX_FMT_GRAY8;
+                (void)av_opt_set_int(encoder.priv_data, "compression_level", 1, 0);
                 return true;
 
             case FinalizationFormat::MaskHevcNvenc:
@@ -172,31 +164,13 @@ namespace alpha_recorder::obs
             }
 
             const AVPixelFormat format = static_cast<AVPixelFormat>(frame.format);
-            if (format == AV_PIX_FMT_YUV422P10LE)
+            if (format == AV_PIX_FMT_GRAY8)
             {
                 for (int row = 0; row < frame.height; ++row)
                 {
                     const std::uint8_t *const src = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
-                    auto *const dest = reinterpret_cast<std::uint16_t *>(frame.data[0] +
-                                                                         (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[0])));
-                    for (int column = 0; column < frame.width; ++column)
-                    {
-                        dest[column] = static_cast<std::uint16_t>(src[column]) << 2U;
-                    }
-                }
-
-                const int chroma_width = (frame.width + 1) / 2;
-                for (int plane = 1; plane <= 2; ++plane)
-                {
-                    for (int row = 0; row < frame.height; ++row)
-                    {
-                        auto *const dest = reinterpret_cast<std::uint16_t *>(frame.data[plane] +
-                                                                             (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[plane])));
-                        for (int column = 0; column < chroma_width; ++column)
-                        {
-                            dest[column] = 512U;
-                        }
-                    }
+                    std::uint8_t *const dest = frame.data[0] + (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[0]));
+                    std::copy(src, src + frame.width, dest);
                 }
                 return true;
             }

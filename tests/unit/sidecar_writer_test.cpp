@@ -342,13 +342,13 @@ int main()
     }
 
     const std::string manifest_text((std::istreambuf_iterator<char>(manifest_stream)), std::istreambuf_iterator<char>());
-    if (!contains_text(manifest_text, "\"schema\": \"alpha_recorder.session_summary.v1\"") || !contains_text(manifest_text, "\"project_name\": \"alpha_recorder\"") || !contains_text(manifest_text, "\"project_version\": \"0.1.0\"") || !contains_text(manifest_text, "\"finalization_format\": \"prores_4444\"") || !contains_text(manifest_text, "\"pair_count\": 2") || !contains_text(manifest_text, "\"record_count\": 2") || !contains_text(manifest_text, "\"first_sequence\": 7") || !contains_text(manifest_text, "\"last_sequence\": 8") || !contains_text(manifest_text, "\"first_pts\": 1000") || !contains_text(manifest_text, "\"last_pts\": 1040") || !contains_text(manifest_text, sidecar_path.filename().generic_string()) || !contains_text(manifest_text, manifest_path.filename().generic_string()))
+    if (!contains_text(manifest_text, "\"schema\": \"alpha_recorder.session_summary.v1\"") || !contains_text(manifest_text, "\"project_name\": \"alpha_recorder\"") || !contains_text(manifest_text, "\"project_version\": \"0.1.0\"") || !contains_text(manifest_text, "\"finalization_format\": \"mask_png_mov\"") || !contains_text(manifest_text, "\"pair_count\": 2") || !contains_text(manifest_text, "\"record_count\": 2") || !contains_text(manifest_text, "\"first_sequence\": 7") || !contains_text(manifest_text, "\"last_sequence\": 8") || !contains_text(manifest_text, "\"first_pts\": 1000") || !contains_text(manifest_text, "\"last_pts\": 1040") || !contains_text(manifest_text, sidecar_path.filename().generic_string()) || !contains_text(manifest_text, manifest_path.filename().generic_string()))
     {
         std::cerr << "manifest content is missing expected session metadata\n";
         return 27;
     }
 
-    const std::string legacy_finalization_line = "  \"finalization_format\": \"prores_4444\",\n";
+    const std::string legacy_finalization_line = "  \"finalization_format\": \"mask_png_mov\",\n";
     const std::size_t legacy_finalization_pos = manifest_text.find(legacy_finalization_line);
     if (legacy_finalization_pos == std::string::npos)
     {
@@ -380,9 +380,9 @@ int main()
         return 42;
     }
 
-    if (legacy_summary.finalization_format != "prores_4444")
+    if (legacy_summary.finalization_format != "mask_png_mov")
     {
-        std::cerr << "legacy manifest should default the missing finalization format to prores_4444\n";
+        std::cerr << "legacy manifest should default the missing finalization format to mask_png_mov\n";
         return 43;
     }
 
@@ -416,7 +416,7 @@ int main()
     const std::filesystem::path locked_manifest_path = temp_root / "session.locked.manifest.json";
     alpha_recorder::AlphaSessionSummary locked_summary = summary;
     locked_summary.manifest_path = locked_manifest_path;
-    locked_summary.finalization_format = "prores_4444";
+    locked_summary.finalization_format = "mask_png_mov";
 
     if (!manifest_writer.write(locked_summary))
     {
