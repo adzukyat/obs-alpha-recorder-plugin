@@ -21,7 +21,9 @@ on the current machine.
 Mask encoding runs behind a bounded asynchronous queue. If the selected mask
 encoder cannot keep up, Alpha Recorder aborts the mask movie output instead of
 blocking or slowing the main OBS recording. OBS's normal NV12/P010 hardware
-encoder path does not need to be changed to RGBA for alpha capture.
+encoder path does not need to be changed to RGBA for alpha capture. Alpha
+Recorder tracks OBS's final raw-video output cadence so repeated/dropped RGB
+output frames are mirrored in the alpha mask movie.
 
 Scenario files live only under `tests/e2e/scenarios`. They are inputs for the
 deterministic E2E harness, not part of the shipping plugin path.
@@ -173,6 +175,8 @@ Implemented in the core library and live OBS workflow:
   and obs-websocket vendor automation
 - GPU-side Program alpha extraction that keeps OBS's normal recording color
   format independent of Alpha Recorder
+- raw-video cadence tracking that mirrors OBS duplicate/drop behavior in the
+  alpha mask movie
 - split recording handling through OBS `file_changed`
 - deterministic E2E scenarios that validate RGB raw artifacts, alpha mask
   artifacts, and split-rotation behavior through the OBS module boundary

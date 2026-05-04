@@ -107,23 +107,27 @@ Current alignment strategy:
 
 1. Keep OBS's normal recording color format independent of Alpha Recorder so
    production recording can use hardware-friendly formats such as NV12/P010.
-2. Retain the active recording output and register render/packet callbacks on
-   `OBS_FRONTEND_EVENT_RECORDING_STARTING`; open the alpha movie writer on
-   `OBS_FRONTEND_EVENT_RECORDING_STARTED`, once the recording path is available.
+2. Retain the active recording output and register render, raw-video, and packet
+   callbacks on `OBS_FRONTEND_EVENT_RECORDING_STARTING`; open the alpha movie
+   writer on `OBS_FRONTEND_EVENT_RECORDING_STARTED`, once the recording path is
+   available.
 3. Capture the rendered Program texture after OBS renders the main mix, extract
    its alpha into an `GS_R8` mask texture on the GPU, then stage that one-byte
    alpha plane into a short pending-frame queue.
-4. While the alpha movie writer is open, queue video packet timestamps from the
-   active recording output and match them against the pending alpha-frame queue,
-   sorted by packet PTS, before writing mask frames.
-5. Pause capture on recording pause. Do not pause on
+4. Use OBS raw-video callbacks as the final video-output cadence source. When
+   OBS repeats the same cached output frame, duplicate the previous alpha mask
+   frame so the mask movie mirrors RGB duplicate/drop behavior.
+5. Use video packet callbacks from the active recording output to preserve
+   encoded-video packet order, sorted by packet PTS, before writing mask frames.
+6. Pause capture on recording pause. Do not pause on
    `OBS_FRONTEND_EVENT_RECORDING_STOPPING`; keep capturing until
    `OBS_FRONTEND_EVENT_RECORDING_STOPPED` so stop-edge frames can reconcile.
-6. Close the mask movie on recording stop or split rotation. The RGB recording
+7. Close the mask movie on recording stop or split rotation. The RGB recording
    is never decoded or modified by Alpha Recorder.
 
-Packet callbacks are used only as the recorded-video cadence/timestamp source;
-the RGB recording is still never decoded or modified by Alpha Recorder.
+Raw-video callbacks are used only as cadence evidence for the final OBS video
+output. Packet callbacks are used only for encoded packet ordering. The RGB
+recording is still never decoded or modified by Alpha Recorder.
 
 Required OBS integration points:
 
@@ -146,6 +150,8 @@ Required OBS integration points:
   - `gs_texture_create(..., GS_R8, ..., GS_RENDER_TARGET)`
   - `gs_stage_texture()` / `gs_stagesurface_map()`
 - Recorded-video cadence:
+  - `obs_add_raw_video_callback()` / `obs_remove_raw_video_callback()`
+- Encoded-video packet ordering:
   - `obs_output_add_packet_callback()` /
     `obs_output_remove_packet_callback()`
 - Automation:
@@ -173,6 +179,8 @@ Completed:
 - Recording lifecycle integration for start, pause, unpause, stopping, and stop.
 - GPU-side Program alpha extraction that does not require switching OBS's main
   Color Format from NV12/P010 to RGBA.
+- Raw-video cadence tracking so alpha output mirrors OBS duplicate/drop behavior
+  instead of assuming every rendered frame reaches the RGB recording.
 - Live alpha mask movie creation next to the OBS recording.
 - Bounded asynchronous mask movie encoding so slow fallback encoders abort the
   alpha output instead of blocking OBS recording.
@@ -248,7 +256,8 @@ The CMake target:
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
 - Adds a test-only moving colored object over a transparent background with an
   opaque binary frame-code strip, then decodes RGB and PNG MOV alpha frames and
-  verifies exact frame-code alignment plus moving mask bounds frame-by-frame.
+  verifies zero frame-code offset plus moving mask bounds frame-by-frame,
+  allowing only small terminal/count mismatches.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
 - For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports

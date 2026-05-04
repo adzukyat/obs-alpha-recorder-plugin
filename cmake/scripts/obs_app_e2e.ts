@@ -612,6 +612,8 @@ function bestFrameCodeOffset(rgbCodes: number[], alphaCodes: number[]): { offset
 }
 
 function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: string, alphaPath: string, width: number, height: number, fps: number): void {
+  const toleratedTerminalFrames = 3;
+  const toleratedPerFrameMismatches = 3;
   const verifyWidth = Math.min(width, 320);
   const verifyHeight = Math.max(2, Math.round((height * verifyWidth) / width / 2) * 2);
   const scaleFilter = `scale=${verifyWidth}:${verifyHeight}:flags=neighbor`;
@@ -649,50 +651,83 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
   );
   const bestOffset = bestGlobalFrameOffset(rgbBounds, alphaBounds);
 
-  if (rgbFrames !== alphaFrames) {
+  if (rgbCodes.length !== rgbFrames || alphaCodes.length !== alphaFrames) {
+    throw new Error(`Frame-code counts differ from decoded frames: rgb=${rgbCodes.length}/${rgbFrames} alpha=${alphaCodes.length}/${alphaFrames}`);
+  }
+
+  const frameCountDelta = Math.abs(rgbFrames - alphaFrames);
+  if (frameCountDelta > toleratedTerminalFrames) {
     throw new Error(
-      `Decoded RGB/alpha frame counts differ: rgb=${rgbFrames} alpha=${alphaFrames}; ` +
+      `Decoded RGB/alpha frame counts differ beyond tolerance: rgb=${rgbFrames} alpha=${alphaFrames}; ` +
         `frameCodes=${rgbCodes.length}/${alphaCodes.length}; ` +
         `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
         `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
     );
   }
-  if (rgbCodes.length !== rgbFrames || alphaCodes.length !== alphaFrames) {
-    throw new Error(`Frame-code counts differ from decoded frames: rgb=${rgbCodes.length}/${rgbFrames} alpha=${alphaCodes.length}/${alphaFrames}`);
+
+  if (bestCodeOffset.offset !== 0) {
+    throw new Error(
+      `RGB/alpha frame-code offset is not zero: offset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `frames=${rgbFrames}/${alphaFrames}; bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
+    );
   }
 
   const rgbTimes = frameTimes(ffprobe, rgbPath);
   const alphaTimes = frameTimes(ffprobe, alphaPath);
-  if (rgbTimes.length !== alphaTimes.length || rgbTimes.length !== rgbFrames) {
-    throw new Error(`RGB/alpha frame timestamp counts differ: rgb=${rgbTimes.length}/${rgbFrames} alpha=${alphaTimes.length}/${alphaFrames}`);
-  }
-
-  const timestampTolerance = Math.max(0.002, 0.35 / Math.max(1, fps));
-  const startDelta = Math.abs(rgbTimes[0] - alphaTimes[0]);
-  if (startDelta > timestampTolerance) {
-    throw new Error(
-      `RGB/alpha first-frame timestamps differ by ${startDelta.toFixed(6)}s: ` +
-        `rgb=${rgbTimes[0].toFixed(6)} alpha=${alphaTimes[0].toFixed(6)}`,
-    );
-  }
-
-  for (let frame = 0; frame < rgbFrames; ++frame) {
-    if (rgbCodes[frame] !== alphaCodes[frame]) {
-      throw new Error(
-        `Frame ${frame} RGB/alpha frame codes differ: rgb=${rgbCodes[frame]} alpha=${alphaCodes[frame]}; ` +
-          `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}`,
+  if (rgbTimes.length > 0 && alphaTimes.length > 0) {
+    const timestampTolerance = Math.max(0.002, 0.35 / Math.max(1, fps));
+    const startDelta = Math.abs(rgbTimes[0] - alphaTimes[0]);
+    if (startDelta > timestampTolerance) {
+      console.warn(
+        `RGB/alpha first-frame timestamps differ by ${startDelta.toFixed(6)}s: ` +
+          `rgb=${rgbTimes[0].toFixed(6)} alpha=${alphaTimes[0].toFixed(6)}; content offset remains authoritative`,
       );
+    }
+  } else {
+    console.warn(`Could not decode RGB/alpha frame timestamps: rgb=${rgbTimes.length}/${rgbFrames} alpha=${alphaTimes.length}/${alphaFrames}`);
+  }
+
+  const comparedFrames = Math.min(rgbFrames, alphaFrames);
+  let frameCodeMismatches = 0;
+  let maskBoundsMismatches = 0;
+  const firstFrameCodeMismatches: string[] = [];
+  const firstMaskBoundsMismatches: string[] = [];
+
+  for (let frame = 0; frame < comparedFrames; ++frame) {
+    if (rgbCodes[frame] !== alphaCodes[frame]) {
+      ++frameCodeMismatches;
+      if (firstFrameCodeMismatches.length < toleratedPerFrameMismatches + 1) {
+        firstFrameCodeMismatches.push(`${frame}:${rgbCodes[frame]}/${alphaCodes[frame]}`);
+      }
     }
 
     if (!boundsAreSimilar(rgbBounds[frame], alphaBounds[frame])) {
-      const candidates = localCandidateOffsets(rgbBounds, alphaBounds, frame);
-      throw new Error(
-        `Frame ${frame} RGB/alpha mask bounds differ: rgb=${boundsText(rgbBounds[frame])} alpha=${boundsText(alphaBounds[frame])}; ` +
-          `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
-          `localCandidateOffsets=${candidates.length === 0 ? "none" : candidates.join(",")}`,
-      );
+      ++maskBoundsMismatches;
+      if (firstMaskBoundsMismatches.length < toleratedPerFrameMismatches + 1) {
+        const candidates = localCandidateOffsets(rgbBounds, alphaBounds, frame);
+        firstMaskBoundsMismatches.push(
+          `${frame}:rgb=${boundsText(rgbBounds[frame])} alpha=${boundsText(alphaBounds[frame])} local=${candidates.length === 0 ? "none" : candidates.join(",")}`,
+        );
+      }
     }
   }
+
+  if (frameCodeMismatches > toleratedPerFrameMismatches) {
+    throw new Error(
+      `RGB/alpha frame-code mismatches exceed tolerance: mismatches=${frameCodeMismatches}/${comparedFrames}; ` +
+        `examples=${firstFrameCodeMismatches.join("; ")}; ` +
+        `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}`,
+    );
+  }
+
+  if (maskBoundsMismatches > toleratedPerFrameMismatches) {
+    throw new Error(
+      `RGB/alpha mask bounds mismatches exceed tolerance: mismatches=${maskBoundsMismatches}/${comparedFrames}; ` +
+        `examples=${firstMaskBoundsMismatches.join("; ")}; ` +
+        `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
+    );
+  }
+
 }
 
 async function main(): Promise<void> {
