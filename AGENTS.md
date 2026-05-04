@@ -107,18 +107,15 @@ Current alignment strategy:
 
 1. Keep OBS's normal recording color format independent of Alpha Recorder so
    production recording can use hardware-friendly formats such as NV12/P010.
-2. Pre-arm Program alpha capture on
-   `OBS_FRONTEND_EVENT_RECORDING_STARTING`, before the recording path is
-   available, so startup frames are not missed.
+2. Retain the active recording output and register render/packet callbacks on
+   `OBS_FRONTEND_EVENT_RECORDING_STARTING`; open the alpha movie writer on
+   `OBS_FRONTEND_EVENT_RECORDING_STARTED`, once the recording path is available.
 3. Capture the rendered Program texture after OBS renders the main mix, extract
    its alpha into an `GS_R8` mask texture on the GPU, then stage that one-byte
    alpha plane into a short pending-frame queue.
-4. Queue video packet timestamps from the active recording output and match
-   them against the pending alpha-frame queue, sorted by packet PTS, before
-   writing mask frames. Both alpha frames and packet timestamps may be queued
-   before the alpha movie path is available; this preserves startup frames on
-   platforms where OBS begins accepting recorded video before
-   `OBS_FRONTEND_EVENT_RECORDING_STARTED`.
+4. While the alpha movie writer is open, queue video packet timestamps from the
+   active recording output and match them against the pending alpha-frame queue,
+   sorted by packet PTS, before writing mask frames.
 5. Pause capture on recording pause. Do not pause on
    `OBS_FRONTEND_EVENT_RECORDING_STOPPING`; keep capturing until
    `OBS_FRONTEND_EVENT_RECORDING_STOPPED` so stop-edge frames can reconcile.
@@ -249,9 +246,9 @@ The CMake target:
   profile while Alpha Recorder extracts alpha through its own GPU-side path.
 - Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
-- Adds a test-only moving colored object over a transparent background, then
-  decodes RGB and PNG MOV alpha frames and verifies the moving mask bounds match
-  frame-by-frame.
+- Adds a test-only moving colored object over a transparent background with an
+  opaque binary frame-code strip, then decodes RGB and PNG MOV alpha frames and
+  verifies exact frame-code alignment plus moving mask bounds frame-by-frame.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
 - For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports

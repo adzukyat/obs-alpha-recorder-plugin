@@ -11,6 +11,11 @@
 namespace
 {
     constexpr const char *kSourceId = "alpha_recorder_e2e_moving_alpha";
+    constexpr std::uint32_t kFrameCodeBits = 12U;
+    constexpr std::uint32_t kFrameCodeTileSize = 24U;
+    constexpr std::uint32_t kFrameCodeGap = 4U;
+    constexpr std::uint32_t kFrameCodeX = 16U;
+    constexpr std::uint32_t kFrameCodeY = 16U;
 
     struct MovingAlphaSource
     {
@@ -92,7 +97,8 @@ namespace
         }
 
         const std::uint32_t travel_x = source->width > box_size ? source->width - box_size : 1U;
-        const std::uint32_t travel_y = source->height > box_size ? source->height - box_size : 1U;
+        const std::uint32_t reserved_y = std::min(source->height, kFrameCodeY + kFrameCodeTileSize + kFrameCodeGap);
+        const std::uint32_t travel_y = source->height > reserved_y + box_size ? source->height - reserved_y - box_size : 1U;
         const std::uint64_t frame_time = obs_get_video_frame_time();
         if (source->start_time == 0U || frame_time < source->start_time)
         {
@@ -106,12 +112,12 @@ namespace
         const std::uint64_t frame_interval = (1000000000ULL * fps_den) / fps_num;
         const std::uint64_t frame = frame_interval == 0U ? 0U : ((frame_time - source->start_time) / frame_interval);
         const float x = static_cast<float>((frame * source->step) % travel_x);
-        const float y = static_cast<float>((frame * ((source->step / 2U) + 3U)) % travel_y);
+        const float y = static_cast<float>(reserved_y + ((frame * ((source->step / 2U) + 3U)) % travel_y));
 
         gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
         gs_eparam_t *color_param = gs_effect_get_param_by_name(solid, "color");
-        gs_effect_set_vec4(color_param, &source->color);
 
+        gs_effect_set_vec4(color_param, &source->color);
         gs_matrix_push();
         gs_matrix_translate3f(x, y, 0.0F);
         while (gs_effect_loop(solid, "Solid"))
@@ -119,6 +125,31 @@ namespace
             gs_draw_sprite(nullptr, 0, box_size, box_size);
         }
         gs_matrix_pop();
+
+        vec4 code_color;
+        vec4_set(&code_color, 1.0F, 1.0F, 1.0F, 1.0F);
+        gs_effect_set_vec4(color_param, &code_color);
+
+        for (std::uint32_t index = 0U; index < kFrameCodeBits + 2U; ++index)
+        {
+            const bool sync_marker = index == 0U || index == kFrameCodeBits + 1U;
+            const bool bit_set = sync_marker || ((frame >> (index - 1U)) & 1U) != 0U;
+            if (!bit_set)
+            {
+                continue;
+            }
+
+            const float code_x = static_cast<float>(kFrameCodeX + index * (kFrameCodeTileSize + kFrameCodeGap));
+            const float code_y = static_cast<float>(kFrameCodeY);
+
+            gs_matrix_push();
+            gs_matrix_translate3f(code_x, code_y, 0.0F);
+            while (gs_effect_loop(solid, "Solid"))
+            {
+                gs_draw_sprite(nullptr, 0, kFrameCodeTileSize, kFrameCodeTileSize);
+            }
+            gs_matrix_pop();
+        }
     }
 
     const char *moving_alpha_name(void *)

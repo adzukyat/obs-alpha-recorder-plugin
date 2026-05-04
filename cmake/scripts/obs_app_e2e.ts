@@ -390,6 +390,12 @@ type Bounds = {
   count: number;
 };
 
+const frameCodeBits = 12;
+const frameCodeTileSize = 24;
+const frameCodeGap = 4;
+const frameCodeX = 16;
+const frameCodeY = 16;
+
 function emptyBounds(): Bounds {
   return { minX: Number.POSITIVE_INFINITY, minY: Number.POSITIVE_INFINITY, maxX: -1, maxY: -1, count: 0 };
 }
@@ -439,9 +445,19 @@ function grayFrameBounds(frame: Uint8Array, width: number, height: number): Boun
 }
 
 function requireSimilarBounds(frameIndex: number, rgb: Bounds, alpha: Bounds): void {
-  const tolerance = 2;
   if (rgb.count === 0 || alpha.count === 0) {
     throw new Error(`Frame ${frameIndex} did not contain both RGB and alpha masks: rgb=${boundsText(rgb)} alpha=${boundsText(alpha)}`);
+  }
+
+  if (!boundsAreSimilar(rgb, alpha)) {
+    throw new Error(`Frame ${frameIndex} RGB/alpha mask bounds differ: rgb=${boundsText(rgb)} alpha=${boundsText(alpha)}`);
+  }
+}
+
+function boundsAreSimilar(rgb: Bounds, alpha: Bounds): boolean {
+  const tolerance = 2;
+  if (rgb.count === 0 || alpha.count === 0) {
+    return false;
   }
 
   const deltas = [
@@ -450,12 +466,152 @@ function requireSimilarBounds(frameIndex: number, rgb: Bounds, alpha: Bounds): v
     Math.abs(rgb.maxX - alpha.maxX),
     Math.abs(rgb.maxY - alpha.maxY),
   ];
-  if (deltas.some((delta) => delta > tolerance)) {
-    throw new Error(`Frame ${frameIndex} RGB/alpha mask bounds differ: rgb=${boundsText(rgb)} alpha=${boundsText(alpha)}`);
-  }
+  return !deltas.some((delta) => delta > tolerance);
 }
 
-function verifyRgbAlphaFrameSync(ffmpeg: string, rgbPath: string, alphaPath: string, width: number, height: number): void {
+function bestGlobalFrameOffset(rgbBounds: Bounds[], alphaBounds: Bounds[]): { offset: number; matches: number; total: number } {
+  const searchRadius = Math.min(180, Math.max(rgbBounds.length, alphaBounds.length) - 1);
+  let best = { offset: 0, matches: -1, total: 0 };
+
+  for (let offset = -searchRadius; offset <= searchRadius; ++offset) {
+    let matches = 0;
+    let total = 0;
+    for (let rgbIndex = 0; rgbIndex < rgbBounds.length; ++rgbIndex) {
+      const alphaIndex = rgbIndex + offset;
+      if (alphaIndex < 0 || alphaIndex >= alphaBounds.length) {
+        continue;
+      }
+      ++total;
+      if (boundsAreSimilar(rgbBounds[rgbIndex], alphaBounds[alphaIndex])) {
+        ++matches;
+      }
+    }
+
+    if (matches > best.matches || (matches === best.matches && Math.abs(offset) < Math.abs(best.offset))) {
+      best = { offset, matches, total };
+    }
+  }
+
+  return best;
+}
+
+function localCandidateOffsets(rgb: Bounds[], alpha: Bounds[], frameIndex: number): number[] {
+  const offsets: number[] = [];
+  const searchRadius = Math.min(30, Math.max(rgb.length, alpha.length) - 1);
+  for (let offset = -searchRadius; offset <= searchRadius; ++offset) {
+    const alphaIndex = frameIndex + offset;
+    if (alphaIndex >= 0 && alphaIndex < alpha.length && boundsAreSimilar(rgb[frameIndex], alpha[alphaIndex])) {
+      offsets.push(offset);
+    }
+  }
+  return offsets;
+}
+
+function frameTimes(ffprobe: string, path: string): number[] {
+  const probe = JSON.parse(
+    new TextDecoder().decode(
+      checkedOutput(
+        ffprobe,
+        ["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", path],
+        180,
+      ),
+    ),
+  ) as { frames?: Array<{ best_effort_timestamp_time?: string }> };
+
+  return (probe.frames ?? [])
+    .map((frame) => Number(frame.best_effort_timestamp_time))
+    .filter((timestamp) => Number.isFinite(timestamp));
+}
+
+function frameCodeCropFilter(): { filter: string; width: number; height: number } {
+  const width = (frameCodeBits + 2) * frameCodeTileSize + (frameCodeBits + 1) * frameCodeGap;
+  const height = frameCodeTileSize;
+  return { filter: `crop=${width}:${height}:${frameCodeX}:${frameCodeY}`, width, height };
+}
+
+function decodeFrameCodesFromRaw(frameBytes: Uint8Array, frames: number, frameSize: number, channels: number, width: number): number[] {
+  const codes: number[] = [];
+  const sampleStart = Math.floor(frameCodeTileSize * 0.3);
+  const sampleEnd = Math.ceil(frameCodeTileSize * 0.7);
+  const samplesPerTile = (sampleEnd - sampleStart) * (sampleEnd - sampleStart);
+
+  const tileFilled = (frame: number, tile: number): boolean => {
+    const tileX = tile * (frameCodeTileSize + frameCodeGap);
+    let lit = 0;
+    for (let y = sampleStart; y < sampleEnd; ++y) {
+      for (let x = sampleStart; x < sampleEnd; ++x) {
+        const pixel = frame * frameSize + (y * width + tileX + x) * channels;
+        const value = channels === 1 ? frameBytes[pixel] : frameBytes[pixel] + frameBytes[pixel + 1] + frameBytes[pixel + 2];
+        const threshold = channels === 1 ? 128 : 180;
+        if (value > threshold) {
+          ++lit;
+        }
+      }
+    }
+    return lit >= samplesPerTile * 0.6;
+  };
+
+  for (let frame = 0; frame < frames; ++frame) {
+    if (!tileFilled(frame, 0) || !tileFilled(frame, frameCodeBits + 1)) {
+      throw new Error(`Frame ${frame} is missing frame-code sync markers`);
+    }
+
+    let code = 0;
+    for (let bit = 0; bit < frameCodeBits; ++bit) {
+      if (tileFilled(frame, bit + 1)) {
+        code |= 1 << bit;
+      }
+    }
+    codes.push(code);
+  }
+
+  return codes;
+}
+
+function decodeFrameCodes(ffmpeg: string, path: string, pixFmt: "rgb24" | "gray"): number[] {
+  const crop = frameCodeCropFilter();
+  const channels = pixFmt === "gray" ? 1 : 3;
+  const frameSize = crop.width * crop.height * channels;
+  const bytes = checkedOutput(
+    ffmpeg,
+    ["-v", "error", "-i", path, "-an", "-vf", crop.filter, "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", pixFmt, "-"],
+    180,
+  );
+
+  if (bytes.length % frameSize !== 0) {
+    throw new Error(`Decoded frame-code byte count is not frame-aligned for ${path}: ${bytes.length}`);
+  }
+
+  return decodeFrameCodesFromRaw(bytes, bytes.length / frameSize, frameSize, channels, crop.width);
+}
+
+function bestFrameCodeOffset(rgbCodes: number[], alphaCodes: number[]): { offset: number; matches: number; total: number } {
+  const searchRadius = Math.min(180, Math.max(rgbCodes.length, alphaCodes.length) - 1);
+  let best = { offset: 0, matches: -1, total: 0 };
+
+  for (let offset = -searchRadius; offset <= searchRadius; ++offset) {
+    let matches = 0;
+    let total = 0;
+    for (let rgbIndex = 0; rgbIndex < rgbCodes.length; ++rgbIndex) {
+      const alphaIndex = rgbIndex + offset;
+      if (alphaIndex < 0 || alphaIndex >= alphaCodes.length) {
+        continue;
+      }
+      ++total;
+      if (rgbCodes[rgbIndex] === alphaCodes[alphaIndex]) {
+        ++matches;
+      }
+    }
+
+    if (matches > best.matches || (matches === best.matches && Math.abs(offset) < Math.abs(best.offset))) {
+      best = { offset, matches, total };
+    }
+  }
+
+  return best;
+}
+
+function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: string, alphaPath: string, width: number, height: number, fps: number): void {
   const verifyWidth = Math.min(width, 320);
   const verifyHeight = Math.max(2, Math.round((height * verifyWidth) / width / 2) * 2);
   const scaleFilter = `scale=${verifyWidth}:${verifyHeight}:flags=neighbor`;
@@ -481,16 +637,61 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, rgbPath: string, alphaPath: str
 
   const rgbFrames = rgbBytes.length / rgbFrameSize;
   const alphaFrames = alphaBytes.length / alphaFrameSize;
-  if (alphaFrames < rgbFrames || alphaFrames > rgbFrames + 1) {
-    throw new Error(`Decoded RGB/alpha frame counts differ beyond the tolerated trailing alpha frame: rgb=${rgbFrames} alpha=${alphaFrames}`);
+  const rgbCodes = decodeFrameCodes(ffmpeg, rgbPath, "rgb24");
+  const alphaCodes = decodeFrameCodes(ffmpeg, alphaPath, "gray");
+  const bestCodeOffset = bestFrameCodeOffset(rgbCodes, alphaCodes);
+
+  const rgbBounds = Array.from({ length: rgbFrames }, (_, frame) =>
+    rgbFrameBounds(rgbBytes.subarray(frame * rgbFrameSize, (frame + 1) * rgbFrameSize), verifyWidth, verifyHeight),
+  );
+  const alphaBounds = Array.from({ length: alphaFrames }, (_, frame) =>
+    grayFrameBounds(alphaBytes.subarray(frame * alphaFrameSize, (frame + 1) * alphaFrameSize), verifyWidth, verifyHeight),
+  );
+  const bestOffset = bestGlobalFrameOffset(rgbBounds, alphaBounds);
+
+  if (rgbFrames !== alphaFrames) {
+    throw new Error(
+      `Decoded RGB/alpha frame counts differ: rgb=${rgbFrames} alpha=${alphaFrames}; ` +
+        `frameCodes=${rgbCodes.length}/${alphaCodes.length}; ` +
+        `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
+    );
+  }
+  if (rgbCodes.length !== rgbFrames || alphaCodes.length !== alphaFrames) {
+    throw new Error(`Frame-code counts differ from decoded frames: rgb=${rgbCodes.length}/${rgbFrames} alpha=${alphaCodes.length}/${alphaFrames}`);
   }
 
-  const comparedFrames = Math.min(rgbFrames, alphaFrames);
-  const stopTailFrames = 3;
-  for (let frame = 0; frame < Math.max(0, comparedFrames - stopTailFrames); ++frame) {
-    const rgb = rgbFrameBounds(rgbBytes.subarray(frame * rgbFrameSize, (frame + 1) * rgbFrameSize), verifyWidth, verifyHeight);
-    const alpha = grayFrameBounds(alphaBytes.subarray(frame * alphaFrameSize, (frame + 1) * alphaFrameSize), verifyWidth, verifyHeight);
-    requireSimilarBounds(frame, rgb, alpha);
+  const rgbTimes = frameTimes(ffprobe, rgbPath);
+  const alphaTimes = frameTimes(ffprobe, alphaPath);
+  if (rgbTimes.length !== alphaTimes.length || rgbTimes.length !== rgbFrames) {
+    throw new Error(`RGB/alpha frame timestamp counts differ: rgb=${rgbTimes.length}/${rgbFrames} alpha=${alphaTimes.length}/${alphaFrames}`);
+  }
+
+  const timestampTolerance = Math.max(0.002, 0.35 / Math.max(1, fps));
+  const startDelta = Math.abs(rgbTimes[0] - alphaTimes[0]);
+  if (startDelta > timestampTolerance) {
+    throw new Error(
+      `RGB/alpha first-frame timestamps differ by ${startDelta.toFixed(6)}s: ` +
+        `rgb=${rgbTimes[0].toFixed(6)} alpha=${alphaTimes[0].toFixed(6)}`,
+    );
+  }
+
+  for (let frame = 0; frame < rgbFrames; ++frame) {
+    if (rgbCodes[frame] !== alphaCodes[frame]) {
+      throw new Error(
+        `Frame ${frame} RGB/alpha frame codes differ: rgb=${rgbCodes[frame]} alpha=${alphaCodes[frame]}; ` +
+          `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}`,
+      );
+    }
+
+    if (!boundsAreSimilar(rgbBounds[frame], alphaBounds[frame])) {
+      const candidates = localCandidateOffsets(rgbBounds, alphaBounds, frame);
+      throw new Error(
+        `Frame ${frame} RGB/alpha mask bounds differ: rgb=${boundsText(rgbBounds[frame])} alpha=${boundsText(alphaBounds[frame])}; ` +
+          `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
+          `localCandidateOffsets=${candidates.length === 0 ? "none" : candidates.join(",")}`,
+      );
+    }
   }
 }
 
@@ -803,7 +1004,7 @@ finalization_format=${args.finalizationFormat}
     }
 
     if (expectedFinalizationFormat === "mask_png_mov") {
-      verifyRgbAlphaFrameSync(ffmpeg, rgbPath, alphaPath, args.width, args.height);
+      verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, args.width, args.height, args.fps);
     }
 
     console.log(

@@ -393,11 +393,10 @@ technique Draw
             {
             case OBS_FRONTEND_EVENT_RECORDING_STARTING:
                 prepare_capture_session();
-                start_session(false);
                 break;
 
             case OBS_FRONTEND_EVENT_RECORDING_STARTED:
-                start_session(true);
+                start_session();
                 break;
 
             case OBS_FRONTEND_EVENT_RECORDING_PAUSED:
@@ -509,7 +508,7 @@ technique Draw
             return true;
         }
 
-        bool start_session(bool show_popup = true)
+        bool start_session()
         {
             const alpha_recorder::obs::Settings settings = alpha_recorder::obs::load_settings(obs_frontend_get_user_config());
             if (!settings.enabled)
@@ -558,21 +557,15 @@ technique Draw
 
             if (recording_path.empty())
             {
-                if (show_popup)
-                {
-                    log_and_show_error("Alpha Recorder could not determine the recording file path.", true);
-                }
+                log_and_show_error("Alpha Recorder could not determine the recording file path.", true);
                 return false;
             }
 
             if (path_is_directory(recording_path))
             {
-                if (show_popup)
-                {
-                    log_and_show_error(std::string{"Alpha Recorder could not determine the recording file name; OBS only reported the recording folder: "} +
-                                           recording_path.generic_string(),
-                                       true);
-                }
+                log_and_show_error(std::string{"Alpha Recorder could not determine the recording file name; OBS only reported the recording folder: "} +
+                                       recording_path.generic_string(),
+                                   true);
                 return false;
             }
 
@@ -588,7 +581,7 @@ technique Draw
 
             finalization_format_ = settings.finalization_format;
 
-            if (!open_segment_locked(recording_path, video_info, show_popup))
+            if (!open_segment_locked(recording_path, video_info, true))
             {
                 obs_output_release(recording_output_);
                 recording_output_ = nullptr;
@@ -597,6 +590,17 @@ technique Draw
                 pending_encoded_alpha_frames_.clear();
                 return false;
             }
+
+            next_sequence_ = 0;
+            last_alpha_frame_.alpha.reset();
+            last_alpha_frame_.timestamp = 0U;
+            last_captured_alpha_frame_.alpha.reset();
+            last_captured_alpha_frame_.timestamp = 0U;
+            pending_alpha_frames_.clear();
+            pending_encoded_alpha_frames_.clear();
+            obs_enter_graphics();
+            alpha_extractor_.destroy();
+            obs_leave_graphics();
 
             session_active_ = true;
             session_aborted_ = false;
@@ -615,12 +619,6 @@ technique Draw
             {
                 obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
                 main_rendered_callback_connected_ = true;
-            }
-            std::string drain_error;
-            reconcile_output_frame_count_locked(drain_error);
-            if (!drain_error.empty())
-            {
-                log_and_show_error(drain_error, false);
             }
             return true;
         }
@@ -991,7 +989,7 @@ technique Draw
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!session_active_ || session_aborted_ || recording_paused_ || recording_output_ == nullptr ||
-                    video_info_.output_width == 0U || video_info_.output_height == 0U)
+                    !writer_.is_open())
                 {
                     return;
                 }
@@ -1023,7 +1021,7 @@ technique Draw
             std::lock_guard<std::mutex> lock(mutex_);
             if (output != recording_output_ || packet == nullptr || packet->type != OBS_ENCODER_VIDEO ||
                 !session_active_ || session_aborted_ || recording_paused_ || recording_output_ == nullptr ||
-                video_info_.output_width == 0U || video_info_.output_height == 0U)
+                !writer_.is_open())
             {
                 return;
             }
