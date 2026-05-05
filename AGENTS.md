@@ -206,15 +206,17 @@ Completed:
   - `alpha_recorder_run_obs_app_e2e_hevc_nvenc`
   - `alpha_recorder_run_obs_app_e2e_hevc_amf`
 - OBS app E2E matrix targets for reproducing decoded sync issues:
-  - `alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_png_mov`
-  - `alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_hevc_nvenc`
-  - `alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_hevc_amf`
+  - `alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_png_mov`
+  - `alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_hevc_nvenc`
+  - `alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_png_mov`
+  - `alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_hevc_amf`
   - `alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov`
   - `alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc`
   - `alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_amf`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_png_mov`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_hevc_nvenc`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_hevc_amf`
+  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_png_mov`
+  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_hevc_nvenc`
+  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_png_mov`
+  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_hevc_amf`
 - Optional CTest registration behind:
   - `ALPHA_RECORDER_ENABLE_OBS_APP_E2E`
 - OBS staging updates that copy the full OBS plugin set before overlaying Alpha
@@ -258,12 +260,14 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 Sync-bug exposure matrix:
 
 ```sh
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_hevc_amf
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_png_mov
 ```
 
 The CMake target:
@@ -285,9 +289,12 @@ The CMake target:
   default.
 - Uses OBS's default hardware-friendly NV12 color format in the app-level E2E
   profile while Alpha Recorder extracts alpha through its own GPU-side path.
-- Can run the RGB recording profile with software encoding or hardware HEVC
-  while independently choosing PNG MOV, HEVC NVENC, or HEVC AMF for the alpha
-  mask movie.
+- Can run the RGB recording profile with software encoding, explicit NVENC
+  HEVC, or explicit AMF HEVC. Hardware RGB matrix targets pair with PNG MOV or
+  the same vendor's HEVC alpha output.
+- Cross-vendor hardware pairs are intentionally not registered in the standard
+  matrix: RGB NVENC plus alpha AMF, or RGB AMF plus alpha NVENC, require a test
+  machine with both NVIDIA and AMD hardware encoders.
 - Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
 - Adds a test-only moving colored object over a transparent background with an

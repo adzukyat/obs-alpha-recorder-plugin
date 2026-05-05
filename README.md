@@ -145,15 +145,21 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 ```
 
 Additional OBS app E2E matrix targets expose decoded sync issues across RGB
-encoder profile, alpha finalization format, and 4K/60 load:
+encoder profile, alpha finalization format, and 4K/60 load. The RGB HEVC
+targets are explicit: `rgb_nvenc_hevc` uses OBS SimpleOutput `nvenc_hevc`, and
+`rgb_amf_hevc` uses OBS SimpleOutput `amd_hevc`. Cross-vendor hardware pairs
+such as RGB NVENC with alpha AMF are intentionally omitted because they require
+both NVIDIA and AMD encoders on the same test machine.
 
 ```sh
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_hevc_amf
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_png_mov
 ```
 
 On macOS:
@@ -203,8 +209,9 @@ Implemented in the core library and live OBS workflow:
   outputs, including zero frame-code offset plus frame-by-frame sync between a
   moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths,
   with only small start/terminal/count mismatches tolerated
-- named OBS app E2E matrix targets for software RGB, hardware HEVC RGB, and
-  4K/60 variants with PNG MOV and HEVC alpha outputs
+- named OBS app E2E matrix targets for software RGB, explicit NVENC HEVC RGB,
+  explicit AMF HEVC RGB, and 4K/60 variants; hardware RGB pairs use PNG MOV or
+  the same vendor's HEVC alpha output
 
 The test-only scenario path remains confined to the E2E harness; the shipping
 plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder

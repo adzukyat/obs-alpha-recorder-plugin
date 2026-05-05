@@ -123,11 +123,21 @@ function simpleRgbEncoder(encoder: string): string {
   switch (encoder) {
     case "software":
       return platform === "darwin" ? "apple_h264" : "x264";
-    case "hardware_hevc":
+    case "apple_hevc":
+      if (platform !== "darwin") {
+        throw new Error("RGB encoder profile apple_hevc is only supported on macOS");
+      }
+      return "apple_hevc";
+    case "nvenc_hevc":
       if (platform === "darwin") {
-        return "apple_hevc";
+        throw new Error("RGB encoder profile nvenc_hevc is only supported on Windows/Linux OBS runtimes");
       }
       return "nvenc_hevc";
+    case "amd_hevc":
+      if (platform === "darwin") {
+        throw new Error("RGB encoder profile amd_hevc is only supported on Windows/Linux OBS runtimes");
+      }
+      return "amd_hevc";
     default:
       throw new Error(`Unsupported RGB encoder profile: ${encoder}`);
   }
@@ -874,8 +884,8 @@ async function verifyRecordingOutputs(
   await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", alphaPath, "-frames:v", "1", "-f", "null", "-"], 180);
 
   const rgbStream = rgbProbe.streams?.[0] ?? {};
-  if (rgbEncoder === "hardware_hevc" && rgbStream.codec_name !== "hevc") {
-    throw new Error(`RGB recording probe did not report HEVC for hardware_hevc profile: ${JSON.stringify(rgbProbe)}`);
+  if ((rgbEncoder === "apple_hevc" || rgbEncoder === "nvenc_hevc" || rgbEncoder === "amd_hevc") && rgbStream.codec_name !== "hevc") {
+    throw new Error(`RGB recording probe did not report HEVC for ${rgbEncoder} profile: ${JSON.stringify(rgbProbe)}`);
   }
 
   const alphaStream = alphaProbe.streams?.[0] ?? {};
