@@ -136,6 +136,10 @@ The real OBS app E2E path launches portable OBS, enables Alpha Recorder through
 obs-websocket, starts and stops recording, then verifies the RGB recording,
 and exported alpha mask movie.
 
+Each OBS app E2E target starts with a 5-second recording. If decoded sync
+verification passes, the same OBS launch repeats longer recordings up to
+`MAX_RECORD_SECONDS`, which defaults to 30 seconds.
+
 ```sh
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```

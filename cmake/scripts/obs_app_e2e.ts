@@ -13,6 +13,7 @@ type Args = {
   configuration: string;
   port: number;
   recordSeconds: number;
+  maxRecordSeconds: number;
   width: number;
   height: number;
   fps: number;
@@ -28,6 +29,7 @@ function parseArgs(argv: string[]): Args {
     configuration: "RelWithDebInfo",
     port: 0,
     recordSeconds: 5,
+    maxRecordSeconds: 30,
     width: 1920,
     height: 1080,
     fps: 60,
@@ -64,6 +66,10 @@ function parseArgs(argv: string[]): Args {
         args.recordSeconds = Number(value);
         ++index;
         break;
+      case "--max-record-seconds":
+        args.maxRecordSeconds = Number(value);
+        ++index;
+        break;
       case "--width":
         args.width = Number(value);
         ++index;
@@ -97,6 +103,20 @@ function parseArgs(argv: string[]): Args {
   }
 
   return args;
+}
+
+function verificationDurations(startSeconds: number, maxSeconds: number): number[] {
+  const start = Math.max(1, Math.floor(startSeconds));
+  const max = Math.max(start, Math.floor(maxSeconds));
+  const durations: number[] = [];
+  let current = start;
+
+  while (current < max) {
+    durations.push(current);
+    current = Math.min(max, current * 2);
+  }
+  durations.push(max);
+  return durations;
 }
 
 function simpleRgbEncoder(encoder: string): string {
@@ -750,6 +770,96 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
 
 }
 
+async function verifyRecordingOutputs(
+  stageBin: string,
+  repoRoot: string,
+  artifactRoot: string,
+  rgbPath: string,
+  expectedFinalizationFormat: string,
+  rgbEncoder: string,
+  width: number,
+  height: number,
+  fps: number,
+): Promise<{ rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any }> {
+  if (!rgbPath) {
+    const mkvs = readdirSync(artifactRoot)
+      .filter((name) => name.endsWith(".mkv"))
+      .map((name) => join(artifactRoot, name))
+      .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+    rgbPath = mkvs[0] ?? "";
+  }
+  if (!rgbPath) {
+    throw new Error("OBS did not report or create an RGB recording path");
+  }
+
+  const basePath = rgbPath.replace(/\.[^.\\/]+$/, "");
+  const alphaExtension = expectedFinalizationFormat === "mask_png_mov" ? ".mov" : ".mp4";
+  const alphaPath = `${basePath}.alpha${alphaExtension}`;
+
+  await waitForPath(rgbPath, 30);
+  await waitForPath(alphaPath, 120);
+
+  const ffprobe = findTool(stageBin, repoRoot, "ffprobe");
+  const ffmpeg = findTool(stageBin, repoRoot, "ffmpeg");
+  const rgbProbe = await checkedJsonWithRetry(
+    ffprobe,
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=codec_name,width,height,pix_fmt,nb_frames,duration",
+      "-show_entries",
+      "format=duration,size",
+      "-of",
+      "json",
+      rgbPath,
+    ],
+    30,
+  );
+  const alphaProbe = (await checkedJsonWithRetry(
+    ffprobe,
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=codec_name,width,height,pix_fmt,nb_frames,duration",
+      "-show_entries",
+      "format=duration,size",
+      "-of",
+      "json",
+      alphaPath,
+    ],
+    180,
+  )) as any;
+  await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", rgbPath, "-frames:v", "1", "-f", "null", "-"], 30);
+  await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", alphaPath, "-frames:v", "1", "-f", "null", "-"], 180);
+
+  const rgbStream = rgbProbe.streams?.[0] ?? {};
+  if (rgbEncoder === "hardware_hevc" && rgbStream.codec_name !== "hevc") {
+    throw new Error(`RGB recording probe did not report HEVC for hardware_hevc profile: ${JSON.stringify(rgbProbe)}`);
+  }
+
+  const alphaStream = alphaProbe.streams?.[0] ?? {};
+  const alphaPixFmt = String(alphaStream.pix_fmt ?? "");
+  if (alphaPixFmt.startsWith("yuva") || alphaPixFmt === "rgba" || alphaPixFmt === "bgra" || alphaPixFmt === "argb") {
+    throw new Error(`Alpha mask movie unexpectedly carries an alpha-capable pixel format: ${JSON.stringify(alphaProbe)}`);
+  }
+  if (expectedFinalizationFormat === "mask_hevc_nvenc" || expectedFinalizationFormat === "mask_hevc_amf") {
+    if (alphaStream.codec_name !== "hevc") {
+      throw new Error(`Alpha movie probe did not report HEVC: ${JSON.stringify(alphaProbe)}`);
+    }
+  } else if (alphaStream.codec_name !== "png") {
+    throw new Error(`Alpha movie probe did not report PNG MOV: ${JSON.stringify(alphaProbe)}`);
+  }
+
+  verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, width, height, fps);
+  return { rgbPath, alphaPath, rgbProbe, alphaProbe };
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(Bun.argv.slice(2));
   const port = args.port > 0 ? args.port : await freePort();
@@ -982,98 +1092,41 @@ finalization_format=${args.finalizationFormat}
     });
 
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
-    await socket.request("StartRecord");
-    await waitForRecordState(socket, true);
-    await delay(args.recordSeconds * 1000);
-    const stopResponse = await socket.request("StopRecord");
 
-    let rgbPath = String(stopResponse?.outputPath ?? "");
-    if (!rgbPath) {
-      const mkvs = readdirSync(artifactRoot)
-        .filter((name) => name.endsWith(".mkv"))
-        .map((name) => join(artifactRoot, name))
-        .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
-      rgbPath = mkvs[0] ?? "";
-    }
-    if (!rgbPath) {
-      throw new Error("OBS did not report or create an RGB recording path");
-    }
-
-    const basePath = rgbPath.replace(/\.[^.\\/]+$/, "");
-    const alphaExtension = expectedFinalizationFormat === "mask_png_mov" ? ".mov" : ".mp4";
-    const alphaPath = `${basePath}.alpha${alphaExtension}`;
-
-    await waitForPath(rgbPath, 30);
-    await waitForPath(alphaPath, 120);
-
-    const ffprobe = findTool(stageBin, args.repoRoot, "ffprobe");
-    const ffmpeg = findTool(stageBin, args.repoRoot, "ffmpeg");
-    const rgbProbe = await checkedJsonWithRetry(
-      ffprobe,
-      [
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=codec_name,width,height,pix_fmt,nb_frames,duration",
-        "-show_entries",
-        "format=duration,size",
-        "-of",
-        "json",
-        rgbPath,
-      ],
-      30,
-    );
-    const alphaProbe = (await checkedJsonWithRetry(
-      ffprobe,
-      [
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=codec_name,width,height,pix_fmt,nb_frames,duration",
-        "-show_entries",
-        "format=duration,size",
-        "-of",
-        "json",
-        alphaPath,
-      ],
-      180,
-    )) as any;
-    await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", rgbPath, "-frames:v", "1", "-f", "null", "-"], 30);
-    await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", alphaPath, "-frames:v", "1", "-f", "null", "-"], 180);
-
-    const rgbStream = rgbProbe.streams?.[0] ?? {};
-    if (args.rgbEncoder === "hardware_hevc" && rgbStream.codec_name !== "hevc") {
-      throw new Error(`RGB recording probe did not report HEVC for hardware_hevc profile: ${JSON.stringify(rgbProbe)}`);
+    const attempts: Array<{ durationSeconds: number; rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any }> = [];
+    for (const durationSeconds of verificationDurations(args.recordSeconds, args.maxRecordSeconds)) {
+      console.log(`Running OBS app E2E recording for ${durationSeconds}s`);
+      await socket.request("StartRecord");
+      await waitForRecordState(socket, true);
+      await delay(durationSeconds * 1000);
+      const stopResponse = await socket.request("StopRecord");
+      await waitForRecordState(socket, false);
+      const outputs = await verifyRecordingOutputs(
+        stageBin,
+        args.repoRoot,
+        artifactRoot,
+        String(stopResponse?.outputPath ?? ""),
+        expectedFinalizationFormat,
+        args.rgbEncoder,
+        args.width,
+        args.height,
+        args.fps,
+      );
+      attempts.push({ durationSeconds, ...outputs });
     }
 
-    const alphaStream = alphaProbe.streams?.[0] ?? {};
-    const alphaPixFmt = String(alphaStream.pix_fmt ?? "");
-    if (alphaPixFmt.startsWith("yuva") || alphaPixFmt === "rgba" || alphaPixFmt === "bgra" || alphaPixFmt === "argb") {
-      throw new Error(`Alpha mask movie unexpectedly carries an alpha-capable pixel format: ${JSON.stringify(alphaProbe)}`);
-    }
-    if (expectedFinalizationFormat === "mask_hevc_nvenc" || expectedFinalizationFormat === "mask_hevc_amf") {
-      if (alphaStream.codec_name !== "hevc") {
-        throw new Error(`Alpha movie probe did not report HEVC: ${JSON.stringify(alphaProbe)}`);
-      }
-    } else if (alphaStream.codec_name !== "png") {
-      throw new Error(`Alpha movie probe did not report PNG MOV: ${JSON.stringify(alphaProbe)}`);
-    }
-
-    verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, args.width, args.height, args.fps);
+    const lastAttempt = attempts[attempts.length - 1];
 
     console.log(
       JSON.stringify(
         {
           ok: true,
           artifactRoot,
-          rgbPath,
-          alphaPath,
-          rgbProbe,
-          alphaProbe,
+          attempts,
+          rgbPath: lastAttempt?.rgbPath,
+          alphaPath: lastAttempt?.alphaPath,
+          rgbProbe: lastAttempt?.rgbProbe,
+          alphaProbe: lastAttempt?.alphaProbe,
         },
         null,
         2,

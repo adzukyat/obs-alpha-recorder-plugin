@@ -455,7 +455,7 @@ endif()
 if(_alpha_recorder_build_full_targets)
     function(alpha_recorder_add_obs_app_e2e_target target_name stage_suffix)
         set(options)
-        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS)
+        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS MAX_RECORD_SECONDS)
         set(multi_value_args)
         cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
@@ -477,6 +477,9 @@ if(_alpha_recorder_build_full_targets)
         if(NOT ARG_RECORD_SECONDS)
             set(ARG_RECORD_SECONDS "5")
         endif()
+        if(NOT ARG_MAX_RECORD_SECONDS)
+            set(ARG_MAX_RECORD_SECONDS "30")
+        endif()
 
         add_custom_target(${target_name}
             COMMAND ${CMAKE_COMMAND}
@@ -491,6 +494,7 @@ if(_alpha_recorder_build_full_targets)
                 "-DHEIGHT=${ARG_HEIGHT}"
                 "-DFPS=${ARG_FPS}"
                 "-DRECORD_SECONDS=${ARG_RECORD_SECONDS}"
+                "-DMAX_RECORD_SECONDS=${ARG_MAX_RECORD_SECONDS}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
             VERBATIM
         )

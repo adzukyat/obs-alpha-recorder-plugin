@@ -10,6 +10,7 @@ set(OBS_ROOT "$ENV{OBS_ROOT}" CACHE PATH "OBS runtime root")
 set(CONFIGURATION "RelWithDebInfo" CACHE STRING "Build configuration")
 set(PORT 0 CACHE STRING "obs-websocket port, or 0 for an ephemeral port")
 set(RECORD_SECONDS 5 CACHE STRING "Recording duration")
+set(MAX_RECORD_SECONDS 30 CACHE STRING "Maximum adaptive recording duration")
 set(WIDTH 1920 CACHE STRING "Canvas width")
 set(HEIGHT 1080 CACHE STRING "Canvas height")
 set(FPS 60 CACHE STRING "Recording FPS")
@@ -76,6 +77,7 @@ set(args
     "--configuration" "${CONFIGURATION}"
     "--port" "${PORT}"
     "--record-seconds" "${RECORD_SECONDS}"
+    "--max-record-seconds" "${MAX_RECORD_SECONDS}"
     "--width" "${WIDTH}"
     "--height" "${HEIGHT}"
     "--fps" "${FPS}"
