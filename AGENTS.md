@@ -181,6 +181,9 @@ Completed:
   Color Format from NV12/P010 to RGBA.
 - Raw-video cadence tracking so alpha output mirrors OBS duplicate/drop behavior
   instead of assuming every rendered frame reaches the RGB recording.
+- Focused unit regression coverage proving repeated raw-video output frames
+  duplicate the previous alpha frame rather than consuming a newer pending
+  alpha frame.
 - Live alpha mask movie creation next to the OBS recording.
 - Bounded asynchronous mask movie encoding so slow fallback encoders abort the
   alpha output instead of blocking OBS recording.
@@ -221,6 +224,12 @@ Manual validation:
 - Start and stop OBS recording.
 - Confirm the RGB recording still exists and plays.
 - Confirm the alpha mask movie exists and plays.
+
+Focused unit regression:
+
+```sh
+ctest --test-dir out/build/macos-arm64 -C RelWithDebInfo -R alpha_recorder.unit.recording_session_cadence --output-on-failure
+```
 
 Automated OBS app E2E:
 

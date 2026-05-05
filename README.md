@@ -177,6 +177,9 @@ Implemented in the core library and live OBS workflow:
   format independent of Alpha Recorder
 - raw-video cadence tracking that mirrors OBS duplicate/drop behavior in the
   alpha mask movie
+- focused unit regression coverage for repeated raw-video output frames,
+  proving the alpha mask duplicates the previous frame instead of consuming a
+  newer pending frame
 - split recording handling through OBS `file_changed`
 - deterministic E2E scenarios that validate RGB raw artifacts, alpha mask
   artifacts, and split-rotation behavior through the OBS module boundary

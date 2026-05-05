@@ -1,5 +1,6 @@
 #include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
+#include "recording_session_controller_cadence.hpp"
 #include "recording_session_controller_gate.hpp"
 
 #include <algorithm>
@@ -331,27 +332,10 @@ technique Draw
         bool has_staged_frame_ = false;
     };
 
-    struct AlphaFrame
-    {
-        std::uint64_t timestamp = 0U;
-        std::shared_ptr<std::vector<std::uint8_t>> alpha{};
-
-        [[nodiscard]] bool empty() const noexcept
-        {
-            return !alpha || alpha->empty();
-        }
-    };
-
     struct EncodedAlphaFrame
     {
         std::int64_t pts = 0;
-        AlphaFrame frame{};
-    };
-
-    struct OutputFrameCadence
-    {
-        std::uint64_t timestamp = 0U;
-        bool duplicate_previous = false;
+        alpha_recorder::obs::AlphaFrame frame{};
     };
 
     // Keep enough alpha frames queued to absorb packet callback reordering before binding by presentation order.
@@ -511,7 +495,7 @@ technique Draw
             pending_alpha_frames_.clear();
             pending_encoded_alpha_frames_.clear();
             pending_output_frames_.clear();
-            last_raw_frame_data_ = nullptr;
+            raw_video_cadence_.reset();
 
             obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
             main_rendered_callback_connected_ = true;
@@ -681,7 +665,7 @@ technique Draw
             return true;
         }
 
-        void remember_pending_alpha_frame_locked(AlphaFrame frame)
+        void remember_pending_alpha_frame_locked(alpha_recorder::obs::AlphaFrame frame)
         {
             constexpr std::size_t kMaxPendingFrames = 240U;
             pending_alpha_frames_.push_back(std::move(frame));
@@ -691,7 +675,7 @@ technique Draw
             }
         }
 
-        bool write_alpha_frame_locked(const AlphaFrame &frame, std::string &error_message)
+        bool write_alpha_frame_locked(const alpha_recorder::obs::AlphaFrame &frame, std::string &error_message)
         {
             if (frame.empty() || !writer_.write_frame(frame.alpha->data(), video_info_.output_width, &error_message))
             {
@@ -708,7 +692,7 @@ technique Draw
             return true;
         }
 
-        bool select_alpha_for_timestamp_locked(std::uint64_t timestamp, AlphaFrame &frame, bool drain_all)
+        bool select_alpha_for_timestamp_locked(std::uint64_t timestamp, alpha_recorder::obs::AlphaFrame &frame, bool drain_all)
         {
             if (pending_alpha_frames_.empty())
             {
@@ -748,7 +732,7 @@ technique Draw
         }
 
         bool resolve_encoded_alpha_frame_locked(EncodedAlphaFrame &encoded_frame,
-                                                const OutputFrameCadence &output_frame,
+                                                const alpha_recorder::obs::OutputFrameCadence &output_frame,
                                                 bool allow_duplicate)
         {
             if (!encoded_frame.frame.empty())
@@ -756,9 +740,9 @@ technique Draw
                 return true;
             }
 
-            if (output_frame.duplicate_previous && !last_alpha_frame_.empty())
+            if (alpha_recorder::obs::duplicate_output_uses_previous_alpha(output_frame, last_alpha_frame_,
+                                                                          encoded_frame.frame))
             {
-                encoded_frame.frame = last_alpha_frame_;
                 return true;
             }
 
@@ -784,7 +768,7 @@ technique Draw
             }
 
             constexpr std::size_t kMaxEncoderReorderFrames = 16U;
-            AlphaFrame alpha_frame{};
+            alpha_recorder::obs::AlphaFrame alpha_frame{};
             std::string error_message;
             while (!pending_encoded_alpha_frames_.empty() &&
                    (drain_all || pending_encoded_alpha_frames_.size() > kMaxEncoderReorderFrames))
@@ -797,7 +781,7 @@ technique Draw
                 auto selected = std::min_element(
                     pending_encoded_alpha_frames_.begin(), pending_encoded_alpha_frames_.end(),
                     [](const EncodedAlphaFrame &left, const EncodedAlphaFrame &right) { return left.pts < right.pts; });
-                const OutputFrameCadence output_frame = pending_output_frames_.front();
+                const alpha_recorder::obs::OutputFrameCadence output_frame = pending_output_frames_.front();
 
                 if (!resolve_encoded_alpha_frame_locked(*selected, output_frame, drain_all))
                 {
@@ -827,7 +811,7 @@ technique Draw
             drain_encoded_alpha_locked(false);
         }
 
-        void remember_output_frame_locked(OutputFrameCadence frame)
+        void remember_output_frame_locked(alpha_recorder::obs::OutputFrameCadence frame)
         {
             constexpr std::size_t kMaxPendingOutputFrames = 240U;
             pending_output_frames_.push_back(frame);
@@ -864,7 +848,7 @@ technique Draw
             if (captured && !alpha.empty())
             {
                 remember_pending_alpha_frame_locked(
-                    AlphaFrame{alpha_timestamp, std::make_shared<std::vector<std::uint8_t>>(std::move(alpha))});
+                    alpha_recorder::obs::AlphaFrame{alpha_timestamp, std::make_shared<std::vector<std::uint8_t>>(std::move(alpha))});
             }
             obs_leave_graphics();
 
@@ -957,7 +941,7 @@ technique Draw
                 pending_alpha_frames_.clear();
                 pending_encoded_alpha_frames_.clear();
                 pending_output_frames_.clear();
-                last_raw_frame_data_ = nullptr;
+                raw_video_cadence_.reset();
                 obs_enter_graphics();
                 alpha_extractor_.destroy();
                 obs_leave_graphics();
@@ -1023,7 +1007,7 @@ technique Draw
                 pending_alpha_frames_.clear();
                 pending_encoded_alpha_frames_.clear();
                 pending_output_frames_.clear();
-                last_raw_frame_data_ = nullptr;
+                raw_video_cadence_.reset();
 
                 if (!open_segment_locked(next_recording_path, video_info_, false))
                 {
@@ -1064,7 +1048,7 @@ technique Draw
                 }
                 else if (!alpha.empty())
                 {
-                    last_captured_alpha_frame_ = AlphaFrame{alpha_timestamp, std::make_shared<std::vector<std::uint8_t>>(std::move(alpha))};
+                    last_captured_alpha_frame_ = alpha_recorder::obs::AlphaFrame{alpha_timestamp, std::make_shared<std::vector<std::uint8_t>>(std::move(alpha))};
                     remember_pending_alpha_frame_locked(last_captured_alpha_frame_);
                 }
             }
@@ -1089,10 +1073,7 @@ technique Draw
                 return;
             }
 
-            const bool duplicate_previous = frame->data[0] != nullptr && frame->data[0] == last_raw_frame_data_;
-            last_raw_frame_data_ = frame->data[0];
-
-            remember_output_frame_locked(OutputFrameCadence{frame->timestamp, duplicate_previous});
+            remember_output_frame_locked(raw_video_cadence_.remember(frame->data[0], frame->timestamp));
             drain_encoded_alpha_locked(false);
         }
 
@@ -1119,12 +1100,12 @@ technique Draw
         bool session_aborted_ = false;
         bool recording_paused_ = false;
         std::uint64_t next_sequence_ = 0;
-        AlphaFrame last_alpha_frame_{};
-        AlphaFrame last_captured_alpha_frame_{};
-        std::deque<AlphaFrame> pending_alpha_frames_{};
+        alpha_recorder::obs::AlphaFrame last_alpha_frame_{};
+        alpha_recorder::obs::AlphaFrame last_captured_alpha_frame_{};
+        std::deque<alpha_recorder::obs::AlphaFrame> pending_alpha_frames_{};
         std::deque<EncodedAlphaFrame> pending_encoded_alpha_frames_{};
-        std::deque<OutputFrameCadence> pending_output_frames_{};
-        const std::uint8_t *last_raw_frame_data_ = nullptr;
+        std::deque<alpha_recorder::obs::OutputFrameCadence> pending_output_frames_{};
+        alpha_recorder::obs::RawVideoCadenceTracker raw_video_cadence_{};
         std::filesystem::path recording_path_{};
         obs_video_info video_info_{};
         AlphaPlaneExtractor alpha_extractor_{};

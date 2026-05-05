@@ -320,6 +320,18 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
     add_test(NAME alpha_recorder.unit.recording_session_pause COMMAND alpha_recorder_unit_recording_session_pause)
     set_tests_properties(alpha_recorder.unit.recording_session_pause PROPERTIES LABELS "unit")
 
+    add_executable(alpha_recorder_unit_recording_session_cadence
+        tests/unit/recording_session_controller_cadence_test.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_recording_session_cadence)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_recording_session_cadence)
+    target_include_directories(alpha_recorder_unit_recording_session_cadence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/obs)
+    set_target_properties(alpha_recorder_unit_recording_session_cadence PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.recording_session_cadence COMMAND alpha_recorder_unit_recording_session_cadence)
+    set_tests_properties(alpha_recorder.unit.recording_session_cadence PROPERTIES LABELS "unit")
+
     add_executable(alpha_recorder_unit_settings
         tests/unit/settings_test.cpp
     )
