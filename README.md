@@ -200,8 +200,9 @@ Implemented in the core library and live OBS workflow:
 - deterministic E2E scenarios that validate RGB raw artifacts, alpha mask
   artifacts, and split-rotation behavior through the OBS module boundary
 - cross-platform OBS app E2E harness that verifies RGB and alpha mask movie
-  outputs, including exact frame-code alignment plus frame-by-frame sync between
-  a moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths
+  outputs, including zero frame-code offset plus frame-by-frame sync between a
+  moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths,
+  with only small start/terminal/count mismatches tolerated
 - named OBS app E2E matrix targets for software RGB, hardware HEVC RGB, and
   4K/60 variants with PNG MOV and HEVC alpha outputs
 

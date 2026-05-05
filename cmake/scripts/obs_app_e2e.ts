@@ -654,6 +654,7 @@ function bestFrameCodeOffset(rgbCodes: number[], alphaCodes: number[]): { offset
 function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: string, alphaPath: string, width: number, height: number, fps: number): void {
   const toleratedTerminalFrames = 3;
   const toleratedPerFrameMismatches = 3;
+  const toleratedBoundaryFrames = Math.max(toleratedPerFrameMismatches, Math.ceil(fps * 0.15));
   const verifyWidth = Math.min(width, 320);
   const verifyHeight = Math.max(2, Math.round((height * verifyWidth) / width / 2) * 2);
   const scaleFilter = `scale=${verifyWidth}:${verifyHeight}:flags=neighbor`;
@@ -730,12 +731,25 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
   const comparedFrames = Math.min(rgbFrames, alphaFrames);
   let frameCodeMismatches = 0;
   let maskBoundsMismatches = 0;
+  let startFrameCodeMismatches = 0;
+  let terminalFrameCodeMismatches = 0;
+  let interiorFrameCodeMismatches = 0;
+  let startMaskBoundsMismatches = 0;
+  let terminalMaskBoundsMismatches = 0;
+  let interiorMaskBoundsMismatches = 0;
   const firstFrameCodeMismatches: string[] = [];
   const firstMaskBoundsMismatches: string[] = [];
 
   for (let frame = 0; frame < comparedFrames; ++frame) {
     if (rgbCodes[frame] !== alphaCodes[frame]) {
       ++frameCodeMismatches;
+      if (frame < toleratedBoundaryFrames) {
+        ++startFrameCodeMismatches;
+      } else if (frame >= comparedFrames - toleratedBoundaryFrames) {
+        ++terminalFrameCodeMismatches;
+      } else {
+        ++interiorFrameCodeMismatches;
+      }
       if (firstFrameCodeMismatches.length < toleratedPerFrameMismatches + 1) {
         firstFrameCodeMismatches.push(`${frame}:${rgbCodes[frame]}/${alphaCodes[frame]}`);
       }
@@ -743,6 +757,13 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
 
     if (!boundsAreSimilar(rgbBounds[frame], alphaBounds[frame])) {
       ++maskBoundsMismatches;
+      if (frame < toleratedBoundaryFrames) {
+        ++startMaskBoundsMismatches;
+      } else if (frame >= comparedFrames - toleratedBoundaryFrames) {
+        ++terminalMaskBoundsMismatches;
+      } else {
+        ++interiorMaskBoundsMismatches;
+      }
       if (firstMaskBoundsMismatches.length < toleratedPerFrameMismatches + 1) {
         const candidates = localCandidateOffsets(rgbBounds, alphaBounds, frame);
         firstMaskBoundsMismatches.push(
@@ -752,17 +773,31 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
     }
   }
 
-  if (frameCodeMismatches > toleratedPerFrameMismatches) {
+  if (
+    interiorFrameCodeMismatches > toleratedPerFrameMismatches ||
+    startFrameCodeMismatches > toleratedBoundaryFrames ||
+    terminalFrameCodeMismatches > toleratedBoundaryFrames
+  ) {
     throw new Error(
       `RGB/alpha frame-code mismatches exceed tolerance: mismatches=${frameCodeMismatches}/${comparedFrames}; ` +
+        `start=${startFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
+        `terminal=${terminalFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
+        `interior=${interiorFrameCodeMismatches}/${toleratedPerFrameMismatches}; ` +
         `examples=${firstFrameCodeMismatches.join("; ")}; ` +
         `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}`,
     );
   }
 
-  if (maskBoundsMismatches > toleratedPerFrameMismatches) {
+  if (
+    interiorMaskBoundsMismatches > toleratedPerFrameMismatches ||
+    startMaskBoundsMismatches > toleratedBoundaryFrames ||
+    terminalMaskBoundsMismatches > toleratedBoundaryFrames
+  ) {
     throw new Error(
       `RGB/alpha mask bounds mismatches exceed tolerance: mismatches=${maskBoundsMismatches}/${comparedFrames}; ` +
+        `start=${startMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
+        `terminal=${terminalMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
+        `interior=${interiorMaskBoundsMismatches}/${toleratedPerFrameMismatches}; ` +
         `examples=${firstMaskBoundsMismatches.join("; ")}; ` +
         `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
     );

@@ -293,7 +293,7 @@ The CMake target:
 - Adds a test-only moving colored object over a transparent background with an
   opaque binary frame-code strip, then decodes RGB and alpha mask frames for
   PNG MOV and HEVC targets and verifies zero frame-code offset plus moving mask
-  bounds frame-by-frame, allowing only small terminal/count mismatches.
+  bounds frame-by-frame, allowing only small start/terminal/count mismatches.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
 - For HEVC targets, also verifies the alpha output is `.mp4`, `ffprobe` reports

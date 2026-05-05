@@ -335,6 +335,7 @@ technique Draw
     struct EncodedAlphaFrame
     {
         std::int64_t pts = 0;
+        std::uint64_t timestamp = 0U;
         alpha_recorder::obs::AlphaFrame frame{};
     };
 
@@ -746,7 +747,8 @@ technique Draw
                 return true;
             }
 
-            if (select_alpha_for_timestamp_locked(output_frame.timestamp, encoded_frame.frame, allow_duplicate))
+            const std::uint64_t alpha_timestamp = encoded_frame.timestamp != 0U ? encoded_frame.timestamp : output_frame.timestamp;
+            if (select_alpha_for_timestamp_locked(alpha_timestamp, encoded_frame.frame, allow_duplicate))
             {
                 return true;
             }
@@ -803,10 +805,11 @@ technique Draw
             }
         }
 
-        void queue_alpha_for_packet_locked(std::int64_t pts)
+        void queue_alpha_for_packet_locked(std::int64_t pts, std::uint64_t timestamp)
         {
             EncodedAlphaFrame encoded_frame{};
             encoded_frame.pts = pts;
+            encoded_frame.timestamp = timestamp;
             pending_encoded_alpha_frames_.push_back(std::move(encoded_frame));
             drain_encoded_alpha_locked(false);
         }
@@ -1088,7 +1091,7 @@ technique Draw
                 return;
             }
 
-            queue_alpha_for_packet_locked(packet->pts);
+            queue_alpha_for_packet_locked(packet->pts, packet_time != nullptr ? packet_time->cts : 0U);
         }
 
         bool event_callback_registered_ = false;
