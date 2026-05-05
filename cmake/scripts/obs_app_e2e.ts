@@ -444,6 +444,10 @@ async function waitForRecordState(socket: ObsWebSocket, active: boolean, timeout
   throw new Error(`Timed out waiting for recording active=${active}; last status=${JSON.stringify(lastStatus)}`);
 }
 
+function stopWaitTimeoutSeconds(durationSeconds: number): number {
+  return Math.max(60, Math.ceil(durationSeconds * 3));
+}
+
 async function requestWithStartupRetry(
   socket: ObsWebSocket,
   requestType: string,
@@ -783,7 +787,17 @@ function bestFrameCodeOffset(rgbCodes: number[], alphaCodes: number[]): { offset
   return best;
 }
 
-function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: string, alphaPath: string, width: number, height: number, fps: number): void {
+type OffsetSummary = { offset: number; matches: number; total: number };
+type SyncVerification = {
+  rgbFrames: number;
+  alphaFrames: number;
+  bestFrameCodeOffset: OffsetSummary;
+  bestContentOffset: OffsetSummary;
+  frameCodeMismatches: number;
+  maskBoundsMismatches: number;
+};
+
+function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: string, alphaPath: string, width: number, height: number, fps: number): SyncVerification {
   const toleratedTerminalFrames = 3;
   const toleratedPerFrameMismatches = 3;
   const toleratedBoundaryFrames = Math.max(toleratedPerFrameMismatches, Math.ceil(fps * 0.15));
@@ -935,6 +949,14 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
     );
   }
 
+  return {
+    rgbFrames,
+    alphaFrames,
+    bestFrameCodeOffset: bestCodeOffset,
+    bestContentOffset: bestOffset,
+    frameCodeMismatches,
+    maskBoundsMismatches,
+  };
 }
 
 async function verifyRecordingOutputs(
@@ -947,7 +969,7 @@ async function verifyRecordingOutputs(
   width: number,
   height: number,
   fps: number,
-): Promise<{ rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any }> {
+): Promise<{ rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any; syncVerification: SyncVerification }> {
   if (!rgbPath) {
     const mkvs = readdirSync(artifactRoot)
       .filter((name) => name.endsWith(".mkv"))
@@ -1023,8 +1045,8 @@ async function verifyRecordingOutputs(
     throw new Error(`Alpha movie probe did not report PNG MOV: ${JSON.stringify(alphaProbe)}`);
   }
 
-  verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, width, height, fps);
-  return { rgbPath, alphaPath, rgbProbe, alphaProbe };
+  const syncVerification = verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, width, height, fps);
+  return { rgbPath, alphaPath, rgbProbe, alphaProbe, syncVerification };
 }
 
 async function main(): Promise<void> {
@@ -1263,7 +1285,14 @@ finalization_format=${args.finalizationFormat}
 
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
 
-    const attempts: Array<{ durationSeconds: number; rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any }> = [];
+    const attempts: Array<{
+      durationSeconds: number;
+      rgbPath: string;
+      alphaPath: string;
+      rgbProbe: any;
+      alphaProbe: any;
+      syncVerification: SyncVerification;
+    }> = [];
     for (const durationSeconds of verificationDurations(args.recordSeconds, args.maxRecordSeconds)) {
       console.log(`Running OBS app E2E recording for ${durationSeconds}s`);
       await socket.request("StartRecord");
@@ -1272,7 +1301,7 @@ finalization_format=${args.finalizationFormat}
       await stopRecordingAfterOverload(socket, overload);
       throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps);
       const stopResponse = await socket.request("StopRecord");
-      await waitForRecordState(socket, false);
+      await waitForRecordState(socket, false, stopWaitTimeoutSeconds(durationSeconds));
       scanObsLogsForOverload(portableConfig, overload);
       throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps);
       const outputs = await verifyRecordingOutputs(
@@ -1301,6 +1330,7 @@ finalization_format=${args.finalizationFormat}
           alphaPath: lastAttempt?.alphaPath,
           rgbProbe: lastAttempt?.rgbProbe,
           alphaProbe: lastAttempt?.alphaProbe,
+          syncVerification: lastAttempt?.syncVerification,
         },
         null,
         2,

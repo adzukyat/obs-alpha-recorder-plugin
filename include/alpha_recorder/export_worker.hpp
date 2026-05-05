@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "alpha_recorder/plugin.hpp"
 
@@ -32,6 +34,10 @@ namespace alpha_recorder::obs
                                 std::string *error_message = nullptr) noexcept;
         [[nodiscard]] bool write_frame(const std::uint8_t *alpha,
                                        std::uint32_t stride,
+                                       std::string *error_message = nullptr) noexcept;
+        [[nodiscard]] bool write_frame(std::vector<std::uint8_t> alpha,
+                                       std::string *error_message = nullptr) noexcept;
+        [[nodiscard]] bool write_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha,
                                        std::string *error_message = nullptr) noexcept;
         [[nodiscard]] bool close(std::string *error_message = nullptr) noexcept;
 

@@ -7,6 +7,7 @@
 #include <exception>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -220,7 +221,7 @@ namespace alpha_recorder::obs
     {
         struct QueuedFrame
         {
-            std::vector<std::uint8_t> alpha{};
+            std::shared_ptr<const std::vector<std::uint8_t>> alpha{};
             std::uint32_t stride = 0;
         };
 
@@ -397,11 +398,12 @@ namespace alpha_recorder::obs
 
                     queued_frame = std::move(queued_frames.front());
                     queued_frames.pop();
-                    queued_bytes -= queued_frame.alpha.size();
+                    queued_bytes -= queued_frame.alpha ? queued_frame.alpha->size() : 0U;
                 }
 
                 std::string error_message;
-                if (!encode_frame(queued_frame.alpha.data(), queued_frame.stride, &error_message))
+                if (!queued_frame.alpha ||
+                    !encode_frame(queued_frame.alpha->data(), queued_frame.stride, &error_message))
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     worker_failed = true;
@@ -433,6 +435,49 @@ namespace alpha_recorder::obs
             worker_failed = false;
             worker_error.clear();
             worker = std::thread{[this]() { run_worker(); }};
+        }
+
+        bool enqueue_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha,
+                           std::uint32_t stride,
+                           std::string *error_message) noexcept
+        {
+            if (!alpha)
+            {
+                return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
+            }
+
+            std::lock_guard<std::mutex> lock(mutex);
+            if (worker_failed)
+            {
+                return set_error(error_message, worker_error.empty() ? "Alpha Recorder failed to encode the mask video." : worker_error);
+            }
+
+            if (!accepting_frames || stop_requested)
+            {
+                return set_error(error_message, "Alpha Recorder mask video writer is closing.");
+            }
+
+            if (queued_frames.size() >= kMaxQueuedMaskFrames ||
+                alpha->size() > kMaxQueuedMaskBytes ||
+                queued_bytes > kMaxQueuedMaskBytes - alpha->size())
+            {
+                accepting_frames = false;
+                stop_requested = true;
+                worker_failed = true;
+                worker_error = "Alpha Recorder alpha mask encoder could not keep up; aborting alpha mask generation to protect the main OBS recording.";
+                while (!queued_frames.empty())
+                {
+                    queued_frames.pop();
+                }
+                queued_bytes = 0;
+                condition.notify_all();
+                return set_error(error_message, worker_error);
+            }
+
+            queued_bytes += alpha->size();
+            queued_frames.push(QueuedFrame{std::move(alpha), stride});
+            condition.notify_one();
+            return true;
         }
 
         bool stop_worker(std::string *error_message) noexcept
@@ -620,46 +665,60 @@ namespace alpha_recorder::obs
             return set_error(error_message, "Alpha Recorder received invalid mask video dimensions.");
         }
 
-        std::vector<std::uint8_t> queued_alpha(frame_bytes);
+        auto queued_alpha = std::make_shared<std::vector<std::uint8_t>>(frame_bytes);
         for (int row = 0; row < impl_->encoder->height; ++row)
         {
             const std::uint8_t *const source = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
-            std::uint8_t *const dest = queued_alpha.data() + (static_cast<std::size_t>(row) * row_bytes);
+            std::uint8_t *const dest = queued_alpha->data() + (static_cast<std::size_t>(row) * row_bytes);
             std::copy(source, source + row_bytes, dest);
         }
 
-        std::lock_guard<std::mutex> lock(impl_->mutex);
-        if (impl_->worker_failed)
+        return impl_->enqueue_frame(std::move(queued_alpha), static_cast<std::uint32_t>(impl_->encoder->width), error_message);
+    }
+
+    bool AlphaMaskVideoWriter::write_frame(std::vector<std::uint8_t> alpha, std::string *error_message) noexcept
+    {
+        if (impl_ == nullptr || impl_->encoder == nullptr || impl_->frame == nullptr)
         {
-            return set_error(error_message, impl_->worker_error.empty() ? "Alpha Recorder failed to encode the mask video." : impl_->worker_error);
+            return set_error(error_message, "Alpha Recorder mask video writer is not open.");
         }
 
-        if (!impl_->accepting_frames || impl_->stop_requested)
+        const std::size_t row_bytes = static_cast<std::size_t>(impl_->encoder->width);
+        const std::size_t frame_bytes = row_bytes * static_cast<std::size_t>(impl_->encoder->height);
+        if (impl_->encoder->height != 0 && frame_bytes / static_cast<std::size_t>(impl_->encoder->height) != row_bytes)
         {
-            return set_error(error_message, "Alpha Recorder mask video writer is closing.");
+            return set_error(error_message, "Alpha Recorder received invalid mask video dimensions.");
         }
 
-        if (impl_->queued_frames.size() >= kMaxQueuedMaskFrames ||
-            queued_alpha.size() > kMaxQueuedMaskBytes ||
-            impl_->queued_bytes > kMaxQueuedMaskBytes - queued_alpha.size())
+        if (alpha.size() != frame_bytes)
         {
-            impl_->accepting_frames = false;
-            impl_->stop_requested = true;
-            impl_->worker_failed = true;
-            impl_->worker_error = "Alpha Recorder alpha mask encoder could not keep up; aborting alpha mask generation to protect the main OBS recording.";
-            while (!impl_->queued_frames.empty())
-            {
-                impl_->queued_frames.pop();
-            }
-            impl_->queued_bytes = 0;
-            impl_->condition.notify_all();
-            return set_error(error_message, impl_->worker_error);
+            return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
         }
 
-        impl_->queued_bytes += queued_alpha.size();
-        impl_->queued_frames.push(Impl::QueuedFrame{std::move(queued_alpha), static_cast<std::uint32_t>(impl_->encoder->width)});
-        impl_->condition.notify_one();
-        return true;
+        return impl_->enqueue_frame(std::make_shared<std::vector<std::uint8_t>>(std::move(alpha)),
+                                    static_cast<std::uint32_t>(impl_->encoder->width), error_message);
+    }
+
+    bool AlphaMaskVideoWriter::write_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha, std::string *error_message) noexcept
+    {
+        if (impl_ == nullptr || impl_->encoder == nullptr || impl_->frame == nullptr)
+        {
+            return set_error(error_message, "Alpha Recorder mask video writer is not open.");
+        }
+
+        const std::size_t row_bytes = static_cast<std::size_t>(impl_->encoder->width);
+        const std::size_t frame_bytes = row_bytes * static_cast<std::size_t>(impl_->encoder->height);
+        if (impl_->encoder->height != 0 && frame_bytes / static_cast<std::size_t>(impl_->encoder->height) != row_bytes)
+        {
+            return set_error(error_message, "Alpha Recorder received invalid mask video dimensions.");
+        }
+
+        if (!alpha || alpha->size() != frame_bytes)
+        {
+            return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
+        }
+
+        return impl_->enqueue_frame(std::move(alpha), static_cast<std::uint32_t>(impl_->encoder->width), error_message);
     }
 
     bool AlphaMaskVideoWriter::close(std::string *error_message) noexcept

@@ -114,11 +114,21 @@ Current alignment strategy:
 3. Capture the rendered Program texture after OBS renders the main mix, extract
    its alpha into an `GS_R8` mask texture on the GPU, then stage that one-byte
    alpha plane into a short pending-frame queue.
-4. Use OBS raw-video callbacks as the final video-output cadence source. When
-   OBS repeats the same cached output frame, duplicate the previous alpha mask
-   frame so the mask movie mirrors RGB duplicate/drop behavior.
-5. Use video packet callbacks from the active recording output to preserve
-   encoded-video packet order, sorted by packet PTS, before writing mask frames.
+4. Use OBS raw-video callbacks as the final video-output cadence source. Use
+   the encoded packet composition timestamp (`encoder_packet_time::cts`) to
+   identify the raw-video cadence frame actually admitted into the RGB
+   recording, rather than applying encoder-specific startup offsets. For
+   texture encoders, use the next observed raw-video cadence frame after CTS,
+   because OBS queues the current rendered texture while draining the previous
+   raw-video timestamp. When OBS repeats the same cached output frame,
+   duplicate the previous alpha mask frame so the mask movie mirrors RGB
+   duplicate/drop behavior; if the first admitted RGB frame is already a
+   duplicate, use the duplicate's raw content-origin timestamp to select the
+   matching alpha frame.
+5. Use video packet callbacks from the active recording output only to enqueue
+   encoded-video packet ordering evidence, sorted by packet PTS. Resolve and
+   hand off aligned mask frames on Alpha Recorder's alignment worker rather
+   than inside OBS callbacks.
 6. Pause capture on recording pause. Do not pause on
    `OBS_FRONTEND_EVENT_RECORDING_STOPPING`; keep capturing until
    `OBS_FRONTEND_EVENT_RECORDING_STOPPED` so stop-edge frames can reconcile.
@@ -180,13 +190,18 @@ Completed:
 - GPU-side Program alpha extraction that does not require switching OBS's main
   Color Format from NV12/P010 to RGBA.
 - Raw-video cadence tracking so alpha output mirrors OBS duplicate/drop behavior
-  instead of assuming every rendered frame reaches the RGB recording.
+  instead of assuming every rendered frame reaches the RGB recording or applying
+  encoder-specific fixed frame offsets.
 - Focused unit regression coverage proving repeated raw-video output frames
   duplicate the previous alpha frame rather than consuming a newer pending
-  alpha frame.
+  alpha frame, packet composition timestamps skip unadmitted startup cadence,
+  texture-encoder packets resolve through the observed successor cadence frame,
+  and startup duplicates keep their raw content-origin timestamp.
 - Live alpha mask movie creation next to the OBS recording.
 - Bounded asynchronous mask movie encoding so slow fallback encoders abort the
   alpha output instead of blocking OBS recording.
+- Alignment resolution and mask-writer handoff run outside OBS callbacks, and
+  the live path queues captured alpha buffers without a second full-frame copy.
 - Alpha mask movie finalization on stop and split rotation.
 - File split handling through OBS `file_changed`.
 - obs-websocket vendor API for test automation:

@@ -23,7 +23,14 @@ encoder cannot keep up, Alpha Recorder aborts the mask movie output instead of
 blocking or slowing the main OBS recording. OBS's normal NV12/P010 hardware
 encoder path does not need to be changed to RGBA for alpha capture. Alpha
 Recorder tracks OBS's final raw-video output cadence so repeated/dropped RGB
-output frames are mirrored in the alpha mask movie.
+output frames are mirrored in the alpha mask movie. Encoded packet composition
+timestamps identify the first raw-video cadence frame actually admitted into
+the RGB recording, without encoder-specific fixed startup offsets. Texture
+encoders use the next observed raw-video cadence frame after the packet CTS so
+the alpha movie follows the rendered texture that OBS actually queued. OBS
+callbacks only enqueue cadence and packet-ordering evidence; Alpha Recorder
+resolves aligned mask frames on its own worker and hands captured buffers to the
+mask writer without a second full-frame copy.
 
 Scenario files live only under `tests/e2e/scenarios`. They are inputs for the
 deterministic E2E harness, not part of the shipping plugin path.
@@ -203,10 +210,13 @@ Implemented in the core library and live OBS workflow:
 - GPU-side Program alpha extraction that keeps OBS's normal recording color
   format independent of Alpha Recorder
 - raw-video cadence tracking that mirrors OBS duplicate/drop behavior in the
-  alpha mask movie
+  alpha mask movie without encoder-specific fixed frame offsets
+- off-callback alignment resolution and no-copy live mask-frame handoff into
+  the bounded writer queue
 - focused unit regression coverage for repeated raw-video output frames,
   proving the alpha mask duplicates the previous frame instead of consuming a
-  newer pending frame
+  newer pending frame, plus runtime packet-CTS admission and texture-encoder
+  successor-cadence coverage for startup alignment
 - split recording handling through OBS `file_changed`
 - deterministic E2E scenarios that validate RGB raw artifacts, alpha mask
   artifacts, and split-rotation behavior through the OBS module boundary
