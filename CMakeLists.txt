@@ -453,37 +453,114 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_ENABL
 endif()
 
 if(_alpha_recorder_build_full_targets)
-    add_custom_target(alpha_recorder_run_obs_app_e2e
-        COMMAND ${CMAKE_COMMAND}
-            "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-            "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-            "-DSTAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage"
-            "-DOBS_ROOT=${OBS_ROOT}"
-            "-DCONFIGURATION=$<CONFIG>"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
-        VERBATIM
+    function(alpha_recorder_add_obs_app_e2e_target target_name stage_suffix)
+        set(options)
+        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS)
+        set(multi_value_args)
+        cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
+
+        if(NOT ARG_FINALIZATION_FORMAT)
+            set(ARG_FINALIZATION_FORMAT "mask_png_mov")
+        endif()
+        if(NOT ARG_RGB_ENCODER)
+            set(ARG_RGB_ENCODER "software")
+        endif()
+        if(NOT ARG_WIDTH)
+            set(ARG_WIDTH "1920")
+        endif()
+        if(NOT ARG_HEIGHT)
+            set(ARG_HEIGHT "1080")
+        endif()
+        if(NOT ARG_FPS)
+            set(ARG_FPS "60")
+        endif()
+        if(NOT ARG_RECORD_SECONDS)
+            set(ARG_RECORD_SECONDS "5")
+        endif()
+
+        add_custom_target(${target_name}
+            COMMAND ${CMAKE_COMMAND}
+                "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+                "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+                "-DSTAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage-${stage_suffix}"
+                "-DOBS_ROOT=${OBS_ROOT}"
+                "-DCONFIGURATION=$<CONFIG>"
+                "-DFINALIZATION_FORMAT=${ARG_FINALIZATION_FORMAT}"
+                "-DRGB_ENCODER=${ARG_RGB_ENCODER}"
+                "-DWIDTH=${ARG_WIDTH}"
+                "-DHEIGHT=${ARG_HEIGHT}"
+                "-DFPS=${ARG_FPS}"
+                "-DRECORD_SECONDS=${ARG_RECORD_SECONDS}"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
+            VERBATIM
+        )
+    endfunction()
+
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e default
+        FINALIZATION_FORMAT mask_png_mov
+        RGB_ENCODER software
     )
-    add_custom_target(alpha_recorder_run_obs_app_e2e_hevc_nvenc
-        COMMAND ${CMAKE_COMMAND}
-            "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-            "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-            "-DSTAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage-hevc-nvenc"
-            "-DOBS_ROOT=${OBS_ROOT}"
-            "-DCONFIGURATION=$<CONFIG>"
-            "-DFINALIZATION_FORMAT=mask_hevc_nvenc"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
-        VERBATIM
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_hevc_nvenc hevc-nvenc
+        FINALIZATION_FORMAT mask_hevc_nvenc
+        RGB_ENCODER software
     )
-    add_custom_target(alpha_recorder_run_obs_app_e2e_hevc_amf
-        COMMAND ${CMAKE_COMMAND}
-            "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-            "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-            "-DSTAGE_DIR=${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/obs-app-stage-hevc-amf"
-            "-DOBS_ROOT=${OBS_ROOT}"
-            "-DCONFIGURATION=$<CONFIG>"
-            "-DFINALIZATION_FORMAT=mask_hevc_amf"
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
-        VERBATIM
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_hevc_amf hevc-amf
+        FINALIZATION_FORMAT mask_hevc_amf
+        RGB_ENCODER software
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_png_mov rgb-hevc-alpha-png-mov
+        FINALIZATION_FORMAT mask_png_mov
+        RGB_ENCODER hardware_hevc
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_hevc_nvenc rgb-hevc-alpha-hevc-nvenc
+        FINALIZATION_FORMAT mask_hevc_nvenc
+        RGB_ENCODER hardware_hevc
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_hevc_amf rgb-hevc-alpha-hevc-amf
+        FINALIZATION_FORMAT mask_hevc_amf
+        RGB_ENCODER hardware_hevc
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov 4k60-rgb-sw-alpha-png-mov
+        FINALIZATION_FORMAT mask_png_mov
+        RGB_ENCODER software
+        WIDTH 3840
+        HEIGHT 2160
+        FPS 60
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc 4k60-rgb-sw-alpha-hevc-nvenc
+        FINALIZATION_FORMAT mask_hevc_nvenc
+        RGB_ENCODER software
+        WIDTH 3840
+        HEIGHT 2160
+        FPS 60
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_amf 4k60-rgb-sw-alpha-hevc-amf
+        FINALIZATION_FORMAT mask_hevc_amf
+        RGB_ENCODER software
+        WIDTH 3840
+        HEIGHT 2160
+        FPS 60
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_png_mov 4k60-rgb-hw-hevc-alpha-png-mov
+        FINALIZATION_FORMAT mask_png_mov
+        RGB_ENCODER hardware_hevc
+        WIDTH 3840
+        HEIGHT 2160
+        FPS 60
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_hevc_nvenc 4k60-rgb-hw-hevc-alpha-hevc-nvenc
+        FINALIZATION_FORMAT mask_hevc_nvenc
+        RGB_ENCODER hardware_hevc
+        WIDTH 3840
+        HEIGHT 2160
+        FPS 60
+    )
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_hevc_amf 4k60-rgb-hw-hevc-alpha-hevc-amf
+        FINALIZATION_FORMAT mask_hevc_amf
+        RGB_ENCODER hardware_hevc
+        WIDTH 3840
+        HEIGHT 2160
+        FPS 60
     )
 endif()
 

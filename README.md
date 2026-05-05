@@ -140,6 +140,18 @@ and exported alpha mask movie.
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```
 
+Additional OBS app E2E matrix targets expose decoded sync issues across RGB
+encoder profile, alpha finalization format, and 4K/60 load:
+
+```sh
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_hw_hevc_alpha_hevc_nvenc
+```
+
 On macOS:
 
 ```sh
@@ -186,6 +198,8 @@ Implemented in the core library and live OBS workflow:
 - cross-platform OBS app E2E harness that verifies RGB and alpha mask movie
   outputs, including exact frame-code alignment plus frame-by-frame sync between
   a moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths
+- named OBS app E2E matrix targets for software RGB, hardware HEVC RGB, and
+  4K/60 variants with PNG MOV and HEVC alpha outputs
 
 The test-only scenario path remains confined to the E2E harness; the shipping
 plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder

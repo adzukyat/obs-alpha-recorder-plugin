@@ -13,6 +13,7 @@ set(RECORD_SECONDS 5 CACHE STRING "Recording duration")
 set(WIDTH 1920 CACHE STRING "Canvas width")
 set(HEIGHT 1080 CACHE STRING "Canvas height")
 set(FPS 60 CACHE STRING "Recording FPS")
+set(RGB_ENCODER "software" CACHE STRING "RGB recording encoder profile: software or hardware_hevc")
 set(FINALIZATION_FORMAT "mask_png_mov" CACHE STRING "Alpha Recorder finalization format")
 set(SKIP_BUILD OFF CACHE BOOL "Skip plugin build before OBS app E2E")
 set(SKIP_STAGE OFF CACHE BOOL "Skip staging before OBS app E2E")
@@ -78,6 +79,7 @@ set(args
     "--width" "${WIDTH}"
     "--height" "${HEIGHT}"
     "--fps" "${FPS}"
+    "--rgb-encoder" "${RGB_ENCODER}"
     "--finalization-format" "${FINALIZATION_FORMAT}"
 )
 if(KEEP_OBS_OPEN)

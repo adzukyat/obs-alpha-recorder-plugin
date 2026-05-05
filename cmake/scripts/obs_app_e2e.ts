@@ -16,6 +16,7 @@ type Args = {
   width: number;
   height: number;
   fps: number;
+  rgbEncoder: string;
   finalizationFormat: string;
   keepObsOpen: boolean;
 };
@@ -30,6 +31,7 @@ function parseArgs(argv: string[]): Args {
     width: 1920,
     height: 1080,
     fps: 60,
+    rgbEncoder: "software",
     finalizationFormat: "mask_png_mov",
     keepObsOpen: false,
   };
@@ -74,6 +76,10 @@ function parseArgs(argv: string[]): Args {
         args.fps = Number(value);
         ++index;
         break;
+      case "--rgb-encoder":
+        args.rgbEncoder = value;
+        ++index;
+        break;
       case "--finalization-format":
         args.finalizationFormat = value;
         ++index;
@@ -91,6 +97,20 @@ function parseArgs(argv: string[]): Args {
   }
 
   return args;
+}
+
+function simpleRgbEncoder(encoder: string): string {
+  switch (encoder) {
+    case "software":
+      return platform === "darwin" ? "apple_h264" : "x264";
+    case "hardware_hevc":
+      if (platform === "darwin") {
+        return "apple_hevc";
+      }
+      return "nvenc_hevc";
+    default:
+      throw new Error(`Unsupported RGB encoder profile: ${encoder}`);
+  }
 }
 
 function normalizedFinalizationFormat(format: string): string {
@@ -741,7 +761,7 @@ async function main(): Promise<void> {
   const homeRoot = join(artifactRoot, "home");
   const portableConfig =
     platform === "darwin" ? join(homeRoot, "Library", "Application Support", "obs-studio") : join(contentRoot, "config", "obs-studio");
-  const simpleVideoEncoder = platform === "darwin" ? "apple_h264" : "x264";
+  const simpleVideoEncoder = simpleRgbEncoder(args.rgbEncoder);
   if (platform === "darwin") {
     mkdirSync(join(homeRoot, "Library", "Logs", "DiagnosticReports"), { recursive: true });
   }
@@ -1024,6 +1044,11 @@ finalization_format=${args.finalizationFormat}
     )) as any;
     await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", rgbPath, "-frames:v", "1", "-f", "null", "-"], 30);
     await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", alphaPath, "-frames:v", "1", "-f", "null", "-"], 180);
+
+    const rgbStream = rgbProbe.streams?.[0] ?? {};
+    if (args.rgbEncoder === "hardware_hevc" && rgbStream.codec_name !== "hevc") {
+      throw new Error(`RGB recording probe did not report HEVC for hardware_hevc profile: ${JSON.stringify(rgbProbe)}`);
+    }
 
     const alphaStream = alphaProbe.streams?.[0] ?? {};
     const alphaPixFmt = String(alphaStream.pix_fmt ?? "");
