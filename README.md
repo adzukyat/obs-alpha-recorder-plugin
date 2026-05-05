@@ -185,7 +185,7 @@ Implemented in the core library and live OBS workflow:
   artifacts, and split-rotation behavior through the OBS module boundary
 - cross-platform OBS app E2E harness that verifies RGB and alpha mask movie
   outputs, including exact frame-code alignment plus frame-by-frame sync between
-  a moving colored object and its grayscale alpha mask on the PNG MOV path
+  a moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths
 
 The test-only scenario path remains confined to the E2E harness; the shipping
 plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder

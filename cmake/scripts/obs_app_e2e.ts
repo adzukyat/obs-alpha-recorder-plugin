@@ -1038,9 +1038,7 @@ finalization_format=${args.finalizationFormat}
       throw new Error(`Alpha movie probe did not report PNG MOV: ${JSON.stringify(alphaProbe)}`);
     }
 
-    if (expectedFinalizationFormat === "mask_png_mov") {
-      verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, args.width, args.height, args.fps);
-    }
+    verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, args.width, args.height, args.fps);
 
     console.log(
       JSON.stringify(

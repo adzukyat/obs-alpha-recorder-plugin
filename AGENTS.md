@@ -264,12 +264,12 @@ The CMake target:
 - Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
 - Adds a test-only moving colored object over a transparent background with an
-  opaque binary frame-code strip, then decodes RGB and PNG MOV alpha frames and
-  verifies zero frame-code offset plus moving mask bounds frame-by-frame,
-  allowing only small terminal/count mismatches.
+  opaque binary frame-code strip, then decodes RGB and alpha mask frames for
+  PNG MOV and HEVC targets and verifies zero frame-code offset plus moving mask
+  bounds frame-by-frame, allowing only small terminal/count mismatches.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
-- For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports
+- For HEVC targets, also verifies the alpha output is `.mp4`, `ffprobe` reports
   `hevc`, and the output does not use an alpha pixel format.
 
 CTest can register this slow app-level test when configured with
