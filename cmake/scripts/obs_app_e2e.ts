@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from "bun";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { platform } from "node:process";
 
@@ -20,6 +20,11 @@ type Args = {
   rgbEncoder: string;
   finalizationFormat: string;
   keepObsOpen: boolean;
+};
+
+type OverloadMonitor = {
+  seen: boolean;
+  firstLine: string;
 };
 
 function parseArgs(argv: string[]): Args {
@@ -176,6 +181,123 @@ function b64Sha256(text: string): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+async function delayUnlessOverloaded(ms: number, overload: OverloadMonitor): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (overload.seen) {
+      return;
+    }
+    await delay(Math.min(250, deadline - Date.now()));
+  }
+}
+
+async function relayProcessStream(
+  stream: ReadableStream<Uint8Array> | null,
+  output: NodeJS.WriteStream,
+  overload: OverloadMonitor,
+): Promise<void> {
+  if (stream == null) {
+    return;
+  }
+
+  const decoder = new TextDecoder();
+  const reader = stream.getReader();
+  let bufferedLine = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    const text = decoder.decode(value, { stream: true });
+    output.write(text);
+
+    bufferedLine += text;
+    const lines = bufferedLine.split(/\r?\n/);
+    bufferedLine = lines.pop() ?? "";
+    for (const line of lines) {
+      noteOverloadLine(line, overload);
+    }
+  }
+
+  const tail = bufferedLine + decoder.decode();
+  noteOverloadLine(tail, overload);
+}
+
+function noteOverloadLine(line: string, overload: OverloadMonitor): void {
+  const renderLagMatch = line.match(/Number of lagged frames due to rendering lag\/stalls: \d+ \(([\d.]+)%\)/);
+  const severeRenderLag = renderLagMatch != null && Number(renderLagMatch[1]) >= 5;
+  if (
+    line.includes("Encoding overloaded!") ||
+    line.includes("number of skipped frames due to encoding lag") ||
+    severeRenderLag
+  ) {
+    overload.seen = true;
+    if (!overload.firstLine) {
+      overload.firstLine = line.trim();
+    }
+  }
+}
+
+async function stopRecordingAfterOverload(socket: ObsWebSocket, overload: OverloadMonitor): Promise<void> {
+  if (!overload.seen) {
+    return;
+  }
+
+  try {
+    await socket.request("StopRecord");
+    await waitForRecordState(socket, false);
+  } catch (error) {
+    console.warn(`Failed to stop recording after OBS reported encoding overload: ${String(error)}`);
+  }
+}
+
+function scanObsLogsForOverload(portableConfig: string, overload: OverloadMonitor): void {
+  if (overload.seen) {
+    return;
+  }
+
+  const logsDir = join(portableConfig, "logs");
+  if (!existsSync(logsDir)) {
+    return;
+  }
+
+  const logFiles = readdirSync(logsDir)
+    .filter((name) => name.endsWith(".txt") || name.endsWith(".log"))
+    .map((name) => join(logsDir, name))
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+
+  for (const logFile of logFiles) {
+    const text = readFileSync(logFile, "utf8");
+    const line = text
+      .split(/\r?\n/)
+      .find(
+        (candidate) =>
+          candidate.includes("Encoding overloaded!") ||
+          candidate.includes("number of skipped frames due to encoding lag") ||
+          (candidate.match(/Number of lagged frames due to rendering lag\/stalls: \d+ \(([\d.]+)%\)/) != null &&
+            Number(candidate.match(/Number of lagged frames due to rendering lag\/stalls: \d+ \(([\d.]+)%\)/)?.[1]) >= 5),
+      );
+    if (line != null) {
+      overload.seen = true;
+      overload.firstLine = line.trim();
+      return;
+    }
+  }
+}
+
+function throwIfOverloaded(overload: OverloadMonitor, artifactRoot: string, width: number, height: number, fps: number): void {
+  if (!overload.seen) {
+    return;
+  }
+  throw new Error(
+    `OBS reported overload, skipped frames, or severe render lag during OBS app E2E at ${width}x${height}@${fps}. ` +
+      `Aborting because decoded sync verification would be ambiguous. ` +
+      `First overload log line: ${overload.firstLine || "Encoding overloaded!"}. ` +
+      `Artifacts: ${artifactRoot}`,
+  );
 }
 
 function resolveObsExecutable(stageDir: string): { exe: string; cwd: string; contentRoot: string; runtimeBin: string } {
@@ -1094,9 +1216,12 @@ finalization_format=${args.finalizationFormat}
     cmd: obsCommand,
     cwd: obsCwd,
     env,
-    stdout: "inherit",
-    stderr: "inherit",
+    stdout: "pipe",
+    stderr: "pipe",
   });
+  const overload: OverloadMonitor = { seen: false, firstLine: "" };
+  const stdoutRelay = relayProcessStream(obs.stdout, process.stdout, overload);
+  const stderrRelay = relayProcessStream(obs.stderr, process.stderr, overload);
 
   let socket: ObsWebSocket | undefined = undefined;
   try {
@@ -1143,9 +1268,13 @@ finalization_format=${args.finalizationFormat}
       console.log(`Running OBS app E2E recording for ${durationSeconds}s`);
       await socket.request("StartRecord");
       await waitForRecordState(socket, true);
-      await delay(durationSeconds * 1000);
+      await delayUnlessOverloaded(durationSeconds * 1000, overload);
+      await stopRecordingAfterOverload(socket, overload);
+      throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps);
       const stopResponse = await socket.request("StopRecord");
       await waitForRecordState(socket, false);
+      scanObsLogsForOverload(portableConfig, overload);
+      throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps);
       const outputs = await verifyRecordingOutputs(
         stageBin,
         args.repoRoot,
@@ -1181,6 +1310,7 @@ finalization_format=${args.finalizationFormat}
     socket?.close();
     if (!args.keepObsOpen) {
       obs.kill();
+      await Promise.allSettled([stdoutRelay, stderrRelay]);
     }
   }
 }

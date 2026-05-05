@@ -202,21 +202,18 @@ Completed:
   - `cmake/scripts/obs_app_e2e.ts`
 - Deterministic split-rotation E2E scenario registered in CTest:
   - `tests/e2e/scenarios/split_rotation.scenario`
-- HEVC OBS app E2E targets:
-  - `alpha_recorder_run_obs_app_e2e_hevc_nvenc`
-  - `alpha_recorder_run_obs_app_e2e_hevc_amf`
-- OBS app E2E matrix targets for reproducing decoded sync issues:
-  - `alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_png_mov`
-  - `alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_hevc_nvenc`
-  - `alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_png_mov`
-  - `alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_hevc_amf`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_amf`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_png_mov`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_hevc_nvenc`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_png_mov`
-  - `alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_hevc_amf`
+- OBS app E2E targets for reproducing decoded sync issues:
+  - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov`
+  - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc`
+  - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf`
+  - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov`
+  - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc`
+  - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov`
+  - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_hevc_amf`
+  - `alpha_recorder_run_obs_app_e2e_wqhd60_rgb_nvenc_hevc_alpha_*`
+  - `alpha_recorder_run_obs_app_e2e_wqhd60_rgb_amf_hevc_alpha_*`
+  - `alpha_recorder_run_obs_app_e2e_4k30_rgb_nvenc_hevc_alpha_*`
+  - `alpha_recorder_run_obs_app_e2e_4k30_rgb_amf_hevc_alpha_*`
 - Optional CTest registration behind:
   - `ALPHA_RECORDER_ENABLE_OBS_APP_E2E`
 - OBS staging updates that copy the full OBS plugin set before overlaying Alpha
@@ -250,24 +247,19 @@ cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_ob
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```
 
-HEVC OBS app E2E:
-
-```sh
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_hevc_nvenc
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_hevc_amf
-```
-
 Sync-bug exposure matrix:
 
 ```sh
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_hevc_nvenc
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_hevc_amf
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_hevc_amf
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_wqhd60_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k30_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k30_rgb_amf_hevc_alpha_png_mov
 ```
 
 The CMake target:
@@ -292,9 +284,19 @@ The CMake target:
 - Can run the RGB recording profile with software encoding, explicit NVENC
   HEVC, or explicit AMF HEVC. Hardware RGB matrix targets pair with PNG MOV or
   the same vendor's HEVC alpha output.
+- Load matrix targets are `fhd60` (`1920x1080@60`), `wqhd60`
+  (`2560x1440@60`), and `4k30` (`3840x2160@30`). `fhd60_rgb_sw_alpha_png_mov` is
+  retained as the hardware-independent load baseline; software RGB is not
+  registered for WQHD/60 or 4K/30 load targets because those turn into
+  machine-pressure checks.
 - Cross-vendor hardware pairs are intentionally not registered in the standard
   matrix: RGB NVENC plus alpha AMF, or RGB AMF plus alpha NVENC, require a test
   machine with both NVIDIA and AMD hardware encoders.
+- macOS currently registers only software RGB + PNG MOV alpha targets;
+  NVIDIA/AMD-specific targets are not exposed there.
+- If OBS logs `Encoding overloaded!`, skipped frames due to encoding lag, or
+  severe render lag, the app E2E stops recording and fails immediately with an
+  overload-specific error instead of continuing to decoded sync verification.
 - Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
 - Adds a test-only moving colored object over a transparent background with an

@@ -500,83 +500,74 @@ if(_alpha_recorder_build_full_targets)
         )
     endfunction()
 
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e default
+    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov fhd60-rgb-sw-alpha-png-mov
         FINALIZATION_FORMAT mask_png_mov
         RGB_ENCODER software
     )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_hevc_nvenc hevc-nvenc
-        FINALIZATION_FORMAT mask_hevc_nvenc
-        RGB_ENCODER software
+    add_custom_target(alpha_recorder_run_obs_app_e2e
+        DEPENDS alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
     )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_hevc_amf hevc-amf
-        FINALIZATION_FORMAT mask_hevc_amf
-        RGB_ENCODER software
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_png_mov rgb-nvenc-hevc-alpha-png-mov
-        FINALIZATION_FORMAT mask_png_mov
-        RGB_ENCODER nvenc_hevc
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_hevc_nvenc rgb-nvenc-hevc-alpha-hevc-nvenc
-        FINALIZATION_FORMAT mask_hevc_nvenc
-        RGB_ENCODER nvenc_hevc
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_png_mov rgb-amf-hevc-alpha-png-mov
-        FINALIZATION_FORMAT mask_png_mov
-        RGB_ENCODER amd_hevc
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_hevc_amf rgb-amf-hevc-alpha-hevc-amf
-        FINALIZATION_FORMAT mask_hevc_amf
-        RGB_ENCODER amd_hevc
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov 4k60-rgb-sw-alpha-png-mov
-        FINALIZATION_FORMAT mask_png_mov
-        RGB_ENCODER software
-        WIDTH 3840
-        HEIGHT 2160
-        FPS 60
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc 4k60-rgb-sw-alpha-hevc-nvenc
-        FINALIZATION_FORMAT mask_hevc_nvenc
-        RGB_ENCODER software
-        WIDTH 3840
-        HEIGHT 2160
-        FPS 60
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_amf 4k60-rgb-sw-alpha-hevc-amf
-        FINALIZATION_FORMAT mask_hevc_amf
-        RGB_ENCODER software
-        WIDTH 3840
-        HEIGHT 2160
-        FPS 60
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_png_mov 4k60-rgb-nvenc-hevc-alpha-png-mov
-        FINALIZATION_FORMAT mask_png_mov
-        RGB_ENCODER nvenc_hevc
-        WIDTH 3840
-        HEIGHT 2160
-        FPS 60
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_hevc_nvenc 4k60-rgb-nvenc-hevc-alpha-hevc-nvenc
-        FINALIZATION_FORMAT mask_hevc_nvenc
-        RGB_ENCODER nvenc_hevc
-        WIDTH 3840
-        HEIGHT 2160
-        FPS 60
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_png_mov 4k60-rgb-amf-hevc-alpha-png-mov
-        FINALIZATION_FORMAT mask_png_mov
-        RGB_ENCODER amd_hevc
-        WIDTH 3840
-        HEIGHT 2160
-        FPS 60
-    )
-    alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_hevc_amf 4k60-rgb-amf-hevc-alpha-hevc-amf
-        FINALIZATION_FORMAT mask_hevc_amf
-        RGB_ENCODER amd_hevc
-        WIDTH 3840
-        HEIGHT 2160
-        FPS 60
-    )
+    if(NOT APPLE)
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc fhd60-rgb-sw-alpha-hevc-nvenc
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf fhd60-rgb-sw-alpha-hevc-amf
+            FINALIZATION_FORMAT mask_hevc_amf
+            RGB_ENCODER software
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov fhd60-rgb-nvenc-hevc-alpha-png-mov
+            FINALIZATION_FORMAT mask_png_mov
+            RGB_ENCODER nvenc_hevc
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc fhd60-rgb-nvenc-hevc-alpha-hevc-nvenc
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov fhd60-rgb-amf-hevc-alpha-png-mov
+            FINALIZATION_FORMAT mask_png_mov
+            RGB_ENCODER amd_hevc
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_hevc_amf fhd60-rgb-amf-hevc-alpha-hevc-amf
+            FINALIZATION_FORMAT mask_hevc_amf
+            RGB_ENCODER amd_hevc
+        )
+    endif()
+    function(alpha_recorder_add_obs_app_e2e_hardware_load_matrix load_name width height fps)
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_png_mov ${load_name}-rgb-nvenc-hevc-alpha-png-mov
+            FINALIZATION_FORMAT mask_png_mov
+            RGB_ENCODER nvenc_hevc
+            WIDTH ${width}
+            HEIGHT ${height}
+            FPS ${fps}
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_hevc_nvenc ${load_name}-rgb-nvenc-hevc-alpha-hevc-nvenc
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            WIDTH ${width}
+            HEIGHT ${height}
+            FPS ${fps}
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_png_mov ${load_name}-rgb-amf-hevc-alpha-png-mov
+            FINALIZATION_FORMAT mask_png_mov
+            RGB_ENCODER amd_hevc
+            WIDTH ${width}
+            HEIGHT ${height}
+            FPS ${fps}
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_hevc_amf ${load_name}-rgb-amf-hevc-alpha-hevc-amf
+            FINALIZATION_FORMAT mask_hevc_amf
+            RGB_ENCODER amd_hevc
+            WIDTH ${width}
+            HEIGHT ${height}
+            FPS ${fps}
+        )
+    endfunction()
+
+    if(NOT APPLE)
+        alpha_recorder_add_obs_app_e2e_hardware_load_matrix(wqhd60 2560 1440 60)
+        alpha_recorder_add_obs_app_e2e_hardware_load_matrix(4k30 3840 2160 30)
+    endif()
 endif()
 
 install(TARGETS alpha_recorder_e2e_scenario ARCHIVE DESTINATION lib)

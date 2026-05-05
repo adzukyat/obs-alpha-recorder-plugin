@@ -144,22 +144,27 @@ verification passes, the same OBS launch repeats longer recordings up to
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```
 
-Additional OBS app E2E matrix targets expose decoded sync issues across RGB
-encoder profile, alpha finalization format, and 4K/60 load. The RGB HEVC
-targets are explicit: `rgb_nvenc_hevc` uses OBS SimpleOutput `nvenc_hevc`, and
-`rgb_amf_hevc` uses OBS SimpleOutput `amd_hevc`. Cross-vendor hardware pairs
-such as RGB NVENC with alpha AMF are intentionally omitted because they require
-both NVIDIA and AMD encoders on the same test machine.
+OBS app E2E targets are named by the actual RGB encoder profile and alpha
+format. Load variants use `fhd60` (`1920x1080@60`), `wqhd60`
+(`2560x1440@60`), and `4k30` (`3840x2160@30`). Software RGB encoding is omitted
+only from WQHD/60 and 4K/30 load variants because those turn into machine-pressure
+checks, but `fhd60_rgb_sw_alpha_png_mov` is retained as the hardware-independent
+load baseline. Cross-vendor hardware pairs such as RGB NVENC with alpha AMF are
+also omitted because they require both NVIDIA and AMD encoders on the same test
+machine. macOS currently registers only software RGB + PNG MOV alpha targets;
+NVIDIA/AMD-specific targets are not exposed there.
 
 ```sh
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_nvenc_hevc_alpha_hevc_nvenc
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_rgb_amf_hevc_alpha_hevc_amf
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_sw_alpha_hevc_nvenc
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_nvenc_hevc_alpha_png_mov
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k60_rgb_amf_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_hevc_amf
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_wqhd60_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k30_rgb_nvenc_hevc_alpha_png_mov
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_4k30_rgb_amf_hevc_alpha_png_mov
 ```
 
 On macOS:
@@ -210,8 +215,11 @@ Implemented in the core library and live OBS workflow:
   moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths,
   with only small start/terminal/count mismatches tolerated
 - named OBS app E2E matrix targets for software RGB, explicit NVENC HEVC RGB,
-  explicit AMF HEVC RGB, and 4K/60 variants; hardware RGB pairs use PNG MOV or
-  the same vendor's HEVC alpha output
+  explicit AMF HEVC RGB, and hardware RGB FHD/60, WQHD/60, and 4K/30 variants;
+  software RGB is omitted from load variants
+- OBS app E2E aborts with a clear overload error if OBS logs
+  `Encoding overloaded!`, skipped frames due to encoding lag, or severe render
+  lag, so machine pressure is not reported as a sync failure
 
 The test-only scenario path remains confined to the E2E harness; the shipping
 plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder
