@@ -27,6 +27,10 @@ type OverloadMonitor = {
   firstLine: string;
 };
 
+const severeSkippedFramePercent = 5;
+const severeRenderLagPercent = 20;
+const severeSkippedFrameCount = 30;
+
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     repoRoot: "",
@@ -227,11 +231,11 @@ async function relayProcessStream(
 }
 
 function noteOverloadLine(line: string, overload: OverloadMonitor): void {
-  const renderLagMatch = line.match(/Number of lagged frames due to rendering lag\/stalls: \d+ \(([\d.]+)%\)/);
-  const severeRenderLag = renderLagMatch != null && Number(renderLagMatch[1]) >= 5;
+  const severeSkippedFrames = isSevereSkippedFrameLine(line);
+  const severeRenderLag = isSevereRenderLagLine(line);
   if (
     line.includes("Encoding overloaded!") ||
-    line.includes("number of skipped frames due to encoding lag") ||
+    severeSkippedFrames ||
     severeRenderLag
   ) {
     overload.seen = true;
@@ -239,6 +243,27 @@ function noteOverloadLine(line: string, overload: OverloadMonitor): void {
       overload.firstLine = line.trim();
     }
   }
+}
+
+function isSevereSkippedFrameLine(line: string): boolean {
+  const skippedFrameMatch = line.match(
+    /number of skipped frames due to encoding lag:\s*(\d+)(?:\/\d+)?(?:\s*\(([\d.]+)%\))?/i,
+  );
+  if (skippedFrameMatch == null) {
+    return false;
+  }
+
+  const skippedFrames = Number(skippedFrameMatch[1]);
+  if (skippedFrameMatch[2] == null) {
+    return skippedFrames >= severeSkippedFrameCount;
+  }
+
+  return Number(skippedFrameMatch[2]) >= severeSkippedFramePercent;
+}
+
+function isSevereRenderLagLine(line: string): boolean {
+  const renderLagMatch = line.match(/Number of lagged frames due to rendering lag\/stalls: \d+ \(([\d.]+)%\)/i);
+  return renderLagMatch != null && Number(renderLagMatch[1]) >= severeRenderLagPercent;
 }
 
 async function stopRecordingAfterOverload(socket: ObsWebSocket, overload: OverloadMonitor): Promise<void> {
@@ -276,9 +301,8 @@ function scanObsLogsForOverload(portableConfig: string, overload: OverloadMonito
       .find(
         (candidate) =>
           candidate.includes("Encoding overloaded!") ||
-          candidate.includes("number of skipped frames due to encoding lag") ||
-          (candidate.match(/Number of lagged frames due to rendering lag\/stalls: \d+ \(([\d.]+)%\)/) != null &&
-            Number(candidate.match(/Number of lagged frames due to rendering lag\/stalls: \d+ \(([\d.]+)%\)/)?.[1]) >= 5),
+          isSevereSkippedFrameLine(candidate) ||
+          isSevereRenderLagLine(candidate),
       );
     if (line != null) {
       overload.seen = true;

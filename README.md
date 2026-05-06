@@ -236,8 +236,9 @@ Implemented in the core library and live OBS workflow:
   when the matching encoder opens on the target machine;
   software RGB is omitted from load variants
 - OBS app E2E aborts with a clear overload error if OBS logs
-  `Encoding overloaded!`, skipped frames due to encoding lag, or severe render
-  lag, so machine pressure is not reported as a sync failure
+  `Encoding overloaded!`, severe skipped frames due to encoding lag, or severe
+  render lag, so machine pressure is not reported as a sync failure while tiny
+  skipped-frame summaries do not stop an otherwise clean run
 
 The test-only scenario path remains confined to the E2E harness; the shipping
 plugin uses OBS Start Recording / Stop Recording plus Tools -> Alpha Recorder

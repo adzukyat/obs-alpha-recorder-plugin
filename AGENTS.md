@@ -319,9 +319,11 @@ The CMake target:
   machine with both NVIDIA and AMD hardware encoders.
 - NVIDIA/AMD-specific targets may appear on any platform where the matching
   encoder opens through the runtime probe, and are skipped wherever it does not.
-- If OBS logs `Encoding overloaded!`, skipped frames due to encoding lag, or
-  severe render lag, the app E2E stops recording and fails immediately with an
-  overload-specific error instead of continuing to decoded sync verification.
+- If OBS logs `Encoding overloaded!`, severe skipped frames due to encoding
+  lag, or severe render lag, the app E2E stops recording and fails immediately
+  with an overload-specific error instead of continuing to decoded sync
+  verification. Tiny skipped-frame summaries are not treated as overload by
+  themselves.
 - Waits for RGB recording and alpha mask movie outputs.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
 - Adds a test-only moving colored object over a transparent background with an
