@@ -453,6 +453,52 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_ENABL
 endif()
 
 if(_alpha_recorder_build_full_targets)
+    set(_alpha_recorder_ffmpeg_hints
+        "${alpha_recorder_obs_runtime_bin_dir}"
+        "${OBS_ROOT}/bin"
+        "${OBS_ROOT}/bin/64bit"
+        "${_alpha_recorder_obs_deps_root}/bin"
+    )
+    find_program(ALPHA_RECORDER_FFMPEG_EXECUTABLE ffmpeg HINTS ${_alpha_recorder_ffmpeg_hints})
+
+    function(alpha_recorder_probe_obs_app_e2e_hevc_encoder vendor encoder_name out_available out_reason)
+        if(NOT ALPHA_RECORDER_FFMPEG_EXECUTABLE)
+            set(${out_available} FALSE PARENT_SCOPE)
+            set(${out_reason} "ffmpeg was not found on PATH, so ${vendor} HEVC availability could not be probed" PARENT_SCOPE)
+            return()
+        endif()
+
+        execute_process(
+            COMMAND "${ALPHA_RECORDER_FFMPEG_EXECUTABLE}"
+                -nostdin -hide_banner -loglevel error -f lavfi -i color=c=black:s=1920x1080:r=60
+                -frames:v 1 -c:v "${encoder_name}" -f null -
+            RESULT_VARIABLE _alpha_recorder_probe_result
+            OUTPUT_VARIABLE _alpha_recorder_probe_output
+            ERROR_VARIABLE _alpha_recorder_probe_error
+            TIMEOUT 20
+        )
+
+        if(_alpha_recorder_probe_result EQUAL 0)
+            set(${out_available} TRUE PARENT_SCOPE)
+            set(${out_reason} "${vendor} HEVC encoder opened successfully via ${ALPHA_RECORDER_FFMPEG_EXECUTABLE}" PARENT_SCOPE)
+        else()
+            string(STRIP "${_alpha_recorder_probe_error}" _alpha_recorder_probe_error)
+            string(REPLACE "\n" " | " _alpha_recorder_probe_error "${_alpha_recorder_probe_error}")
+            string(REPLACE "\r" "" _alpha_recorder_probe_error "${_alpha_recorder_probe_error}")
+            if(_alpha_recorder_probe_error STREQUAL "")
+                set(_alpha_recorder_probe_error "ffmpeg exited with ${_alpha_recorder_probe_result}")
+            endif()
+            set(${out_available} FALSE PARENT_SCOPE)
+            set(${out_reason} "${vendor} HEVC encoder probe failed: ${_alpha_recorder_probe_error}" PARENT_SCOPE)
+        endif()
+    endfunction()
+
+    alpha_recorder_probe_obs_app_e2e_hevc_encoder("NVENC" "hevc_nvenc" _alpha_recorder_obs_app_e2e_has_nvenc _alpha_recorder_obs_app_e2e_nvenc_reason)
+    alpha_recorder_probe_obs_app_e2e_hevc_encoder("AMF" "hevc_amf" _alpha_recorder_obs_app_e2e_has_amf _alpha_recorder_obs_app_e2e_amf_reason)
+
+    set(_alpha_recorder_obs_app_e2e_registered_targets)
+    set(_alpha_recorder_obs_app_e2e_skipped_targets)
+
     function(alpha_recorder_add_obs_app_e2e_target target_name stage_suffix)
         set(options)
         set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS MAX_RECORD_SECONDS)
@@ -498,24 +544,39 @@ if(_alpha_recorder_build_full_targets)
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
             VERBATIM
         )
+        set(_alpha_recorder_obs_app_e2e_registered_targets ${_alpha_recorder_obs_app_e2e_registered_targets} ${target_name} PARENT_SCOPE)
+    endfunction()
+
+    function(alpha_recorder_skip_obs_app_e2e_target target_name reason)
+        add_custom_target(${target_name}
+            COMMAND ${CMAKE_COMMAND} -E echo "Alpha Recorder OBS app E2E target ${target_name} skipped: ${reason}"
+            VERBATIM
+        )
+        list(APPEND _alpha_recorder_obs_app_e2e_skipped_targets "${target_name}: ${reason}")
+        set(_alpha_recorder_obs_app_e2e_skipped_targets ${_alpha_recorder_obs_app_e2e_skipped_targets} PARENT_SCOPE)
     endfunction()
 
     alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov fhd60-rgb-sw-alpha-png-mov
         FINALIZATION_FORMAT mask_png_mov
         RGB_ENCODER software
     )
-    add_custom_target(alpha_recorder_run_obs_app_e2e
-        DEPENDS alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
-    )
-    if(NOT APPLE)
+    if(_alpha_recorder_obs_app_e2e_has_nvenc)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc fhd60-rgb-sw-alpha-hevc-nvenc
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER software
         )
+    else()
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+    endif()
+    if(_alpha_recorder_obs_app_e2e_has_amf)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf fhd60-rgb-sw-alpha-hevc-amf
             FINALIZATION_FORMAT mask_hevc_amf
             RGB_ENCODER software
         )
+    else()
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf "${_alpha_recorder_obs_app_e2e_amf_reason}")
+    endif()
+    if(_alpha_recorder_obs_app_e2e_has_nvenc)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov fhd60-rgb-nvenc-hevc-alpha-png-mov
             FINALIZATION_FORMAT mask_png_mov
             RGB_ENCODER nvenc_hevc
@@ -524,6 +585,11 @@ if(_alpha_recorder_build_full_targets)
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER nvenc_hevc
         )
+    else()
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+    endif()
+    if(_alpha_recorder_obs_app_e2e_has_amf)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov fhd60-rgb-amf-hevc-alpha-png-mov
             FINALIZATION_FORMAT mask_png_mov
             RGB_ENCODER amd_hevc
@@ -532,42 +598,73 @@ if(_alpha_recorder_build_full_targets)
             FINALIZATION_FORMAT mask_hevc_amf
             RGB_ENCODER amd_hevc
         )
+    else()
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_amf_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_hevc_amf "${_alpha_recorder_obs_app_e2e_amf_reason}")
     endif()
     function(alpha_recorder_add_obs_app_e2e_hardware_load_matrix load_name width height fps)
-        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_png_mov ${load_name}-rgb-nvenc-hevc-alpha-png-mov
-            FINALIZATION_FORMAT mask_png_mov
-            RGB_ENCODER nvenc_hevc
-            WIDTH ${width}
-            HEIGHT ${height}
-            FPS ${fps}
-        )
-        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_hevc_nvenc ${load_name}-rgb-nvenc-hevc-alpha-hevc-nvenc
-            FINALIZATION_FORMAT mask_hevc_nvenc
-            RGB_ENCODER nvenc_hevc
-            WIDTH ${width}
-            HEIGHT ${height}
-            FPS ${fps}
-        )
-        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_png_mov ${load_name}-rgb-amf-hevc-alpha-png-mov
-            FINALIZATION_FORMAT mask_png_mov
-            RGB_ENCODER amd_hevc
-            WIDTH ${width}
-            HEIGHT ${height}
-            FPS ${fps}
-        )
-        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_hevc_amf ${load_name}-rgb-amf-hevc-alpha-hevc-amf
-            FINALIZATION_FORMAT mask_hevc_amf
-            RGB_ENCODER amd_hevc
-            WIDTH ${width}
-            HEIGHT ${height}
-            FPS ${fps}
-        )
+        if(_alpha_recorder_obs_app_e2e_has_nvenc)
+            alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_png_mov ${load_name}-rgb-nvenc-hevc-alpha-png-mov
+                FINALIZATION_FORMAT mask_png_mov
+                RGB_ENCODER nvenc_hevc
+                WIDTH ${width}
+                HEIGHT ${height}
+                FPS ${fps}
+            )
+            alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_hevc_nvenc ${load_name}-rgb-nvenc-hevc-alpha-hevc-nvenc
+                FINALIZATION_FORMAT mask_hevc_nvenc
+                RGB_ENCODER nvenc_hevc
+                WIDTH ${width}
+                HEIGHT ${height}
+                FPS ${fps}
+            )
+        else()
+            alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+            alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+        endif()
+        if(_alpha_recorder_obs_app_e2e_has_amf)
+            alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_png_mov ${load_name}-rgb-amf-hevc-alpha-png-mov
+                FINALIZATION_FORMAT mask_png_mov
+                RGB_ENCODER amd_hevc
+                WIDTH ${width}
+                HEIGHT ${height}
+                FPS ${fps}
+            )
+            alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_hevc_amf ${load_name}-rgb-amf-hevc-alpha-hevc-amf
+                FINALIZATION_FORMAT mask_hevc_amf
+                RGB_ENCODER amd_hevc
+                WIDTH ${width}
+                HEIGHT ${height}
+                FPS ${fps}
+            )
+        else()
+            alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_amf_reason}")
+            alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_hevc_amf "${_alpha_recorder_obs_app_e2e_amf_reason}")
+        endif()
+        set(_alpha_recorder_obs_app_e2e_registered_targets ${_alpha_recorder_obs_app_e2e_registered_targets} PARENT_SCOPE)
+        set(_alpha_recorder_obs_app_e2e_skipped_targets ${_alpha_recorder_obs_app_e2e_skipped_targets} PARENT_SCOPE)
     endfunction()
 
-    if(NOT APPLE)
-        alpha_recorder_add_obs_app_e2e_hardware_load_matrix(wqhd60 2560 1440 60)
-        alpha_recorder_add_obs_app_e2e_hardware_load_matrix(4k30 3840 2160 30)
+    alpha_recorder_add_obs_app_e2e_hardware_load_matrix(wqhd60 2560 1440 60)
+    alpha_recorder_add_obs_app_e2e_hardware_load_matrix(4k30 3840 2160 30)
+
+    string(REPLACE ";" "\n  " _alpha_recorder_obs_app_e2e_registered_summary "${_alpha_recorder_obs_app_e2e_registered_targets}")
+    string(REPLACE ";" "\n  " _alpha_recorder_obs_app_e2e_skipped_summary "${_alpha_recorder_obs_app_e2e_skipped_targets}")
+    if(_alpha_recorder_obs_app_e2e_registered_summary STREQUAL "")
+        set(_alpha_recorder_obs_app_e2e_registered_summary "(none)")
     endif()
+    if(_alpha_recorder_obs_app_e2e_skipped_summary STREQUAL "")
+        set(_alpha_recorder_obs_app_e2e_skipped_summary "(none)")
+    endif()
+    message(STATUS "Alpha Recorder OBS app E2E runtime matrix registered:\n  ${_alpha_recorder_obs_app_e2e_registered_summary}")
+    message(STATUS "Alpha Recorder OBS app E2E runtime matrix skipped:\n  ${_alpha_recorder_obs_app_e2e_skipped_summary}")
+
+    add_custom_target(alpha_recorder_run_obs_app_e2e
+        DEPENDS ${_alpha_recorder_obs_app_e2e_registered_targets}
+        COMMAND ${CMAKE_COMMAND} -E echo "Alpha Recorder OBS app E2E registered targets: ${_alpha_recorder_obs_app_e2e_registered_targets}"
+        COMMAND ${CMAKE_COMMAND} -E echo "Alpha Recorder OBS app E2E skipped targets: ${_alpha_recorder_obs_app_e2e_skipped_targets}"
+        VERBATIM
+    )
 endif()
 
 install(TARGETS alpha_recorder_e2e_scenario ARCHIVE DESTINATION lib)

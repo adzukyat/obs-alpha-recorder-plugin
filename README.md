@@ -158,8 +158,15 @@ only from WQHD/60 and 4K/30 load variants because those turn into machine-pressu
 checks, but `fhd60_rgb_sw_alpha_png_mov` is retained as the hardware-independent
 load baseline. Cross-vendor hardware pairs such as RGB NVENC with alpha AMF are
 also omitted because they require both NVIDIA and AMD encoders on the same test
-machine. macOS currently registers only software RGB + PNG MOV alpha targets;
-NVIDIA/AMD-specific targets are not exposed there.
+machine. The matrix is runtime-aware: configure probes `hevc_nvenc` and
+`hevc_amf` on the target machine with a realistic 1080p FFmpeg encode, registers
+only the matching NVENC or AMF targets, and prints a configure-time summary of
+targets skipped because the encoder could not open.
+
+The aggregate `alpha_recorder_run_obs_app_e2e` target depends only on runnable
+targets. Directly building a skipped target prints its skip reason and does not
+launch OBS; rerun configure on a machine where the matching encoder opens to run
+that profile.
 
 ```sh
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
@@ -225,7 +232,8 @@ Implemented in the core library and live OBS workflow:
   moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths,
   with only small start/terminal/count mismatches tolerated
 - named OBS app E2E matrix targets for software RGB, explicit NVENC HEVC RGB,
-  explicit AMF HEVC RGB, and hardware RGB FHD/60, WQHD/60, and 4K/30 variants;
+  explicit AMF HEVC RGB, and hardware RGB FHD/60, WQHD/60, and 4K/30 variants
+  when the matching encoder opens on the target machine;
   software RGB is omitted from load variants
 - OBS app E2E aborts with a clear overload error if OBS logs
   `Encoding overloaded!`, skipped frames due to encoding lag, or severe render

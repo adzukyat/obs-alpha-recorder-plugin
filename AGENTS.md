@@ -217,7 +217,8 @@ Completed:
   - `cmake/scripts/obs_app_e2e.ts`
 - Deterministic split-rotation E2E scenario registered in CTest:
   - `tests/e2e/scenarios/split_rotation.scenario`
-- OBS app E2E targets for reproducing decoded sync issues:
+- OBS app E2E targets for reproducing decoded sync issues, registered only when
+  the matching runtime encoder probe succeeds:
   - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov`
   - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc`
   - `alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf`
@@ -264,6 +265,11 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 
 Sync-bug exposure matrix:
 
+The aggregate target depends only on runnable profiles. Directly building a
+skipped target prints its skip reason and does not launch OBS; the configure
+summary lists skipped target names and the encoder-open failure that caused each
+skip.
+
 ```sh
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc
@@ -299,6 +305,10 @@ The CMake target:
 - Can run the RGB recording profile with software encoding, explicit NVENC
   HEVC, or explicit AMF HEVC. Hardware RGB matrix targets pair with PNG MOV or
   the same vendor's HEVC alpha output.
+- The OBS app E2E target matrix is runtime-aware rather than OS-only. Configure
+  probes `hevc_nvenc` and `hevc_amf` on the target machine with a realistic
+  1080p FFmpeg encode, registers only the matching NVENC or AMF targets, and
+  prints a clear summary of skipped targets and probe failures.
 - Load matrix targets are `fhd60` (`1920x1080@60`), `wqhd60`
   (`2560x1440@60`), and `4k30` (`3840x2160@30`). `fhd60_rgb_sw_alpha_png_mov` is
   retained as the hardware-independent load baseline; software RGB is not
@@ -307,8 +317,8 @@ The CMake target:
 - Cross-vendor hardware pairs are intentionally not registered in the standard
   matrix: RGB NVENC plus alpha AMF, or RGB AMF plus alpha NVENC, require a test
   machine with both NVIDIA and AMD hardware encoders.
-- macOS currently registers only software RGB + PNG MOV alpha targets;
-  NVIDIA/AMD-specific targets are not exposed there.
+- NVIDIA/AMD-specific targets may appear on any platform where the matching
+  encoder opens through the runtime probe, and are skipped wherever it does not.
 - If OBS logs `Encoding overloaded!`, skipped frames due to encoding lag, or
   severe render lag, the app E2E stops recording and fails immediately with an
   overload-specific error instead of continuing to decoded sync verification.
