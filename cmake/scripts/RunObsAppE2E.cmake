@@ -9,8 +9,9 @@ set(STAGE_DIR "${BUILD_DIR}/Testing/Temporary/obs-app-stage" CACHE PATH "Portabl
 set(OBS_ROOT "$ENV{OBS_ROOT}" CACHE PATH "OBS runtime root")
 set(CONFIGURATION "RelWithDebInfo" CACHE STRING "Build configuration")
 set(PORT 0 CACHE STRING "obs-websocket port, or 0 for an ephemeral port")
-set(RECORD_SECONDS 5 CACHE STRING "Recording duration")
-set(MAX_RECORD_SECONDS 30 CACHE STRING "Maximum adaptive recording duration")
+set(SYNC_RECORD_SECONDS 2 CACHE STRING "Short recording duration for sync-correctness attempts")
+set(SYNC_ATTEMPTS 5 CACHE STRING "Number of short sync-correctness recording attempts")
+set(DURABILITY_RECORD_SECONDS 30 CACHE STRING "Sustained recording duration for durability validation")
 set(WIDTH 1920 CACHE STRING "Canvas width")
 set(HEIGHT 1080 CACHE STRING "Canvas height")
 set(FPS 60 CACHE STRING "Recording FPS")
@@ -76,8 +77,9 @@ set(args
     "--stage-dir" "${STAGE_DIR}"
     "--configuration" "${CONFIGURATION}"
     "--port" "${PORT}"
-    "--record-seconds" "${RECORD_SECONDS}"
-    "--max-record-seconds" "${MAX_RECORD_SECONDS}"
+    "--sync-record-seconds" "${SYNC_RECORD_SECONDS}"
+    "--sync-attempts" "${SYNC_ATTEMPTS}"
+    "--durability-record-seconds" "${DURABILITY_RECORD_SECONDS}"
     "--width" "${WIDTH}"
     "--height" "${HEIGHT}"
     "--fps" "${FPS}"

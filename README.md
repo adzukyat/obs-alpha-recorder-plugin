@@ -153,9 +153,10 @@ mask encode timing; the OBS app E2E harness copies those summaries into
 kept compact: detailed OBS stdout/stderr is written to `obs-process.log`, and
 full probe data is written to `obs-app-summary.json` in the artifact root.
 
-Each OBS app E2E target starts with a 5-second recording. If decoded sync
-verification passes, the same OBS launch repeats longer recordings up to
-`MAX_RECORD_SECONDS`, which defaults to 30 seconds.
+Each OBS app E2E target first runs a startup sync gate: five short 2-second
+recordings in one OBS launch, each requiring decoded zero frame-code offset.
+After those pass, the same OBS launch runs one 30-second durability recording
+to catch sustained capture, writer, encoder, and stop-edge failures.
 
 ```sh
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e

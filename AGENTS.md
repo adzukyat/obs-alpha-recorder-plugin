@@ -305,9 +305,10 @@ The CMake target:
 - Enables Alpha Recorder through `CallVendorRequest` using
   `alpha_recorder.SetSettings`.
 - Starts and stops OBS recording through obs-websocket.
-- Runs a 5-second recording first, then if decoded sync verification passes,
-  repeats with longer recordings up to `MAX_RECORD_SECONDS` / 30 seconds by
-  default.
+- Runs a startup sync gate first: five short 2-second recordings in one OBS
+  launch, each requiring decoded zero frame-code offset. After those pass, runs
+  one 30-second durability recording to catch sustained capture, writer,
+  encoder, and stop-edge failures.
 - Uses OBS's default hardware-friendly NV12 color format in the app-level E2E
   profile while Alpha Recorder extracts alpha through its own GPU-side path.
 - Can run the RGB recording profile with software encoding, explicit NVENC

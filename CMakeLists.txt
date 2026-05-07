@@ -501,7 +501,7 @@ if(_alpha_recorder_build_full_targets)
 
     function(alpha_recorder_add_obs_app_e2e_target target_name stage_suffix)
         set(options)
-        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS MAX_RECORD_SECONDS)
+        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS MAX_RECORD_SECONDS SYNC_RECORD_SECONDS SYNC_ATTEMPTS DURABILITY_RECORD_SECONDS)
         set(multi_value_args)
         cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
@@ -520,11 +520,20 @@ if(_alpha_recorder_build_full_targets)
         if(NOT ARG_FPS)
             set(ARG_FPS "60")
         endif()
-        if(NOT ARG_RECORD_SECONDS)
-            set(ARG_RECORD_SECONDS "5")
+        if(ARG_RECORD_SECONDS AND NOT ARG_SYNC_RECORD_SECONDS)
+            set(ARG_SYNC_RECORD_SECONDS "${ARG_RECORD_SECONDS}")
         endif()
-        if(NOT ARG_MAX_RECORD_SECONDS)
-            set(ARG_MAX_RECORD_SECONDS "30")
+        if(ARG_MAX_RECORD_SECONDS AND NOT ARG_DURABILITY_RECORD_SECONDS)
+            set(ARG_DURABILITY_RECORD_SECONDS "${ARG_MAX_RECORD_SECONDS}")
+        endif()
+        if(NOT ARG_SYNC_RECORD_SECONDS)
+            set(ARG_SYNC_RECORD_SECONDS "2")
+        endif()
+        if(NOT ARG_SYNC_ATTEMPTS)
+            set(ARG_SYNC_ATTEMPTS "5")
+        endif()
+        if(NOT ARG_DURABILITY_RECORD_SECONDS)
+            set(ARG_DURABILITY_RECORD_SECONDS "30")
         endif()
 
         add_custom_target(${target_name}
@@ -539,8 +548,9 @@ if(_alpha_recorder_build_full_targets)
                 "-DWIDTH=${ARG_WIDTH}"
                 "-DHEIGHT=${ARG_HEIGHT}"
                 "-DFPS=${ARG_FPS}"
-                "-DRECORD_SECONDS=${ARG_RECORD_SECONDS}"
-                "-DMAX_RECORD_SECONDS=${ARG_MAX_RECORD_SECONDS}"
+                "-DSYNC_RECORD_SECONDS=${ARG_SYNC_RECORD_SECONDS}"
+                "-DSYNC_ATTEMPTS=${ARG_SYNC_ATTEMPTS}"
+                "-DDURABILITY_RECORD_SECONDS=${ARG_DURABILITY_RECORD_SECONDS}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
             VERBATIM
         )

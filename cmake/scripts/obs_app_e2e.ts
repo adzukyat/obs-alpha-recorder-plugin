@@ -12,8 +12,9 @@ type Args = {
   buildDir?: string;
   configuration: string;
   port: number;
-  recordSeconds: number;
-  maxRecordSeconds: number;
+  syncRecordSeconds: number;
+  syncAttempts: number;
+  durabilityRecordSeconds: number;
   width: number;
   height: number;
   fps: number;
@@ -41,8 +42,9 @@ function parseArgs(argv: string[]): Args {
     stageDir: "",
     configuration: "RelWithDebInfo",
     port: 0,
-    recordSeconds: 5,
-    maxRecordSeconds: 30,
+    syncRecordSeconds: 2,
+    syncAttempts: 5,
+    durabilityRecordSeconds: 30,
     width: 1920,
     height: 1080,
     fps: 60,
@@ -76,11 +78,23 @@ function parseArgs(argv: string[]): Args {
         ++index;
         break;
       case "--record-seconds":
-        args.recordSeconds = Number(value);
+        args.syncRecordSeconds = Number(value);
+        ++index;
+        break;
+      case "--sync-record-seconds":
+        args.syncRecordSeconds = Number(value);
+        ++index;
+        break;
+      case "--sync-attempts":
+        args.syncAttempts = Number(value);
         ++index;
         break;
       case "--max-record-seconds":
-        args.maxRecordSeconds = Number(value);
+        args.durabilityRecordSeconds = Number(value);
+        ++index;
+        break;
+      case "--durability-record-seconds":
+        args.durabilityRecordSeconds = Number(value);
         ++index;
         break;
       case "--width":
@@ -114,22 +128,26 @@ function parseArgs(argv: string[]): Args {
   if (!args.repoRoot || !args.stageDir) {
     throw new Error("--repo-root and --stage-dir are required");
   }
+  args.syncRecordSeconds = Math.max(1, Math.floor(args.syncRecordSeconds));
+  args.syncAttempts = Math.max(5, Math.floor(args.syncAttempts));
+  args.durabilityRecordSeconds = Math.max(1, Math.floor(args.durabilityRecordSeconds));
 
   return args;
 }
 
-function verificationDurations(startSeconds: number, maxSeconds: number): number[] {
-  const start = Math.max(1, Math.floor(startSeconds));
-  const max = Math.max(start, Math.floor(maxSeconds));
-  const durations: number[] = [];
-  let current = start;
+type VerificationAttempt = {
+  kind: "sync" | "durability";
+  attemptIndex: number;
+  durationSeconds: number;
+};
 
-  while (current < max) {
-    durations.push(current);
-    current = Math.min(max, current * 2);
+function verificationAttempts(syncRecordSeconds: number, syncAttempts: number, durabilityRecordSeconds: number): VerificationAttempt[] {
+  const attempts: VerificationAttempt[] = [];
+  for (let attemptIndex = 1; attemptIndex <= syncAttempts; ++attemptIndex) {
+    attempts.push({ kind: "sync", attemptIndex, durationSeconds: syncRecordSeconds });
   }
-  durations.push(max);
-  return durations;
+  attempts.push({ kind: "durability", attemptIndex: 1, durationSeconds: durabilityRecordSeconds });
+  return attempts;
 }
 
 function simpleRgbEncoder(encoder: string): string {
@@ -1379,6 +1397,8 @@ finalization_format=${args.finalizationFormat}
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
 
     const attempts: Array<{
+      kind: "sync" | "durability";
+      attemptIndex: number;
       durationSeconds: number;
       rgbPath: string;
       alphaPath: string;
@@ -1386,8 +1406,10 @@ finalization_format=${args.finalizationFormat}
       alphaProbe: any;
       syncVerification: SyncVerification;
     }> = [];
-    for (const durationSeconds of verificationDurations(args.recordSeconds, args.maxRecordSeconds)) {
-      console.log(`Running OBS app E2E recording for ${durationSeconds}s...`);
+    for (const attempt of verificationAttempts(args.syncRecordSeconds, args.syncAttempts, args.durabilityRecordSeconds)) {
+      const durationSeconds = attempt.durationSeconds;
+      const label = attempt.kind === "sync" ? `sync ${attempt.attemptIndex}/${args.syncAttempts}` : "durability";
+      console.log(`Running OBS app E2E ${label} recording for ${durationSeconds}s...`);
       await socket.request("StartRecord");
       await waitForRecordState(socket, true);
       await delayUnlessOverloaded(durationSeconds * 1000, overload);
@@ -1408,9 +1430,9 @@ finalization_format=${args.finalizationFormat}
         args.height,
         args.fps,
       );
-      attempts.push({ durationSeconds, ...outputs });
+      attempts.push({ ...attempt, ...outputs });
       console.log(
-        `  ok ${durationSeconds}s: rgb=${outputs.syncVerification.rgbFrames} alpha=${outputs.syncVerification.alphaFrames} ` +
+        `  ok ${label} ${durationSeconds}s: rgb=${outputs.syncVerification.rgbFrames} alpha=${outputs.syncVerification.alphaFrames} ` +
           `frameCodeOffset=${outputs.syncVerification.bestFrameCodeOffset.offset} ` +
           `contentOffset=${outputs.syncVerification.bestContentOffset.offset} ` +
           `mismatches=${outputs.syncVerification.frameCodeMismatches}/${outputs.syncVerification.maskBoundsMismatches}`,
@@ -1431,7 +1453,12 @@ finalization_format=${args.finalizationFormat}
           width: args.width,
           height: args.height,
           fps: args.fps,
+          syncRecordSeconds: args.syncRecordSeconds,
+          syncAttempts: args.syncAttempts,
+          durabilityRecordSeconds: args.durabilityRecordSeconds,
           attempts: attempts.map((attempt) => ({
+            kind: attempt.kind,
+            attemptIndex: attempt.attemptIndex,
             durationSeconds: attempt.durationSeconds,
             rgbPath: attempt.rgbPath,
             alphaPath: attempt.alphaPath,
@@ -1452,6 +1479,9 @@ finalization_format=${args.finalizationFormat}
           obsProcessLogPath,
           performanceTelemetryPath,
           performanceTelemetry,
+          syncRecordSeconds: args.syncRecordSeconds,
+          syncAttempts: args.syncAttempts,
+          durabilityRecordSeconds: args.durabilityRecordSeconds,
           attempts,
           rgbPath: lastAttempt?.rgbPath,
           alphaPath: lastAttempt?.alphaPath,
