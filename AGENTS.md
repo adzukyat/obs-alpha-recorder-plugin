@@ -112,8 +112,8 @@ Current alignment strategy:
    writer on `OBS_FRONTEND_EVENT_RECORDING_STARTED`, once the recording path is
    available.
 3. Capture the rendered Program texture after OBS renders the main mix, extract
-   its alpha into an `GS_R8` mask texture on the GPU, then stage that one-byte
-   alpha plane into a short pending-frame queue.
+   its alpha into an `GS_R8` mask texture on the GPU, then read it back through
+   a small staging-surface ring before adding it to the pending-frame queue.
 4. Use OBS raw-video callbacks as the final video-output cadence source. Use
    the encoded packet composition timestamp (`encoder_packet_time::cts`) to
    identify the raw-video cadence frame actually admitted into the RGB
@@ -128,7 +128,10 @@ Current alignment strategy:
 5. Use video packet callbacks from the active recording output only to enqueue
    encoded-video packet ordering evidence, sorted by packet PTS. Resolve and
    hand off aligned mask frames on Alpha Recorder's alignment worker rather
-   than inside OBS callbacks.
+   than inside OBS callbacks. Cache the texture-encoder path classification from
+   recording output capabilities and OBS's active NV12/P010 texture state; do
+   not query per-encoder texture/mix state from packet callbacks or from the
+   `OBS_FRONTEND_EVENT_RECORDING_STARTING` transition.
 6. Pause capture on recording pause. Do not pause on
    `OBS_FRONTEND_EVENT_RECORDING_STOPPING`; keep capturing until
    `OBS_FRONTEND_EVENT_RECORDING_STOPPED` so stop-edge frames can reconcile.
@@ -188,7 +191,8 @@ Completed:
 - Runtime hook registration/unregistration based on current settings.
 - Recording lifecycle integration for start, pause, unpause, stopping, and stop.
 - GPU-side Program alpha extraction that does not require switching OBS's main
-  Color Format from NV12/P010 to RGBA.
+  Color Format from NV12/P010 to RGBA, with staged readback buffered through a
+  small staging-surface ring.
 - Raw-video cadence tracking so alpha output mirrors OBS duplicate/drop behavior
   instead of assuming every rendered frame reaches the RGB recording or applying
   encoder-specific fixed frame offsets.
@@ -202,6 +206,8 @@ Completed:
   alpha output instead of blocking OBS recording.
 - Alignment resolution and mask-writer handoff run outside OBS callbacks, and
   the live path queues captured alpha buffers without a second full-frame copy.
+- Texture-encoder path classification is cached before packet handling so
+  packet callbacks only enqueue packet PTS/CTS evidence.
 - Alpha mask movie finalization on stop and split rotation.
 - File split handling through OBS `file_changed`.
 - obs-websocket vendor API for test automation:

@@ -30,7 +30,9 @@ encoders use the next observed raw-video cadence frame after the packet CTS so
 the alpha movie follows the rendered texture that OBS actually queued. OBS
 callbacks only enqueue cadence and packet-ordering evidence; Alpha Recorder
 resolves aligned mask frames on its own worker and hands captured buffers to the
-mask writer without a second full-frame copy.
+mask writer without a second full-frame copy. The live packet path uses a cached
+texture-encoder classification; it does not query OBS encoder/mix texture state
+from packet callbacks or the recording-starting transition.
 
 Scenario files live only under `tests/e2e/scenarios`. They are inputs for the
 deterministic E2E harness, not part of the shipping plugin path.
@@ -215,11 +217,14 @@ Implemented in the core library and live OBS workflow:
 - OBS recording lifecycle hooks, settings persistence, Tools menu integration,
   and obs-websocket vendor automation
 - GPU-side Program alpha extraction that keeps OBS's normal recording color
-  format independent of Alpha Recorder
+  format independent of Alpha Recorder, with staged readback buffered through a
+  small staging-surface ring
 - raw-video cadence tracking that mirrors OBS duplicate/drop behavior in the
   alpha mask movie without encoder-specific fixed frame offsets
 - off-callback alignment resolution and no-copy live mask-frame handoff into
   the bounded writer queue
+- cached texture-encoder path classification so OBS packet callbacks only carry
+  packet PTS/CTS evidence and do not enter encoder/mix texture queries
 - focused unit regression coverage for repeated raw-video output frames,
   proving the alpha mask duplicates the previous frame instead of consuming a
   newer pending frame, plus runtime packet-CTS admission and texture-encoder
