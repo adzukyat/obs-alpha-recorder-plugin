@@ -2,8 +2,8 @@
 
 import { spawn, spawnSync } from "bun";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { platform } from "node:process";
 
 type Args = {
@@ -25,6 +25,10 @@ type Args = {
 type OverloadMonitor = {
   seen: boolean;
   firstLine: string;
+};
+
+type LogSink = {
+  write(text: string): unknown;
 };
 
 const severeSkippedFramePercent = 5;
@@ -199,7 +203,7 @@ async function delayUnlessOverloaded(ms: number, overload: OverloadMonitor): Pro
 
 async function relayProcessStream(
   stream: ReadableStream<Uint8Array> | null,
-  output: NodeJS.WriteStream,
+  output: LogSink | null,
   overload: OverloadMonitor,
 ): Promise<void> {
   if (stream == null) {
@@ -216,7 +220,7 @@ async function relayProcessStream(
       break;
     }
     const text = decoder.decode(value, { stream: true });
-    output.write(text);
+    output?.write(text);
 
     bufferedLine += text;
     const lines = bufferedLine.split(/\r?\n/);
@@ -347,6 +351,28 @@ function collectAlphaRecorderPerformanceTelemetry(portableConfig: string): Alpha
     }
   }
   return telemetry;
+}
+
+function compactTelemetryLine(line: string): string {
+  const text = line.replace(/^.*Alpha Recorder performance telemetry:\s*/, "");
+  const capture = text.match(/capture_total=\{count=(\d+) avg_ms=([\d.]+) max_ms=([\d.]+).*?captured=(\d+)\}/);
+  const readback = text.match(/readback=\{count=(\d+) avg_ms=([\d.]+) max_ms=([\d.]+)\}/);
+  const alignment = text.match(/alignment_worker=\{count=(\d+) avg_ms=([\d.]+) max_ms=([\d.]+) frames=(\d+) raw=(\d+) packets=(\d+)\}/);
+  const queues = text.match(/queues=\{[^}]*writer_max_frames=(\d+) writer_max_bytes=([^}]+)\}/);
+  const encode = text.match(/encode=\{count=(\d+) avg_ms=([\d.]+) max_ms=([\d.]+)\}/);
+  const finalized = text.match(/finalize_ms=([\d.]+) queued=([^\s}]+)/);
+
+  if (capture == null || readback == null || alignment == null || queues == null || encode == null || finalized == null) {
+    return text;
+  }
+
+  return (
+    `capture ${capture[4]}/${capture[1]} avg/max=${capture[2]}/${capture[3]}ms; ` +
+    `readback avg/max=${readback[2]}/${readback[3]}ms; ` +
+    `align frames=${alignment[4]} raw=${alignment[5]} packets=${alignment[6]} avg/max=${alignment[2]}/${alignment[3]}ms; ` +
+    `writer encode avg/max=${encode[2]}/${encode[3]}ms queue_max=${queues[1]} frames/${queues[2]}; ` +
+    `finalize=${finalized[1]}ms queued=${finalized[2]}`
+  );
 }
 
 function throwIfOverloaded(overload: OverloadMonitor, artifactRoot: string, width: number, height: number, fps: number): void {
@@ -1117,6 +1143,7 @@ async function main(): Promise<void> {
   const { exe: obsExe, cwd: obsCwd, contentRoot, runtimeBin } = resolveObsExecutable(args.stageDir);
   const artifactRoot = join(args.repoRoot, "out", "e2e", "obs-app", new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, ""));
   mkdirSync(artifactRoot, { recursive: true });
+  const obsProcessLogPath = join(artifactRoot, "obs-process.log");
 
   const homeRoot = join(artifactRoot, "home");
   const portableConfig =
@@ -1303,8 +1330,13 @@ finalization_format=${args.finalizationFormat}
     stderr: "pipe",
   });
   const overload: OverloadMonitor = { seen: false, firstLine: "" };
-  const stdoutRelay = relayProcessStream(obs.stdout, process.stdout, overload);
-  const stderrRelay = relayProcessStream(obs.stderr, process.stderr, overload);
+  const obsProcessLog = createWriteStream(obsProcessLogPath, { flags: "a" });
+  obsProcessLog.write(`# OBS app E2E process log\n# Command: ${obsCommand.join(" ")}\n\n`);
+  const stdoutRelay = relayProcessStream(obs.stdout, obsProcessLog, overload);
+  const stderrRelay = relayProcessStream(obs.stderr, obsProcessLog, overload);
+
+  console.log(`OBS app E2E artifacts: ${artifactRoot}`);
+  console.log(`OBS process log: ${obsProcessLogPath}`);
 
   let socket: ObsWebSocket | undefined = undefined;
   try {
@@ -1355,7 +1387,7 @@ finalization_format=${args.finalizationFormat}
       syncVerification: SyncVerification;
     }> = [];
     for (const durationSeconds of verificationDurations(args.recordSeconds, args.maxRecordSeconds)) {
-      console.log(`Running OBS app E2E recording for ${durationSeconds}s`);
+      console.log(`Running OBS app E2E recording for ${durationSeconds}s...`);
       await socket.request("StartRecord");
       await waitForRecordState(socket, true);
       await delayUnlessOverloaded(durationSeconds * 1000, overload);
@@ -1377,11 +1409,18 @@ finalization_format=${args.finalizationFormat}
         args.fps,
       );
       attempts.push({ durationSeconds, ...outputs });
+      console.log(
+        `  ok ${durationSeconds}s: rgb=${outputs.syncVerification.rgbFrames} alpha=${outputs.syncVerification.alphaFrames} ` +
+          `frameCodeOffset=${outputs.syncVerification.bestFrameCodeOffset.offset} ` +
+          `contentOffset=${outputs.syncVerification.bestContentOffset.offset} ` +
+          `mismatches=${outputs.syncVerification.frameCodeMismatches}/${outputs.syncVerification.maskBoundsMismatches}`,
+      );
     }
 
     const lastAttempt = attempts[attempts.length - 1];
     const performanceTelemetry = collectAlphaRecorderPerformanceTelemetry(portableConfig);
     const performanceTelemetryPath = join(artifactRoot, "alpha-recorder-performance.json");
+    const summaryPath = join(artifactRoot, "obs-app-summary.json");
     writeText(
       performanceTelemetryPath,
       JSON.stringify(
@@ -1404,12 +1443,13 @@ finalization_format=${args.finalizationFormat}
         2,
       ),
     );
-
-    console.log(
+    writeText(
+      summaryPath,
       JSON.stringify(
         {
           ok: true,
           artifactRoot,
+          obsProcessLogPath,
           performanceTelemetryPath,
           performanceTelemetry,
           attempts,
@@ -1423,11 +1463,22 @@ finalization_format=${args.finalizationFormat}
         2,
       ),
     );
+
+    console.log("OBS app E2E passed.");
+    console.log(`  summary: ${summaryPath}`);
+    console.log(`  telemetry: ${performanceTelemetryPath}`);
+    console.log(`  rgb: ${lastAttempt?.rgbPath}`);
+    console.log(`  alpha: ${lastAttempt?.alphaPath}`);
+    for (const telemetry of performanceTelemetry) {
+      const label = telemetry.maskPath ? basename(telemetry.maskPath) : "alpha segment";
+      console.log(`  perf ${label}: ${compactTelemetryLine(telemetry.line)}`);
+    }
   } finally {
     socket?.close();
     if (!args.keepObsOpen) {
       obs.kill();
       await Promise.allSettled([stdoutRelay, stderrRelay]);
+      await new Promise<void>((resolveEnd) => obsProcessLog.end(resolveEnd));
     }
   }
 }

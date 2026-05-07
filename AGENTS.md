@@ -336,6 +336,9 @@ The CMake target:
 - Writes `alpha-recorder-performance.json` under the OBS app E2E artifact root,
   containing Alpha Recorder's per-segment performance telemetry log lines for
   comparing capture/readback, alignment, writer-queue, and encode pressure.
+- Keeps CMake stdout compact by writing detailed OBS stdout/stderr to
+  `obs-process.log` and full probe/result details to `obs-app-summary.json`
+  under the artifact root.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
 - Adds a test-only moving colored object over a transparent background with an
   opaque binary frame-code strip, then decodes RGB and alpha mask frames for

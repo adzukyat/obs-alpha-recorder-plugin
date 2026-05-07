@@ -149,7 +149,9 @@ Each run also records lightweight performance telemetry from the live alpha
 pipeline. The plugin logs one per-segment summary covering capture/readback CPU
 time, GPU submission timing, alignment-worker batches, writer queue depth, and
 mask encode timing; the OBS app E2E harness copies those summaries into
-`alpha-recorder-performance.json` under the run artifact root.
+`alpha-recorder-performance.json` under the run artifact root. CMake stdout is
+kept compact: detailed OBS stdout/stderr is written to `obs-process.log`, and
+full probe data is written to `obs-app-summary.json` in the artifact root.
 
 Each OBS app E2E target starts with a 5-second recording. If decoded sync
 verification passes, the same OBS launch repeats longer recordings up to
