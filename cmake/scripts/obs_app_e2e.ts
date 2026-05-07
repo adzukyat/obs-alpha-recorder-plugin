@@ -312,6 +312,43 @@ function scanObsLogsForOverload(portableConfig: string, overload: OverloadMonito
   }
 }
 
+type AlphaRecorderTelemetryLine = {
+  logFile: string;
+  line: string;
+  maskPath: string;
+};
+
+function obsLogFiles(portableConfig: string): string[] {
+  const logsDir = join(portableConfig, "logs");
+  if (!existsSync(logsDir)) {
+    return [];
+  }
+
+  return readdirSync(logsDir)
+    .filter((name) => name.endsWith(".txt") || name.endsWith(".log"))
+    .map((name) => join(logsDir, name))
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+}
+
+function collectAlphaRecorderPerformanceTelemetry(portableConfig: string): AlphaRecorderTelemetryLine[] {
+  const telemetry: AlphaRecorderTelemetryLine[] = [];
+  for (const logFile of obsLogFiles(portableConfig)) {
+    const text = readFileSync(logFile, "utf8");
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.includes("Alpha Recorder performance telemetry:")) {
+        continue;
+      }
+
+      telemetry.push({
+        logFile,
+        line: line.trim(),
+        maskPath: line.match(/path="([^"]+)"/)?.[1] ?? "",
+      });
+    }
+  }
+  return telemetry;
+}
+
 function throwIfOverloaded(overload: OverloadMonitor, artifactRoot: string, width: number, height: number, fps: number): void {
   if (!overload.seen) {
     return;
@@ -1343,12 +1380,38 @@ finalization_format=${args.finalizationFormat}
     }
 
     const lastAttempt = attempts[attempts.length - 1];
+    const performanceTelemetry = collectAlphaRecorderPerformanceTelemetry(portableConfig);
+    const performanceTelemetryPath = join(artifactRoot, "alpha-recorder-performance.json");
+    writeText(
+      performanceTelemetryPath,
+      JSON.stringify(
+        {
+          artifactRoot,
+          rgbEncoder: args.rgbEncoder,
+          finalizationFormat: expectedFinalizationFormat,
+          width: args.width,
+          height: args.height,
+          fps: args.fps,
+          attempts: attempts.map((attempt) => ({
+            durationSeconds: attempt.durationSeconds,
+            rgbPath: attempt.rgbPath,
+            alphaPath: attempt.alphaPath,
+            syncVerification: attempt.syncVerification,
+          })),
+          telemetry: performanceTelemetry,
+        },
+        null,
+        2,
+      ),
+    );
 
     console.log(
       JSON.stringify(
         {
           ok: true,
           artifactRoot,
+          performanceTelemetryPath,
+          performanceTelemetry,
           attempts,
           rgbPath: lastAttempt?.rgbPath,
           alphaPath: lastAttempt?.alphaPath,

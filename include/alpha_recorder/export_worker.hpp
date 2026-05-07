@@ -21,6 +21,20 @@ namespace alpha_recorder::obs
         std::uint32_t fps_den = 1;
     };
 
+    struct AlphaMaskVideoWriterStats
+    {
+        std::uint64_t enqueued_frames = 0;
+        std::uint64_t encoded_frames = 0;
+        std::uint64_t queued_bytes_total = 0;
+        std::uint64_t enqueue_time_ns_total = 0;
+        std::uint64_t enqueue_time_ns_max = 0;
+        std::uint64_t encode_time_ns_total = 0;
+        std::uint64_t encode_time_ns_max = 0;
+        std::uint64_t finalize_time_ns = 0;
+        std::size_t max_queued_frames = 0;
+        std::size_t max_queued_bytes = 0;
+    };
+
     class AlphaMaskVideoWriter
     {
     public:
@@ -40,6 +54,8 @@ namespace alpha_recorder::obs
         [[nodiscard]] bool write_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha,
                                        std::string *error_message = nullptr) noexcept;
         [[nodiscard]] bool close(std::string *error_message = nullptr) noexcept;
+        [[nodiscard]] bool close(std::string *error_message,
+                                 AlphaMaskVideoWriterStats *stats) noexcept;
 
         [[nodiscard]] bool is_open() const noexcept;
         [[nodiscard]] const std::filesystem::path &path() const noexcept;

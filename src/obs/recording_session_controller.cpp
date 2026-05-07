@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -209,6 +211,83 @@ technique Draw
         }
     }
 
+    [[nodiscard]] std::uint64_t elapsed_ns(std::chrono::steady_clock::time_point start,
+                                           std::chrono::steady_clock::time_point end) noexcept
+    {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+    }
+
+    struct TimingSummary
+    {
+        std::uint64_t count = 0;
+        std::uint64_t total_ns = 0;
+        std::uint64_t max_ns = 0;
+
+        void add(std::uint64_t ns) noexcept
+        {
+            ++count;
+            total_ns += ns;
+            max_ns = std::max(max_ns, ns);
+        }
+    };
+
+    struct CaptureTiming
+    {
+        bool mapped = false;
+        std::uint64_t map_ns = 0;
+        std::uint64_t render_ns = 0;
+        std::uint64_t stage_ns = 0;
+        std::uint64_t total_ns = 0;
+    };
+
+    [[nodiscard]] double ns_to_ms(std::uint64_t ns) noexcept
+    {
+        return static_cast<double>(ns) / 1000000.0;
+    }
+
+    [[nodiscard]] double average_ms(const TimingSummary &summary) noexcept
+    {
+        return summary.count == 0U ? 0.0 : ns_to_ms(summary.total_ns / summary.count);
+    }
+
+    [[nodiscard]] std::string format_timing_summary(const TimingSummary &summary)
+    {
+        char buffer[128];
+        (void)std::snprintf(buffer, sizeof(buffer), "count=%llu avg_ms=%.3f max_ms=%.3f",
+                            static_cast<unsigned long long>(summary.count), average_ms(summary), ns_to_ms(summary.max_ns));
+        return std::string{buffer};
+    }
+
+    [[nodiscard]] std::string format_bytes(std::uint64_t bytes)
+    {
+        char buffer[64];
+        (void)std::snprintf(buffer, sizeof(buffer), "%.2fMiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+        return std::string{buffer};
+    }
+
+    struct LivePipelineTelemetry
+    {
+        TimingSummary capture_total{};
+        TimingSummary capture_map{};
+        TimingSummary capture_render{};
+        TimingSummary capture_stage{};
+        TimingSummary alignment_batch{};
+        std::uint64_t rendered_callbacks = 0;
+        std::uint64_t captured_frames = 0;
+        std::uint64_t queued_alpha_frames = 0;
+        std::uint64_t raw_video_frames = 0;
+        std::uint64_t packet_frames = 0;
+        std::uint64_t aligned_frames = 0;
+        std::size_t max_pending_alpha_frames = 0;
+        std::size_t max_pending_output_frames = 0;
+        std::size_t max_pending_encoded_frames = 0;
+
+        void reset() noexcept
+        {
+            *this = {};
+        }
+    };
+
     class AlphaPlaneExtractor
     {
     public:
@@ -260,22 +339,40 @@ technique Draw
             return true;
         }
 
-        bool capture_latest(std::vector<std::uint8_t> &alpha, std::uint64_t &timestamp, std::string &error_message)
+        bool capture_latest(std::vector<std::uint8_t> &alpha,
+                            std::uint64_t &timestamp,
+                            std::string &error_message,
+                            CaptureTiming *timing = nullptr)
         {
+            const auto total_start = std::chrono::steady_clock::now();
+            CaptureTiming local_timing{};
             alpha.clear();
             timestamp = 0U;
 
             gs_texture_t *program_texture = obs_get_main_texture();
             if (program_texture == nullptr)
             {
+                if (timing != nullptr)
+                {
+                    local_timing.total_ns = elapsed_ns(total_start, std::chrono::steady_clock::now());
+                    *timing = local_timing;
+                }
                 return true;
             }
 
             if (staged_surface_count_ == stage_surfaces_.size())
             {
+                const auto map_start = std::chrono::steady_clock::now();
                 map_staged_surface(next_map_surface_, alpha, error_message);
+                local_timing.mapped = true;
+                local_timing.map_ns = elapsed_ns(map_start, std::chrono::steady_clock::now());
                 if (!error_message.empty())
                 {
+                    if (timing != nullptr)
+                    {
+                        local_timing.total_ns = elapsed_ns(total_start, std::chrono::steady_clock::now());
+                        *timing = local_timing;
+                    }
                     return false;
                 }
                 timestamp = staged_timestamps_[next_map_surface_];
@@ -283,15 +380,30 @@ technique Draw
                 --staged_surface_count_;
             }
 
+            const auto render_start = std::chrono::steady_clock::now();
             if (!render_alpha_mask(program_texture))
             {
+                if (timing != nullptr)
+                {
+                    local_timing.render_ns = elapsed_ns(render_start, std::chrono::steady_clock::now());
+                    local_timing.total_ns = elapsed_ns(total_start, std::chrono::steady_clock::now());
+                    *timing = local_timing;
+                }
                 return false;
             }
+            local_timing.render_ns = elapsed_ns(render_start, std::chrono::steady_clock::now());
 
+            const auto stage_start = std::chrono::steady_clock::now();
             gs_stage_texture(stage_surfaces_[next_stage_surface_], mask_texture_);
             staged_timestamps_[next_stage_surface_] = obs_get_video_frame_time();
             next_stage_surface_ = (next_stage_surface_ + 1U) % stage_surfaces_.size();
             ++staged_surface_count_;
+            local_timing.stage_ns = elapsed_ns(stage_start, std::chrono::steady_clock::now());
+            local_timing.total_ns = elapsed_ns(total_start, std::chrono::steady_clock::now());
+            if (timing != nullptr)
+            {
+                *timing = local_timing;
+            }
 
             return true;
         }
@@ -558,6 +670,7 @@ technique Draw
             last_captured_alpha_frame_.timestamp = 0U;
             clear_pending_alignment_locked();
             raw_video_cadence_.reset();
+            live_telemetry_.reset();
             recording_texture_encoded_ =
                 recording_output_uses_texture_encoder(recording_output_, video_info_.output_format);
             start_alignment_worker_locked();
@@ -719,6 +832,7 @@ technique Draw
             video_info_ = video_info;
             recording_path_ = recording_path;
             session_aborted_ = false;
+            live_telemetry_.reset();
             return true;
         }
 
@@ -729,11 +843,15 @@ technique Draw
                 return true;
             }
 
-            if (!writer_.close(error_message))
+            const std::filesystem::path writer_path = writer_.path();
+            alpha_recorder::obs::AlphaMaskVideoWriterStats writer_stats{};
+            if (!writer_.close(error_message, &writer_stats))
             {
+                log_performance_summary_locked(writer_path, writer_stats);
                 return false;
             }
 
+            log_performance_summary_locked(writer_path, writer_stats);
             return true;
         }
 
@@ -742,6 +860,37 @@ technique Draw
             pending_alpha_frames_.clear();
             pending_encoded_alpha_frames_.clear();
             pending_output_frames_.clear();
+        }
+
+        void log_performance_summary_locked(const std::filesystem::path &mask_path,
+                                            const alpha_recorder::obs::AlphaMaskVideoWriterStats &writer_stats)
+        {
+            blog(LOG_INFO,
+                 "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} queues={alpha_max=%zu output_max=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s}",
+                 mask_path.generic_string().c_str(),
+                 format_timing_summary(live_telemetry_.capture_total).c_str(),
+                 static_cast<unsigned long long>(live_telemetry_.rendered_callbacks),
+                 static_cast<unsigned long long>(live_telemetry_.captured_frames),
+                 format_timing_summary(live_telemetry_.capture_map).c_str(),
+                 format_timing_summary(live_telemetry_.capture_render).c_str(),
+                 format_timing_summary(live_telemetry_.capture_stage).c_str(),
+                 format_timing_summary(live_telemetry_.alignment_batch).c_str(),
+                 static_cast<unsigned long long>(live_telemetry_.aligned_frames),
+                 static_cast<unsigned long long>(live_telemetry_.raw_video_frames),
+                 static_cast<unsigned long long>(live_telemetry_.packet_frames),
+                 live_telemetry_.max_pending_alpha_frames,
+                 live_telemetry_.max_pending_output_frames,
+                 live_telemetry_.max_pending_encoded_frames,
+                 writer_stats.max_queued_frames,
+                 format_bytes(static_cast<std::uint64_t>(writer_stats.max_queued_bytes)).c_str(),
+                 static_cast<unsigned long long>(writer_stats.enqueued_frames),
+                 writer_stats.enqueued_frames == 0U ? 0.0 : ns_to_ms(writer_stats.enqueue_time_ns_total / writer_stats.enqueued_frames),
+                 ns_to_ms(writer_stats.enqueue_time_ns_max),
+                 static_cast<unsigned long long>(writer_stats.encoded_frames),
+                 writer_stats.encoded_frames == 0U ? 0.0 : ns_to_ms(writer_stats.encode_time_ns_total / writer_stats.encoded_frames),
+                 ns_to_ms(writer_stats.encode_time_ns_max),
+                 ns_to_ms(writer_stats.finalize_time_ns),
+                 format_bytes(writer_stats.queued_bytes_total).c_str());
         }
 
         [[nodiscard]] bool alignment_worker_has_work_locked() const noexcept
@@ -805,6 +954,9 @@ technique Draw
         {
             constexpr std::size_t kMaxPendingFrames = 240U;
             pending_alpha_frames_.push_back(std::move(frame));
+            ++live_telemetry_.queued_alpha_frames;
+            live_telemetry_.max_pending_alpha_frames =
+                std::max(live_telemetry_.max_pending_alpha_frames, pending_alpha_frames_.size());
             if (pending_alpha_frames_.size() > kMaxPendingFrames)
             {
                 session_aborted_ = true;
@@ -913,6 +1065,7 @@ technique Draw
                 return;
             }
 
+            const auto batch_start = std::chrono::steady_clock::now();
             alpha_recorder::obs::AlphaFrame alpha_frame{};
             std::string error_message;
             std::size_t drained_frames = 0U;
@@ -947,6 +1100,11 @@ technique Draw
                     return;
                 }
                 ++drained_frames;
+                ++live_telemetry_.aligned_frames;
+            }
+            if (drained_frames > 0U)
+            {
+                live_telemetry_.alignment_batch.add(elapsed_ns(batch_start, std::chrono::steady_clock::now()));
             }
         }
 
@@ -957,6 +1115,9 @@ technique Draw
             encoded_frame.cts = cts;
             encoded_frame.texture_encoded = texture_encoded;
             pending_encoded_alpha_frames_.push_back(std::move(encoded_frame));
+            ++live_telemetry_.packet_frames;
+            live_telemetry_.max_pending_encoded_frames =
+                std::max(live_telemetry_.max_pending_encoded_frames, pending_encoded_alpha_frames_.size());
             notify_alignment_worker_locked();
         }
 
@@ -964,6 +1125,9 @@ technique Draw
         {
             constexpr std::size_t kMaxPendingOutputFrames = 240U;
             pending_output_frames_.push_back(frame);
+            ++live_telemetry_.raw_video_frames;
+            live_telemetry_.max_pending_output_frames =
+                std::max(live_telemetry_.max_pending_output_frames, pending_output_frames_.size());
             if (pending_output_frames_.size() > kMaxPendingOutputFrames)
             {
                 session_aborted_ = true;
@@ -1195,6 +1359,7 @@ technique Draw
             std::string error_message;
             std::uint32_t output_width = 0U;
             std::uint32_t output_height = 0U;
+            CaptureTiming capture_timing{};
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1209,9 +1374,17 @@ technique Draw
             }
 
             if (!alpha_extractor_.ensure(output_width, output_height, error_message) ||
-                !alpha_extractor_.capture_latest(alpha, alpha_timestamp, error_message))
+                !alpha_extractor_.capture_latest(alpha, alpha_timestamp, error_message, &capture_timing))
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                ++live_telemetry_.rendered_callbacks;
+                live_telemetry_.capture_total.add(capture_timing.total_ns);
+                if (capture_timing.mapped)
+                {
+                    live_telemetry_.capture_map.add(capture_timing.map_ns);
+                }
+                live_telemetry_.capture_render.add(capture_timing.render_ns);
+                live_telemetry_.capture_stage.add(capture_timing.stage_ns);
                 if (session_active_ && !session_aborted_)
                 {
                     session_aborted_ = true;
@@ -1224,12 +1397,33 @@ technique Draw
             else if (!alpha.empty())
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                ++live_telemetry_.rendered_callbacks;
+                ++live_telemetry_.captured_frames;
+                live_telemetry_.capture_total.add(capture_timing.total_ns);
+                if (capture_timing.mapped)
+                {
+                    live_telemetry_.capture_map.add(capture_timing.map_ns);
+                }
+                live_telemetry_.capture_render.add(capture_timing.render_ns);
+                live_telemetry_.capture_stage.add(capture_timing.stage_ns);
                 if (session_active_ && !session_aborted_ && !recording_paused_ && recording_output_ != nullptr &&
                     video_info_.output_width == output_width && video_info_.output_height == output_height)
                 {
                     last_captured_alpha_frame_ = alpha_recorder::obs::AlphaFrame{alpha_timestamp, std::make_shared<std::vector<std::uint8_t>>(std::move(alpha))};
                     (void)remember_pending_alpha_frame_locked(last_captured_alpha_frame_, error_message);
                 }
+            }
+            else
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++live_telemetry_.rendered_callbacks;
+                live_telemetry_.capture_total.add(capture_timing.total_ns);
+                if (capture_timing.mapped)
+                {
+                    live_telemetry_.capture_map.add(capture_timing.map_ns);
+                }
+                live_telemetry_.capture_render.add(capture_timing.render_ns);
+                live_telemetry_.capture_stage.add(capture_timing.stage_ns);
             }
 
             if (!error_message.empty())
@@ -1307,6 +1501,7 @@ technique Draw
         std::deque<EncodedAlphaFrame> pending_encoded_alpha_frames_{};
         std::deque<alpha_recorder::obs::OutputFrameCadence> pending_output_frames_{};
         alpha_recorder::obs::RawVideoCadenceTracker raw_video_cadence_{};
+        LivePipelineTelemetry live_telemetry_{};
         std::filesystem::path recording_path_{};
         obs_video_info video_info_{};
         AlphaPlaneExtractor alpha_extractor_{};

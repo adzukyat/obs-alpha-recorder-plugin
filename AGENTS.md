@@ -208,6 +208,8 @@ Completed:
   the live path queues captured alpha buffers without a second full-frame copy.
 - Texture-encoder path classification is cached before packet handling so
   packet callbacks only enqueue packet PTS/CTS evidence.
+- Lightweight per-segment performance telemetry for capture/readback,
+  alignment-worker batches, writer queue depth, and mask encode timing.
 - Alpha mask movie finalization on stop and split rotation.
 - File split handling through OBS `file_changed`.
 - obs-websocket vendor API for test automation:
@@ -331,6 +333,9 @@ The CMake target:
   verification. Tiny skipped-frame summaries are not treated as overload by
   themselves.
 - Waits for RGB recording and alpha mask movie outputs.
+- Writes `alpha-recorder-performance.json` under the OBS app E2E artifact root,
+  containing Alpha Recorder's per-segment performance telemetry log lines for
+  comparing capture/readback, alignment, writer-queue, and encode pressure.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are playable.
 - Adds a test-only moving colored object over a transparent background with an
   opaque binary frame-code strip, then decodes RGB and alpha mask frames for

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
@@ -215,6 +216,12 @@ namespace alpha_recorder::obs
             return set_error(error_message, "Alpha Recorder configured an unsupported mask pixel format.");
         }
 
+        [[nodiscard]] std::uint64_t elapsed_ns(std::chrono::steady_clock::time_point start,
+                                               std::chrono::steady_clock::time_point end) noexcept
+        {
+            return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
+        }
+
     } // namespace
 
     struct AlphaMaskVideoWriter::Impl
@@ -238,6 +245,7 @@ namespace alpha_recorder::obs
         std::size_t queued_bytes = 0;
         std::string worker_error{};
         std::queue<QueuedFrame> queued_frames{};
+        AlphaMaskVideoWriterStats stats{};
         std::mutex mutex{};
         std::condition_variable condition{};
         std::thread worker{};
@@ -259,6 +267,7 @@ namespace alpha_recorder::obs
 
         bool encode_frame(const std::uint8_t *alpha, std::uint32_t stride, std::string *error_message) noexcept
         {
+            const auto encode_start = std::chrono::steady_clock::now();
             if (encoder == nullptr || frame == nullptr)
             {
                 return set_error(error_message, "Alpha Recorder mask video writer is not open.");
@@ -300,6 +309,11 @@ namespace alpha_recorder::obs
                 {
                     av_packet_free(&packet);
                     ++frame_count;
+                    const std::uint64_t encode_ns = elapsed_ns(encode_start, std::chrono::steady_clock::now());
+                    std::lock_guard<std::mutex> lock(mutex);
+                    ++stats.encoded_frames;
+                    stats.encode_time_ns_total += encode_ns;
+                    stats.encode_time_ns_max = std::max(stats.encode_time_ns_max, encode_ns);
                     return true;
                 }
 
@@ -326,6 +340,7 @@ namespace alpha_recorder::obs
 
         bool drain_encoder(std::string *error_message) noexcept
         {
+            const auto finalize_start = std::chrono::steady_clock::now();
             if (encoder != nullptr)
             {
                 int ret = avcodec_send_frame(encoder, nullptr);
@@ -377,6 +392,10 @@ namespace alpha_recorder::obs
             }
 
             header_written = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stats.finalize_time_ns += elapsed_ns(finalize_start, std::chrono::steady_clock::now());
+            }
             return true;
         }
 
@@ -474,13 +493,22 @@ namespace alpha_recorder::obs
                 return set_error(error_message, worker_error);
             }
 
-            queued_bytes += alpha->size();
+            const auto enqueue_start = std::chrono::steady_clock::now();
+            const std::size_t alpha_bytes = alpha->size();
+            queued_bytes += alpha_bytes;
             queued_frames.push(QueuedFrame{std::move(alpha), stride});
+            const std::uint64_t enqueue_ns = elapsed_ns(enqueue_start, std::chrono::steady_clock::now());
+            ++stats.enqueued_frames;
+            stats.queued_bytes_total += alpha_bytes;
+            stats.enqueue_time_ns_total += enqueue_ns;
+            stats.enqueue_time_ns_max = std::max(stats.enqueue_time_ns_max, enqueue_ns);
+            stats.max_queued_frames = std::max(stats.max_queued_frames, queued_frames.size());
+            stats.max_queued_bytes = std::max(stats.max_queued_bytes, queued_bytes);
             condition.notify_one();
             return true;
         }
 
-        bool stop_worker(std::string *error_message) noexcept
+        bool stop_worker(std::string *error_message, AlphaMaskVideoWriterStats *out_stats = nullptr) noexcept
         {
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -495,6 +523,10 @@ namespace alpha_recorder::obs
             }
 
             std::lock_guard<std::mutex> lock(mutex);
+            if (out_stats != nullptr)
+            {
+                *out_stats = stats;
+            }
             if (worker_failed)
             {
                 return set_error(error_message, worker_error.empty() ? "Alpha Recorder failed to write the mask video." : worker_error);
@@ -723,14 +755,23 @@ namespace alpha_recorder::obs
 
     bool AlphaMaskVideoWriter::close(std::string *error_message) noexcept
     {
+        return close(error_message, nullptr);
+    }
+
+    bool AlphaMaskVideoWriter::close(std::string *error_message, AlphaMaskVideoWriterStats *stats) noexcept
+    {
         if (impl_ == nullptr)
         {
+            if (stats != nullptr)
+            {
+                *stats = {};
+            }
             return true;
         }
 
         Impl *impl = impl_;
         impl_ = nullptr;
-        const bool success = impl->stop_worker(error_message);
+        const bool success = impl->stop_worker(error_message, stats);
         delete impl;
         return success;
     }

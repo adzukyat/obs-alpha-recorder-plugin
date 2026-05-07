@@ -145,6 +145,12 @@ The real OBS app E2E path launches portable OBS, enables Alpha Recorder through
 obs-websocket, starts and stops recording, then verifies the RGB recording,
 and exported alpha mask movie.
 
+Each run also records lightweight performance telemetry from the live alpha
+pipeline. The plugin logs one per-segment summary covering capture/readback CPU
+time, GPU submission timing, alignment-worker batches, writer queue depth, and
+mask encode timing; the OBS app E2E harness copies those summaries into
+`alpha-recorder-performance.json` under the run artifact root.
+
 Each OBS app E2E target starts with a 5-second recording. If decoded sync
 verification passes, the same OBS launch repeats longer recordings up to
 `MAX_RECORD_SECONDS`, which defaults to 30 seconds.
@@ -225,6 +231,8 @@ Implemented in the core library and live OBS workflow:
   the bounded writer queue
 - cached texture-encoder path classification so OBS packet callbacks only carry
   packet PTS/CTS evidence and do not enter encoder/mix texture queries
+- per-segment live-path performance telemetry for capture/readback, alignment,
+  writer queue depth, and mask encode timing, exported by OBS app E2E artifacts
 - focused unit regression coverage for repeated raw-video output frames,
   proving the alpha mask duplicates the previous frame instead of consuming a
   newer pending frame, plus runtime packet-CTS admission and texture-encoder
