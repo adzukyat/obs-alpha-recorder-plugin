@@ -13,13 +13,20 @@
 int main()
 {
     const alpha_recorder::obs::Settings defaults = alpha_recorder::obs::default_settings();
-    if (!defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov)
+    if (!defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
+        defaults.hevc_encoder.quality_profile != alpha_recorder::obs::HevcQualityProfile::HighQuality ||
+        defaults.hevc_encoder.quality_cq != 19U ||
+        defaults.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::Balanced)
     {
         std::cerr << "default settings are incorrect\n";
         return 1;
     }
 
-    if (alpha_recorder::obs::settings_section() != "AlphaRecorder" || alpha_recorder::obs::settings_enabled_key() != "enabled" || alpha_recorder::obs::settings_finalization_format_key() != "finalization_format")
+    if (alpha_recorder::obs::settings_section() != "AlphaRecorder" || alpha_recorder::obs::settings_enabled_key() != "enabled" ||
+        alpha_recorder::obs::settings_finalization_format_key() != "finalization_format" ||
+        alpha_recorder::obs::settings_hevc_quality_profile_key() != "hevc_quality_profile" ||
+        alpha_recorder::obs::settings_hevc_quality_cq_key() != "hevc_quality_cq" ||
+        alpha_recorder::obs::settings_hevc_preset_key() != "hevc_preset")
     {
         std::cerr << "settings keys do not match the expected config layout\n";
         return 2;
@@ -113,25 +120,42 @@ int main()
         return 13;
     }
 
+    alpha_recorder::obs::HevcQualityProfile parsed_profile = alpha_recorder::obs::HevcQualityProfile::HighQuality;
+    alpha_recorder::obs::HevcEncoderPreset parsed_preset = alpha_recorder::obs::HevcEncoderPreset::Balanced;
+    if (!alpha_recorder::obs::try_parse_hevc_quality_profile("fast", parsed_profile) ||
+        parsed_profile != alpha_recorder::obs::HevcQualityProfile::Fast ||
+        alpha_recorder::obs::hevc_quality_profile_config_value(alpha_recorder::obs::HevcQualityProfile::Balanced) != "balanced" ||
+        !alpha_recorder::obs::try_parse_hevc_encoder_preset("quality", parsed_preset) ||
+        parsed_preset != alpha_recorder::obs::HevcEncoderPreset::Quality ||
+        alpha_recorder::obs::hevc_encoder_preset_config_value(alpha_recorder::obs::HevcEncoderPreset::Fast) != "fast" ||
+        alpha_recorder::obs::clamp_hevc_quality_cq(99U) != 51U)
+    {
+        std::cerr << "hevc encoder setting helpers are incorrect\n";
+        return 14;
+    }
+
     config_t *config = nullptr;
-    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\n") != CONFIG_SUCCESS || config == nullptr)
+    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=quality\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory config string\n";
-        return 14;
+        return 15;
     }
 
     const alpha_recorder::obs::Settings loaded_settings = alpha_recorder::obs::load_settings(config);
     config_close(config);
-    if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov)
+    if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
+        loaded_settings.hevc_encoder.quality_profile != alpha_recorder::obs::HevcQualityProfile::Fast ||
+        loaded_settings.hevc_encoder.quality_cq != 51U ||
+        loaded_settings.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::Quality)
     {
         std::cerr << "valid config values were not preserved by the loader\n";
-        return 15;
+        return 16;
     }
 
     if (config_open_string(&config, "[AlphaRecorder]\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory default config string\n";
-        return 16;
+        return 17;
     }
 
     const alpha_recorder::obs::Settings missing_key_settings = alpha_recorder::obs::load_settings(config);
@@ -140,7 +164,7 @@ int main()
         missing_key_settings.finalization_format != alpha_recorder::obs::preferred_runtime_finalization_format())
     {
         std::cerr << "missing settings did not use enabled and preferred runtime defaults\n";
-        return 17;
+        return 18;
     }
 
     const std::filesystem::path temp_root = std::filesystem::temp_directory_path() / "alpha_recorder_settings_test";

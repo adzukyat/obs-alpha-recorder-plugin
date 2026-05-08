@@ -37,6 +37,11 @@ namespace alpha_recorder::obs
                                 finalization_format_config_value(settings.finalization_format).data());
             obs_data_set_string(response, "finalization_format_display_name",
                                 finalization_format_display_name(settings.finalization_format).data());
+            obs_data_set_string(response, settings_hevc_quality_profile_key().data(),
+                                hevc_quality_profile_config_value(settings.hevc_encoder.quality_profile).data());
+            obs_data_set_int(response, settings_hevc_quality_cq_key().data(), settings.hevc_encoder.quality_cq);
+            obs_data_set_string(response, settings_hevc_preset_key().data(),
+                                hevc_encoder_preset_config_value(settings.hevc_encoder.preset).data());
             obs_data_t *formats = obs_data_create();
             for (const FinalizationFormatOption &option : finalization_format_options)
             {
@@ -103,9 +108,46 @@ namespace alpha_recorder::obs
                 settings.finalization_format = normalize_finalization_format(parsed_format);
             }
 
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_quality_profile_key().data()))
+            {
+                const char *profile_text = obs_data_get_string(request, settings_hevc_quality_profile_key().data());
+                HevcQualityProfile parsed_profile = settings.hevc_encoder.quality_profile;
+                if (profile_text == nullptr || !try_parse_hevc_quality_profile(profile_text, parsed_profile))
+                {
+                    write_error(response, "Unsupported hevc_quality_profile.");
+                    return;
+                }
+
+                settings.hevc_encoder.quality_profile = parsed_profile;
+            }
+
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_quality_cq_key().data()))
+            {
+                const long long requested_cq = obs_data_get_int(request, settings_hevc_quality_cq_key().data());
+                settings.hevc_encoder.quality_cq = clamp_hevc_quality_cq(static_cast<std::uint32_t>(requested_cq < 0 ? 0 : requested_cq));
+            }
+
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_preset_key().data()))
+            {
+                const char *preset_text = obs_data_get_string(request, settings_hevc_preset_key().data());
+                HevcEncoderPreset parsed_preset = settings.hevc_encoder.preset;
+                if (preset_text == nullptr || !try_parse_hevc_encoder_preset(preset_text, parsed_preset))
+                {
+                    write_error(response, "Unsupported hevc_preset.");
+                    return;
+                }
+
+                settings.hevc_encoder.preset = parsed_preset;
+            }
+
             config_set_bool(config, settings_section().data(), settings_enabled_key().data(), settings.enabled);
             config_set_string(config, settings_section().data(), settings_finalization_format_key().data(),
                               finalization_format_config_value(settings.finalization_format).data());
+            config_set_string(config, settings_section().data(), settings_hevc_quality_profile_key().data(),
+                              hevc_quality_profile_config_value(settings.hevc_encoder.quality_profile).data());
+            config_set_int(config, settings_section().data(), settings_hevc_quality_cq_key().data(), settings.hevc_encoder.quality_cq);
+            config_set_string(config, settings_section().data(), settings_hevc_preset_key().data(),
+                              hevc_encoder_preset_config_value(settings.hevc_encoder.preset).data());
 
             if (config_save(config) != CONFIG_SUCCESS)
             {

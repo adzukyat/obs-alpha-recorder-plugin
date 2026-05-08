@@ -17,10 +17,33 @@ namespace alpha_recorder::obs
         MaskHevcAmf,
     };
 
+    enum class HevcQualityProfile
+    {
+        Lossless,
+        HighQuality,
+        Balanced,
+        Fast,
+    };
+
+    enum class HevcEncoderPreset
+    {
+        Fast,
+        Balanced,
+        Quality,
+    };
+
+    struct HevcEncoderSettings
+    {
+        HevcQualityProfile quality_profile = HevcQualityProfile::HighQuality;
+        std::uint32_t quality_cq = 19;
+        HevcEncoderPreset preset = HevcEncoderPreset::Balanced;
+    };
+
     struct Settings
     {
         bool enabled = false;
         FinalizationFormat finalization_format = FinalizationFormat::MaskPngMov;
+        HevcEncoderSettings hevc_encoder{};
     };
 
     struct FinalizationFormatOption
@@ -45,6 +68,21 @@ namespace alpha_recorder::obs
         return "finalization_format";
     }
 
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_quality_profile_key() noexcept
+    {
+        return "hevc_quality_profile";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_quality_cq_key() noexcept
+    {
+        return "hevc_quality_cq";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_preset_key() noexcept
+    {
+        return "hevc_preset";
+    }
+
     [[nodiscard]] inline constexpr FinalizationFormat finalization_format_default() noexcept
     {
         return FinalizationFormat::MaskPngMov;
@@ -66,7 +104,7 @@ namespace alpha_recorder::obs
 
     [[nodiscard]] inline constexpr Settings default_settings() noexcept
     {
-        return Settings{true, finalization_format_default()};
+        return Settings{true, finalization_format_default(), HevcEncoderSettings{}};
     }
 
     [[nodiscard]] inline std::uint64_t frame_pts_from_elapsed_ns(std::uint64_t elapsed_ns,
@@ -91,6 +129,122 @@ namespace alpha_recorder::obs
         {FinalizationFormat::MaskHevcNvenc, "mask_hevc_nvenc", "HEVC NVENC Mask"},
         {FinalizationFormat::MaskHevcAmf, "mask_hevc_amf", "HEVC AMF Mask"},
     }};
+
+    [[nodiscard]] inline constexpr std::string_view hevc_quality_profile_config_value(HevcQualityProfile profile) noexcept
+    {
+        switch (profile)
+        {
+        case HevcQualityProfile::Lossless:
+            return "lossless";
+        case HevcQualityProfile::HighQuality:
+            return "high_quality";
+        case HevcQualityProfile::Balanced:
+            return "balanced";
+        case HevcQualityProfile::Fast:
+            return "fast";
+        }
+
+        return "high_quality";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view hevc_quality_profile_display_name(HevcQualityProfile profile) noexcept
+    {
+        switch (profile)
+        {
+        case HevcQualityProfile::Lossless:
+            return "Lossless";
+        case HevcQualityProfile::HighQuality:
+            return "High Quality";
+        case HevcQualityProfile::Balanced:
+            return "Balanced";
+        case HevcQualityProfile::Fast:
+            return "Fast";
+        }
+
+        return "High Quality";
+    }
+
+    [[nodiscard]] inline bool try_parse_hevc_quality_profile(std::string_view value, HevcQualityProfile &profile) noexcept
+    {
+        if (value == "lossless")
+        {
+            profile = HevcQualityProfile::Lossless;
+            return true;
+        }
+        if (value == "high_quality")
+        {
+            profile = HevcQualityProfile::HighQuality;
+            return true;
+        }
+        if (value == "balanced")
+        {
+            profile = HevcQualityProfile::Balanced;
+            return true;
+        }
+        if (value == "fast")
+        {
+            profile = HevcQualityProfile::Fast;
+            return true;
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] inline constexpr std::string_view hevc_encoder_preset_config_value(HevcEncoderPreset preset) noexcept
+    {
+        switch (preset)
+        {
+        case HevcEncoderPreset::Fast:
+            return "fast";
+        case HevcEncoderPreset::Balanced:
+            return "balanced";
+        case HevcEncoderPreset::Quality:
+            return "quality";
+        }
+
+        return "balanced";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view hevc_encoder_preset_display_name(HevcEncoderPreset preset) noexcept
+    {
+        switch (preset)
+        {
+        case HevcEncoderPreset::Fast:
+            return "Fast";
+        case HevcEncoderPreset::Balanced:
+            return "Balanced";
+        case HevcEncoderPreset::Quality:
+            return "Quality";
+        }
+
+        return "Balanced";
+    }
+
+    [[nodiscard]] inline bool try_parse_hevc_encoder_preset(std::string_view value, HevcEncoderPreset &preset) noexcept
+    {
+        if (value == "fast")
+        {
+            preset = HevcEncoderPreset::Fast;
+            return true;
+        }
+        if (value == "balanced")
+        {
+            preset = HevcEncoderPreset::Balanced;
+            return true;
+        }
+        if (value == "quality")
+        {
+            preset = HevcEncoderPreset::Quality;
+            return true;
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_quality_cq(std::uint32_t cq) noexcept
+    {
+        return cq > 51U ? 51U : cq;
+    }
 
     [[nodiscard]] inline constexpr std::string_view finalization_format_export_unsupported_reason(FinalizationFormat format) noexcept
     {

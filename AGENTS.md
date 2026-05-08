@@ -26,6 +26,10 @@ path that can run without desktop automation.
 - Settings include:
   - Enabled toggle.
   - Finalization Format dropdown.
+  - HEVC encoder controls when NVENC/AMF mask output is selected:
+    - Quality Profile.
+    - CQ.
+    - Preset.
 - Missing settings default to Enabled ON.
 - When no finalization format has been saved, the plugin prefers an available
   hardware HEVC encoder before falling back to PNG MOV.
@@ -39,6 +43,10 @@ path that can run without desktop automation.
   `AlphaRecorder.enabled`.
 - The finalization format is persisted in OBS user config under
   `AlphaRecorder.finalization_format`.
+- HEVC encoder tuning is persisted in OBS user config under:
+  - `AlphaRecorder.hevc_quality_profile`
+  - `AlphaRecorder.hevc_quality_cq`
+  - `AlphaRecorder.hevc_preset`
 - Supported finalization formats currently include:
   - `mask_png_mov` -> lossless grayscale PNG MOV `.mov`
   - `mask_hevc_nvenc` -> HEVC NVENC `.mp4`
@@ -185,8 +193,10 @@ the selected finalization format.
 
 Completed:
 
-- `Tools > Alpha Recorder Settings` dialog with Enabled and Finalization Format.
-- OBS user config persistence for enabled state and finalization format.
+- `Tools > Alpha Recorder Settings` dialog with Enabled, Finalization Format,
+  and HEVC encoder tuning controls.
+- OBS user config persistence for enabled state, finalization format, and HEVC
+  encoder tuning.
 - Runtime-aware finalization format defaults and availability filtering.
 - Runtime hook registration/unregistration based on current settings.
 - Recording lifecycle integration for start, pause, unpause, stopping, and stop.
@@ -215,6 +225,7 @@ Completed:
 - obs-websocket vendor API for test automation:
   - `alpha_recorder.GetSettings`
   - `alpha_recorder.SetSettings`
+- obs-websocket settings coverage for HEVC quality profile, CQ, and preset.
 - CMake-native OBS bootstrap, staging, deterministic E2E, and OBS app E2E
   scripts:
   - `cmake/scripts/BootstrapObs.cmake`

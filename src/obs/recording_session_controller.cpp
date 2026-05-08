@@ -658,6 +658,7 @@ technique Draw
             }
 
             finalization_format_ = settings.finalization_format;
+            settings_ = settings;
             session_active_ = true;
             session_aborted_ = false;
             recording_paused_ = obs_frontend_recording_paused();
@@ -756,6 +757,7 @@ technique Draw
             }
 
             finalization_format_ = settings.finalization_format;
+            settings_ = settings;
 
             if (!open_segment_locked(recording_path, video_info, true))
             {
@@ -818,6 +820,7 @@ technique Draw
             config.height = video_info.output_height;
             config.fps_num = video_info.fps_num;
             config.fps_den = video_info.fps_den;
+            config.hevc_encoder = settings_.hevc_encoder;
 
             std::string writer_error;
             if (!writer_.open(config, &writer_error))
@@ -1508,6 +1511,7 @@ technique Draw
         AlphaMaskVideoWriter writer_{};
         obs_output_t *recording_output_ = nullptr;
         alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::MaskPngMov;
+        alpha_recorder::obs::Settings settings_{};
         static constexpr std::size_t kMaxEncoderReorderFrames = 16U;
         std::condition_variable alignment_condition_{};
         std::thread alignment_worker_{};

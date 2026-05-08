@@ -19,6 +19,7 @@ namespace alpha_recorder::obs
         std::uint32_t height = 0;
         std::uint32_t fps_num = 30;
         std::uint32_t fps_den = 1;
+        HevcEncoderSettings hevc_encoder{};
     };
 
     struct AlphaMaskVideoWriterStats

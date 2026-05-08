@@ -116,6 +116,58 @@ namespace alpha_recorder::obs
             return true;
         }
 
+        const char *nvenc_preset_value(HevcEncoderPreset preset) noexcept
+        {
+            switch (preset)
+            {
+            case HevcEncoderPreset::Fast:
+                return "p2";
+            case HevcEncoderPreset::Balanced:
+                return "p3";
+            case HevcEncoderPreset::Quality:
+                return "p5";
+            }
+
+            return "p3";
+        }
+
+        const char *amf_quality_value(HevcEncoderPreset preset) noexcept
+        {
+            switch (preset)
+            {
+            case HevcEncoderPreset::Fast:
+                return "speed";
+            case HevcEncoderPreset::Balanced:
+                return "balanced";
+            case HevcEncoderPreset::Quality:
+                return "quality";
+            }
+
+            return "balanced";
+        }
+
+        std::uint32_t profile_default_cq(HevcQualityProfile profile, std::uint32_t requested_cq) noexcept
+        {
+            if (requested_cq <= 51U)
+            {
+                return requested_cq;
+            }
+
+            switch (profile)
+            {
+            case HevcQualityProfile::Lossless:
+                return 0U;
+            case HevcQualityProfile::HighQuality:
+                return 19U;
+            case HevcQualityProfile::Balanced:
+                return 23U;
+            case HevcQualityProfile::Fast:
+                return 28U;
+            }
+
+            return 19U;
+        }
+
         bool configure_encoder(AVCodecContext &encoder, const AVCodec &codec, const AlphaMaskVideoWriterConfig &config,
                                std::string *error_message)
         {
@@ -146,19 +198,43 @@ namespace alpha_recorder::obs
             case FinalizationFormat::MaskHevcNvenc:
                 encoder.gop_size = static_cast<int>(config.fps_num == 0U ? 30U : config.fps_num);
                 encoder.pix_fmt = AV_PIX_FMT_YUV420P;
-                (void)av_opt_set(encoder.priv_data, "preset", "lossless", 0);
-                (void)av_opt_set(encoder.priv_data, "tune", "lossless", 0);
-                (void)av_opt_set(encoder.priv_data, "rc", "constqp", 0);
-                (void)av_opt_set_int(encoder.priv_data, "qp", 0, 0);
+                if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
+                {
+                    (void)av_opt_set(encoder.priv_data, "preset", "lossless", 0);
+                    (void)av_opt_set(encoder.priv_data, "tune", "lossless", 0);
+                    (void)av_opt_set(encoder.priv_data, "rc", "constqp", 0);
+                    (void)av_opt_set_int(encoder.priv_data, "qp", 0, 0);
+                    return true;
+                }
+
+                (void)av_opt_set(encoder.priv_data, "preset", nvenc_preset_value(config.hevc_encoder.preset), 0);
+                (void)av_opt_set(encoder.priv_data, "tune", config.hevc_encoder.quality_profile == HevcQualityProfile::Fast ? "ll" : "hq", 0);
+                (void)av_opt_set(encoder.priv_data, "rc", "vbr", 0);
+                (void)av_opt_set_int(encoder.priv_data, "cq", profile_default_cq(config.hevc_encoder.quality_profile,
+                                                                                  config.hevc_encoder.quality_cq),
+                                     0);
                 return true;
 
             case FinalizationFormat::MaskHevcAmf:
                 encoder.gop_size = static_cast<int>(config.fps_num == 0U ? 30U : config.fps_num);
                 encoder.pix_fmt = AV_PIX_FMT_YUV420P;
                 (void)av_opt_set(encoder.priv_data, "usage", "transcoding", 0);
-                (void)av_opt_set(encoder.priv_data, "quality", "quality", 0);
-                (void)av_opt_set_int(encoder.priv_data, "qp_i", 0, 0);
-                (void)av_opt_set_int(encoder.priv_data, "qp_p", 0, 0);
+                if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
+                {
+                    (void)av_opt_set(encoder.priv_data, "quality", "quality", 0);
+                    (void)av_opt_set_int(encoder.priv_data, "qp_i", 0, 0);
+                    (void)av_opt_set_int(encoder.priv_data, "qp_p", 0, 0);
+                    return true;
+                }
+
+                (void)av_opt_set(encoder.priv_data, "quality", amf_quality_value(config.hevc_encoder.preset), 0);
+                (void)av_opt_set(encoder.priv_data, "rc", "cqp", 0);
+                (void)av_opt_set_int(encoder.priv_data, "qp_i", profile_default_cq(config.hevc_encoder.quality_profile,
+                                                                                   config.hevc_encoder.quality_cq),
+                                     0);
+                (void)av_opt_set_int(encoder.priv_data, "qp_p", profile_default_cq(config.hevc_encoder.quality_profile,
+                                                                                   config.hevc_encoder.quality_cq),
+                                     0);
                 return true;
             }
 
