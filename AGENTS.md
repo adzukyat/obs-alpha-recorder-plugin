@@ -30,6 +30,7 @@ path that can run without desktop automation.
     - Quality Profile.
     - CQ.
     - Preset.
+    - Advanced GOP, B-frames, Lookahead, and AQ controls.
 - Missing settings default to Enabled ON.
 - When no finalization format has been saved, the plugin prefers an available
   hardware HEVC encoder before falling back to PNG MOV.
@@ -47,6 +48,10 @@ path that can run without desktop automation.
   - `AlphaRecorder.hevc_quality_profile`
   - `AlphaRecorder.hevc_quality_cq`
   - `AlphaRecorder.hevc_preset`
+  - `AlphaRecorder.hevc_gop_size`
+  - `AlphaRecorder.hevc_b_frames`
+  - `AlphaRecorder.hevc_lookahead`
+  - `AlphaRecorder.hevc_adaptive_quantization`
 - Supported finalization formats currently include:
   - `mask_png_mov` -> lossless grayscale PNG MOV `.mov`
   - `mask_hevc_nvenc` -> HEVC NVENC `.mp4`
@@ -225,7 +230,8 @@ Completed:
 - obs-websocket vendor API for test automation:
   - `alpha_recorder.GetSettings`
   - `alpha_recorder.SetSettings`
-- obs-websocket settings coverage for HEVC quality profile, CQ, and preset.
+- obs-websocket settings coverage for HEVC quality profile, CQ, preset, GOP,
+  B-frames, lookahead, and adaptive quantization.
 - CMake-native OBS bootstrap, staging, deterministic E2E, and OBS app E2E
   scripts:
   - `cmake/scripts/BootstrapObs.cmake`

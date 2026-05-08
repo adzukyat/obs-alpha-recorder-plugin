@@ -16,7 +16,11 @@ int main()
     if (!defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
         defaults.hevc_encoder.quality_profile != alpha_recorder::obs::HevcQualityProfile::HighQuality ||
         defaults.hevc_encoder.quality_cq != 19U ||
-        defaults.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::Balanced)
+        defaults.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::Balanced ||
+        defaults.hevc_encoder.gop_size != 0U ||
+        defaults.hevc_encoder.b_frames != 0U ||
+        defaults.hevc_encoder.lookahead != 0U ||
+        defaults.hevc_encoder.adaptive_quantization)
     {
         std::cerr << "default settings are incorrect\n";
         return 1;
@@ -26,7 +30,11 @@ int main()
         alpha_recorder::obs::settings_finalization_format_key() != "finalization_format" ||
         alpha_recorder::obs::settings_hevc_quality_profile_key() != "hevc_quality_profile" ||
         alpha_recorder::obs::settings_hevc_quality_cq_key() != "hevc_quality_cq" ||
-        alpha_recorder::obs::settings_hevc_preset_key() != "hevc_preset")
+        alpha_recorder::obs::settings_hevc_preset_key() != "hevc_preset" ||
+        alpha_recorder::obs::settings_hevc_gop_size_key() != "hevc_gop_size" ||
+        alpha_recorder::obs::settings_hevc_b_frames_key() != "hevc_b_frames" ||
+        alpha_recorder::obs::settings_hevc_lookahead_key() != "hevc_lookahead" ||
+        alpha_recorder::obs::settings_hevc_adaptive_quantization_key() != "hevc_adaptive_quantization")
     {
         std::cerr << "settings keys do not match the expected config layout\n";
         return 2;
@@ -128,14 +136,17 @@ int main()
         !alpha_recorder::obs::try_parse_hevc_encoder_preset("quality", parsed_preset) ||
         parsed_preset != alpha_recorder::obs::HevcEncoderPreset::Quality ||
         alpha_recorder::obs::hevc_encoder_preset_config_value(alpha_recorder::obs::HevcEncoderPreset::Fast) != "fast" ||
-        alpha_recorder::obs::clamp_hevc_quality_cq(99U) != 51U)
+        alpha_recorder::obs::clamp_hevc_quality_cq(99U) != 51U ||
+        alpha_recorder::obs::clamp_hevc_gop_size(1200U) != 1000U ||
+        alpha_recorder::obs::clamp_hevc_b_frames(8U) != 4U ||
+        alpha_recorder::obs::clamp_hevc_lookahead(64U) != 32U)
     {
         std::cerr << "hevc encoder setting helpers are incorrect\n";
         return 14;
     }
 
     config_t *config = nullptr;
-    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=quality\n") != CONFIG_SUCCESS || config == nullptr)
+    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=quality\nhevc_gop_size=1200\nhevc_b_frames=8\nhevc_lookahead=64\nhevc_adaptive_quantization=true\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory config string\n";
         return 15;
@@ -146,7 +157,11 @@ int main()
     if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
         loaded_settings.hevc_encoder.quality_profile != alpha_recorder::obs::HevcQualityProfile::Fast ||
         loaded_settings.hevc_encoder.quality_cq != 51U ||
-        loaded_settings.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::Quality)
+        loaded_settings.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::Quality ||
+        loaded_settings.hevc_encoder.gop_size != 1000U ||
+        loaded_settings.hevc_encoder.b_frames != 4U ||
+        loaded_settings.hevc_encoder.lookahead != 32U ||
+        !loaded_settings.hevc_encoder.adaptive_quantization)
     {
         std::cerr << "valid config values were not preserved by the loader\n";
         return 16;

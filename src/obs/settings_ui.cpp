@@ -16,6 +16,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QMainWindow>
 #include <QMessageBox>
 #include <QPointer>
@@ -23,6 +24,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStandardItemModel>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "alpha_recorder/export_worker.hpp"
@@ -115,6 +117,15 @@ namespace
                        static_cast<int>(alpha_recorder::obs::clamp_hevc_quality_cq(normalized_settings.hevc_encoder.quality_cq)));
         config_set_string(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_preset_key().data(),
                           alpha_recorder::obs::hevc_encoder_preset_config_value(normalized_settings.hevc_encoder.preset).data());
+        config_set_int(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_gop_size_key().data(),
+                       static_cast<int>(alpha_recorder::obs::clamp_hevc_gop_size(normalized_settings.hevc_encoder.gop_size)));
+        config_set_int(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_b_frames_key().data(),
+                       static_cast<int>(alpha_recorder::obs::clamp_hevc_b_frames(normalized_settings.hevc_encoder.b_frames)));
+        config_set_int(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_lookahead_key().data(),
+                       static_cast<int>(alpha_recorder::obs::clamp_hevc_lookahead(normalized_settings.hevc_encoder.lookahead)));
+        config_set_bool(config, alpha_recorder::obs::settings_section().data(),
+                        alpha_recorder::obs::settings_hevc_adaptive_quantization_key().data(),
+                        normalized_settings.hevc_encoder.adaptive_quantization);
 
         if (config_save(config) != CONFIG_SUCCESS)
         {
@@ -140,6 +151,7 @@ namespace
             setMinimumWidth(560);
 
             auto *mainLayout = new QVBoxLayout(this);
+            mainLayout->setSizeConstraint(QLayout::SetFixedSize);
             mainLayout->setContentsMargins(18, 16, 18, 16);
             mainLayout->setSpacing(12);
 
@@ -219,7 +231,7 @@ namespace
             qualitySpinBox_ = new QSpinBox(this);
             qualitySpinBox_->setRange(0, 51);
             qualitySpinBox_->setPrefix("CQ ");
-            qualitySpinBox_->setFixedWidth(82);
+            qualitySpinBox_->setFixedWidth(104);
             qualityLayout->addWidget(qualitySlider_, 1);
             qualityLayout->addWidget(qualitySpinBox_);
             hevcFormLayout->addRow("Quality", qualityLayout);
@@ -246,10 +258,14 @@ namespace
             advancedLayout->setContentsMargins(0, 0, 0, 0);
             advancedLayout->setHorizontalSpacing(14);
             advancedLayout->setVerticalSpacing(6);
-            add_advanced_readout(advancedLayout, 0, "GOP", "FPS");
-            add_advanced_readout(advancedLayout, 1, "B-frames", "0");
-            add_advanced_readout(advancedLayout, 2, "Lookahead", "Off");
-            add_advanced_readout(advancedLayout, 3, "AQ", "Off");
+            advancedLayout->setColumnMinimumWidth(0, 120);
+            advancedLayout->setColumnMinimumWidth(1, 90);
+            advancedLayout->setColumnMinimumWidth(2, 120);
+            advancedLayout->setColumnMinimumWidth(3, 90);
+            gopSpinBox_ = add_advanced_spinbox(advancedLayout, 0, "GOP", 0, 1000, "Auto");
+            bFramesSpinBox_ = add_advanced_spinbox(advancedLayout, 1, "B-frames", 0, 4, nullptr);
+            lookaheadSpinBox_ = add_advanced_spinbox(advancedLayout, 2, "Lookahead", 0, 32, "Off");
+            aqCombo_ = add_advanced_combo(advancedLayout, 3, "AQ");
             hevcLayout->addWidget(advancedFrame_);
 
             mainLayout->addWidget(hevcGroupBox_);
@@ -259,6 +275,10 @@ namespace
             const std::uint32_t initialCq = alpha_recorder::obs::clamp_hevc_quality_cq(settings.hevc_encoder.quality_cq);
             qualitySlider_->setValue(static_cast<int>(initialCq));
             qualitySpinBox_->setValue(static_cast<int>(initialCq));
+            gopSpinBox_->setValue(static_cast<int>(alpha_recorder::obs::clamp_hevc_gop_size(settings.hevc_encoder.gop_size)));
+            bFramesSpinBox_->setValue(static_cast<int>(alpha_recorder::obs::clamp_hevc_b_frames(settings.hevc_encoder.b_frames)));
+            lookaheadSpinBox_->setValue(static_cast<int>(alpha_recorder::obs::clamp_hevc_lookahead(settings.hevc_encoder.lookahead)));
+            aqCombo_->setCurrentIndex(settings.hevc_encoder.adaptive_quantization ? 1 : 0);
 
             connect(finalizationFormatCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { update_hevc_controls(); });
             connect(profileButtonGroup_, qOverload<int>(&QButtonGroup::idClicked), this, [this](int id) {
@@ -311,6 +331,10 @@ namespace
             settings.hevc_encoder.quality_profile = selected_hevc_profile();
             settings.hevc_encoder.quality_cq = static_cast<std::uint32_t>(qualitySpinBox_->value());
             settings.hevc_encoder.preset = selected_hevc_preset();
+            settings.hevc_encoder.gop_size = static_cast<std::uint32_t>(gopSpinBox_->value());
+            settings.hevc_encoder.b_frames = static_cast<std::uint32_t>(bFramesSpinBox_->value());
+            settings.hevc_encoder.lookahead = static_cast<std::uint32_t>(lookaheadSpinBox_->value());
+            settings.hevc_encoder.adaptive_quantization = aqCombo_->currentIndex() == 1;
 
             return settings;
         }
@@ -339,13 +363,31 @@ namespace
             layout->addWidget(button);
         }
 
-        void add_advanced_readout(QGridLayout *layout, int row, const char *label, const char *value)
+        QSpinBox *add_advanced_spinbox(QGridLayout *layout, int row, const char *label, int minimum, int maximum, const char *specialValueText)
         {
             auto *nameLabel = new QLabel(label, this);
-            auto *valueLabel = new QLabel(value, this);
-            valueLabel->setEnabled(false);
+            auto *spinBox = new QSpinBox(this);
+            spinBox->setRange(minimum, maximum);
+            spinBox->setFixedWidth(96);
+            if (specialValueText != nullptr)
+            {
+                spinBox->setSpecialValueText(specialValueText);
+            }
             layout->addWidget(nameLabel, row / 2, (row % 2) * 2);
-            layout->addWidget(valueLabel, row / 2, (row % 2) * 2 + 1);
+            layout->addWidget(spinBox, row / 2, (row % 2) * 2 + 1);
+            return spinBox;
+        }
+
+        QComboBox *add_advanced_combo(QGridLayout *layout, int row, const char *label)
+        {
+            auto *nameLabel = new QLabel(label, this);
+            auto *combo = new QComboBox(this);
+            combo->addItem("Off");
+            combo->addItem("On");
+            combo->setFixedWidth(96);
+            layout->addWidget(nameLabel, row / 2, (row % 2) * 2);
+            layout->addWidget(combo, row / 2, (row % 2) * 2 + 1);
+            return combo;
         }
 
         void select_hevc_profile(alpha_recorder::obs::HevcQualityProfile profile)
@@ -427,7 +469,14 @@ namespace
             qualitySlider_->setEnabled(qualityEnabled);
             qualitySpinBox_->setEnabled(qualityEnabled);
             presetCombo_->setEnabled(qualityEnabled);
+            gopSpinBox_->setEnabled(qualityEnabled);
+            bFramesSpinBox_->setEnabled(qualityEnabled);
+            lookaheadSpinBox_->setEnabled(qualityEnabled);
+            aqCombo_->setEnabled(qualityEnabled);
             advancedFrame_->setVisible(hevcSelected && advancedCheckBox_->isChecked());
+            QTimer::singleShot(0, this, [this]() {
+                adjustSize();
+            });
         }
 
         QCheckBox *enabledCheckBox_ = nullptr;
@@ -439,6 +488,10 @@ namespace
         QComboBox *presetCombo_ = nullptr;
         QCheckBox *advancedCheckBox_ = nullptr;
         QFrame *advancedFrame_ = nullptr;
+        QSpinBox *gopSpinBox_ = nullptr;
+        QSpinBox *bFramesSpinBox_ = nullptr;
+        QSpinBox *lookaheadSpinBox_ = nullptr;
+        QComboBox *aqCombo_ = nullptr;
     };
 
     QPointer<QAction> settingsAction = nullptr;

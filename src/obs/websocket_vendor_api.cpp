@@ -42,6 +42,11 @@ namespace alpha_recorder::obs
             obs_data_set_int(response, settings_hevc_quality_cq_key().data(), settings.hevc_encoder.quality_cq);
             obs_data_set_string(response, settings_hevc_preset_key().data(),
                                 hevc_encoder_preset_config_value(settings.hevc_encoder.preset).data());
+            obs_data_set_int(response, settings_hevc_gop_size_key().data(), settings.hevc_encoder.gop_size);
+            obs_data_set_int(response, settings_hevc_b_frames_key().data(), settings.hevc_encoder.b_frames);
+            obs_data_set_int(response, settings_hevc_lookahead_key().data(), settings.hevc_encoder.lookahead);
+            obs_data_set_bool(response, settings_hevc_adaptive_quantization_key().data(),
+                              settings.hevc_encoder.adaptive_quantization);
             obs_data_t *formats = obs_data_create();
             for (const FinalizationFormatOption &option : finalization_format_options)
             {
@@ -140,6 +145,33 @@ namespace alpha_recorder::obs
                 settings.hevc_encoder.preset = parsed_preset;
             }
 
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_gop_size_key().data()))
+            {
+                const long long requested_gop = obs_data_get_int(request, settings_hevc_gop_size_key().data());
+                settings.hevc_encoder.gop_size =
+                    clamp_hevc_gop_size(static_cast<std::uint32_t>(requested_gop < 0 ? 0 : requested_gop));
+            }
+
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_b_frames_key().data()))
+            {
+                const long long requested_b_frames = obs_data_get_int(request, settings_hevc_b_frames_key().data());
+                settings.hevc_encoder.b_frames =
+                    clamp_hevc_b_frames(static_cast<std::uint32_t>(requested_b_frames < 0 ? 0 : requested_b_frames));
+            }
+
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_lookahead_key().data()))
+            {
+                const long long requested_lookahead = obs_data_get_int(request, settings_hevc_lookahead_key().data());
+                settings.hevc_encoder.lookahead =
+                    clamp_hevc_lookahead(static_cast<std::uint32_t>(requested_lookahead < 0 ? 0 : requested_lookahead));
+            }
+
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_adaptive_quantization_key().data()))
+            {
+                settings.hevc_encoder.adaptive_quantization =
+                    obs_data_get_bool(request, settings_hevc_adaptive_quantization_key().data());
+            }
+
             config_set_bool(config, settings_section().data(), settings_enabled_key().data(), settings.enabled);
             config_set_string(config, settings_section().data(), settings_finalization_format_key().data(),
                               finalization_format_config_value(settings.finalization_format).data());
@@ -148,6 +180,11 @@ namespace alpha_recorder::obs
             config_set_int(config, settings_section().data(), settings_hevc_quality_cq_key().data(), settings.hevc_encoder.quality_cq);
             config_set_string(config, settings_section().data(), settings_hevc_preset_key().data(),
                               hevc_encoder_preset_config_value(settings.hevc_encoder.preset).data());
+            config_set_int(config, settings_section().data(), settings_hevc_gop_size_key().data(), settings.hevc_encoder.gop_size);
+            config_set_int(config, settings_section().data(), settings_hevc_b_frames_key().data(), settings.hevc_encoder.b_frames);
+            config_set_int(config, settings_section().data(), settings_hevc_lookahead_key().data(), settings.hevc_encoder.lookahead);
+            config_set_bool(config, settings_section().data(), settings_hevc_adaptive_quantization_key().data(),
+                            settings.hevc_encoder.adaptive_quantization);
 
             if (config_save(config) != CONFIG_SUCCESS)
             {

@@ -168,6 +168,23 @@ namespace alpha_recorder::obs
             return 19U;
         }
 
+        int configured_gop_size(const AlphaMaskVideoWriterConfig &config) noexcept
+        {
+            const std::uint32_t default_gop = config.fps_num == 0U ? 30U : config.fps_num;
+            const std::uint32_t requested_gop = clamp_hevc_gop_size(config.hevc_encoder.gop_size);
+            return static_cast<int>(requested_gop == 0U ? default_gop : requested_gop);
+        }
+
+        int configured_b_frames(const AlphaMaskVideoWriterConfig &config) noexcept
+        {
+            if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
+            {
+                return 0;
+            }
+
+            return static_cast<int>(clamp_hevc_b_frames(config.hevc_encoder.b_frames));
+        }
+
         bool configure_encoder(AVCodecContext &encoder, const AVCodec &codec, const AlphaMaskVideoWriterConfig &config,
                                std::string *error_message)
         {
@@ -196,7 +213,8 @@ namespace alpha_recorder::obs
                 return true;
 
             case FinalizationFormat::MaskHevcNvenc:
-                encoder.gop_size = static_cast<int>(config.fps_num == 0U ? 30U : config.fps_num);
+                encoder.gop_size = configured_gop_size(config);
+                encoder.max_b_frames = configured_b_frames(config);
                 encoder.pix_fmt = AV_PIX_FMT_YUV420P;
                 if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
                 {
@@ -213,10 +231,20 @@ namespace alpha_recorder::obs
                 (void)av_opt_set_int(encoder.priv_data, "cq", profile_default_cq(config.hevc_encoder.quality_profile,
                                                                                   config.hevc_encoder.quality_cq),
                                      0);
+                if (const std::uint32_t lookahead = clamp_hevc_lookahead(config.hevc_encoder.lookahead); lookahead > 0U)
+                {
+                    (void)av_opt_set_int(encoder.priv_data, "rc-lookahead", lookahead, 0);
+                }
+                if (config.hevc_encoder.adaptive_quantization)
+                {
+                    (void)av_opt_set_int(encoder.priv_data, "spatial-aq", 1, 0);
+                    (void)av_opt_set_int(encoder.priv_data, "temporal-aq", 1, 0);
+                }
                 return true;
 
             case FinalizationFormat::MaskHevcAmf:
-                encoder.gop_size = static_cast<int>(config.fps_num == 0U ? 30U : config.fps_num);
+                encoder.gop_size = configured_gop_size(config);
+                encoder.max_b_frames = configured_b_frames(config);
                 encoder.pix_fmt = AV_PIX_FMT_YUV420P;
                 (void)av_opt_set(encoder.priv_data, "usage", "transcoding", 0);
                 if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
@@ -235,6 +263,15 @@ namespace alpha_recorder::obs
                 (void)av_opt_set_int(encoder.priv_data, "qp_p", profile_default_cq(config.hevc_encoder.quality_profile,
                                                                                    config.hevc_encoder.quality_cq),
                                      0);
+                if (const std::uint32_t lookahead = clamp_hevc_lookahead(config.hevc_encoder.lookahead); lookahead > 0U)
+                {
+                    (void)av_opt_set(encoder.priv_data, "preanalysis", "true", 0);
+                    (void)av_opt_set_int(encoder.priv_data, "pa_lookahead_buffer_depth", lookahead, 0);
+                }
+                if (config.hevc_encoder.adaptive_quantization)
+                {
+                    (void)av_opt_set(encoder.priv_data, "vbaq", "true", 0);
+                }
                 return true;
             }
 

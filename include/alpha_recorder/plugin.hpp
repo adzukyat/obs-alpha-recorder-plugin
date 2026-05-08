@@ -37,6 +37,10 @@ namespace alpha_recorder::obs
         HevcQualityProfile quality_profile = HevcQualityProfile::HighQuality;
         std::uint32_t quality_cq = 19;
         HevcEncoderPreset preset = HevcEncoderPreset::Balanced;
+        std::uint32_t gop_size = 0;
+        std::uint32_t b_frames = 0;
+        std::uint32_t lookahead = 0;
+        bool adaptive_quantization = false;
     };
 
     struct Settings
@@ -81,6 +85,26 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline constexpr std::string_view settings_hevc_preset_key() noexcept
     {
         return "hevc_preset";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_gop_size_key() noexcept
+    {
+        return "hevc_gop_size";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_b_frames_key() noexcept
+    {
+        return "hevc_b_frames";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_lookahead_key() noexcept
+    {
+        return "hevc_lookahead";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_adaptive_quantization_key() noexcept
+    {
+        return "hevc_adaptive_quantization";
     }
 
     [[nodiscard]] inline constexpr FinalizationFormat finalization_format_default() noexcept
@@ -244,6 +268,21 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_quality_cq(std::uint32_t cq) noexcept
     {
         return cq > 51U ? 51U : cq;
+    }
+
+    [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_gop_size(std::uint32_t gop_size) noexcept
+    {
+        return gop_size > 1000U ? 1000U : gop_size;
+    }
+
+    [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_b_frames(std::uint32_t b_frames) noexcept
+    {
+        return b_frames > 4U ? 4U : b_frames;
+    }
+
+    [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_lookahead(std::uint32_t lookahead) noexcept
+    {
+        return lookahead > 32U ? 32U : lookahead;
     }
 
     [[nodiscard]] inline constexpr std::string_view finalization_format_export_unsupported_reason(FinalizationFormat format) noexcept
