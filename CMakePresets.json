@@ -79,6 +79,20 @@
         "ALPHA_RECORDER_BUILD_CORE_UNIT_TESTS": "OFF",
         "ALPHA_RECORDER_BUILD_E2E_TESTS": "OFF"
       }
+    },
+    {
+      "name": "linux-x64",
+      "displayName": "Linux x64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+        "ALPHA_RECORDER_BUILD_OBS_PLUGIN": "ON",
+        "ALPHA_RECORDER_BUILD_UNIT_TESTS": "ON",
+        "ALPHA_RECORDER_BUILD_E2E_TESTS": "ON",
+        "OBS_ROOT": "$env{OBS_ROOT}"
+      }
     }
   ],
   "buildPresets": [
@@ -116,6 +130,16 @@
       "name": "macos-arm64-scenario-debug",
       "configurePreset": "macos-arm64-scenario",
       "configuration": "Debug"
+    },
+    {
+      "name": "linux-x64-debug",
+      "configurePreset": "linux-x64",
+      "configuration": "Debug"
+    },
+    {
+      "name": "linux-x64-relwithdebinfo",
+      "configurePreset": "linux-x64",
+      "configuration": "RelWithDebInfo"
     }
   ],
   "testPresets": [
@@ -147,6 +171,22 @@
       "name": "macos-arm64-scenario-debug",
       "configurePreset": "macos-arm64-scenario",
       "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-x64-debug",
+      "configurePreset": "linux-x64",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-x64-relwithdebinfo",
+      "configurePreset": "linux-x64",
+      "configuration": "RelWithDebInfo",
       "output": {
         "outputOnFailure": true
       }

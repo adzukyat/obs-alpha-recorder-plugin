@@ -57,7 +57,7 @@ The current tree is intentionally minimal. It provides:
 - unit test executables registered with CTest
 - deterministic E2E executables and CMake-native staging helpers
 - a cross-platform OBS app E2E path driven by CMake and obs-websocket
-- CMake presets for Windows x64 MSVC and macOS
+- CMake presets for Windows x64 MSVC, macOS, and Linux x64
 
 ## Build
 
@@ -77,7 +77,35 @@ cmake -DREPO_ROOT="$PWD" -DBUILD_FROM_SOURCE=ON -P cmake/scripts/BootstrapObs.cm
 ```
 
 On macOS this uses OBS Studio's required Xcode generator for the OBS dependency
-build. On Windows it uses Visual Studio by default.
+build. On Windows it uses Visual Studio by default. On Linux it uses Ninja and
+stages the installed OBS runtime layout under `deps/obs/obs-build/rundir` by
+default.
+
+On Linux or WSL Ubuntu, install the build/runtime prerequisites first. The exact
+OBS dependency set can grow with the pinned OBS tag, but this is the expected
+baseline on Ubuntu 24.04:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential cmake ninja-build git pkg-config curl unzip zip \
+  extra-cmake-modules ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
+  libavfilter-dev libavdevice-dev libswscale-dev libjansson-dev uthash-dev \
+  qt6-base-dev qt6-base-private-dev qt6-svg-dev libx11-dev libx11-xcb-dev libxcomposite-dev libxdamage-dev \
+  libxrandr-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-shm0-dev \
+  libxcb-composite0-dev libxcb-randr0-dev libxcb-xinerama0-dev libxcb-xinput-dev \
+  libgl1-mesa-dev libegl1-mesa-dev libwayland-dev wayland-protocols \
+  libasound2-dev libpulse-dev libpipewire-0.3-dev libv4l-dev libudev-dev libdrm-dev libva-dev libvpl-dev \
+  libcurl4-openssl-dev libmbedtls-dev libspeexdsp-dev libasio-dev libsimde-dev \
+  libwebsocketpp-dev libx264-dev libluajit-5.1-dev swig python3-dev nlohmann-json3-dev \
+  libqrcodegencpp-dev libpci-dev
+curl -fsSL https://bun.sh/install | bash
+```
+
+For WSL app E2E, WSLg must expose `DISPLAY`, `WAYLAND_DISPLAY`,
+`XDG_RUNTIME_DIR`, and the Wayland socket before launching OBS. When
+`QT_QPA_PLATFORM` is unset under WSL, the harness defaults it to `xcb` so the
+pinned Linux OBS build uses XWayland for SSH-launched validation runs.
 
 If you already have an OBS source checkout, use `-DBUILD_FROM_SOURCE=ON` to
 stage it into the OBS build tree's runtime prefix without recloning. If you want
@@ -100,6 +128,13 @@ cmake --preset macos-arm64
 cmake --build --preset macos-arm64-relwithdebinfo
 ```
 
+On Linux or WSL Ubuntu, use the Linux preset from the native Linux checkout:
+
+```sh
+cmake --preset linux-x64
+cmake --build --preset linux-x64-relwithdebinfo
+```
+
 The default preset fails fast if `OBS_ROOT` does not resolve to a real developer
 tree.
 
@@ -112,7 +147,9 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_s
 
 On Windows, the staged plugin DLLs land under
 `out/stage/obs/obs-plugins/64bit`. On macOS, bundles land under
-`out/stage/obs/obs-plugins`.
+`out/stage/obs/obs-plugins`. On Linux, plugin `.so` files land under the
+staged OBS library plugin directory such as
+`out/stage/obs/lib/x86_64-linux-gnu/obs-plugins`.
 
 ## Test
 
@@ -141,9 +178,16 @@ deterministic E2E CTest label with the staged runtime on the environment path.
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_e2e
 ```
 
-The real OBS app E2E path launches portable OBS, enables Alpha Recorder through
+On Linux:
+
+```sh
+cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_e2e
+```
+
+The real OBS app E2E path launches isolated OBS, enables Alpha Recorder through
 obs-websocket, starts and stops recording, then verifies the RGB recording,
-and exported alpha mask movie.
+and exported alpha mask movie. Linux runs also set isolated `HOME` and
+`XDG_CONFIG_HOME` because pinned Linux OBS builds may ignore portable mode.
 
 Each run also records lightweight performance telemetry from the live alpha
 pipeline. The plugin logs one per-segment summary covering capture/readback CPU
@@ -171,8 +215,10 @@ load baseline. Cross-vendor hardware pairs such as RGB NVENC with alpha AMF are
 also omitted because they require both NVIDIA and AMD encoders on the same test
 machine. The matrix is runtime-aware: configure probes `hevc_nvenc` and
 `hevc_amf` on the target machine with a realistic 1080p FFmpeg encode, registers
-only the matching NVENC or AMF targets, and prints a configure-time summary of
-targets skipped because the encoder could not open.
+only matching alpha HEVC targets whose encoder opens, additionally requires the
+OBS NVENC plugin before registering RGB NVENC targets, and prints a
+configure-time summary of targets skipped because an encoder or OBS plugin was
+not available.
 
 The aggregate `alpha_recorder_run_obs_app_e2e` target depends only on runnable
 targets. Directly building a skipped target prints its skip reason and does not
@@ -198,6 +244,14 @@ On macOS:
 cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```
 
+On Linux or WSL Ubuntu, start with the hardware-independent software RGB + PNG
+MOV baseline, then run the aggregate target once the baseline passes:
+
+```sh
+cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
+cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
+```
+
 CTest can register this slow app-level test when configured with
 `ALPHA_RECORDER_ENABLE_OBS_APP_E2E=ON`.
 
@@ -205,8 +259,9 @@ The app-level E2E is cross-platform at the harness layer: CMake launches
 `cmake/scripts/RunObsAppE2E.cmake`, which stages OBS and calls a Bun
 obs-websocket client. Platform-specific differences are limited to executable
 and runtime layout resolution (`obs64.exe` on Windows, `MacOS/OBS` or `bin/obs`
-on macOS). The staged OBS root still needs the platform's real OBS runtime,
-plugins, FFmpeg tools, obs-websocket plugin, and `bun` on PATH.
+on macOS, and `bin/obs` with Linux `LD_LIBRARY_PATH` on Linux/WSL). The staged
+OBS root still needs the platform's real OBS runtime, plugins, FFmpeg tools,
+obs-websocket plugin, and `bun` on PATH.
 
 ## OBS/libobs resolution
 

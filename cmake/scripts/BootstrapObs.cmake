@@ -98,6 +98,16 @@ if(APPLE)
         "-DOBS_COMPILE_DEPRECATION_AS_WARNING=ON"
         "-DENABLE_VIRTUALCAM=OFF"
     )
+elseif(UNIX AND NOT WIN32)
+    list(APPEND configure_args
+        "-DCMAKE_BUILD_TYPE=${CONFIGURATION}"
+        "-DENABLE_AJA=OFF"
+        "-DENABLE_BROWSER=OFF"
+        "-DENABLE_VLC=OFF"
+        "-DENABLE_WEBRTC=OFF"
+        "-DENABLE_NEW_MPEGTS_OUTPUT=OFF"
+        "-DENABLE_NVENC=OFF"
+    )
 endif()
 if(NOT ARCHITECTURE STREQUAL "")
     list(APPEND configure_args -A "${ARCHITECTURE}")

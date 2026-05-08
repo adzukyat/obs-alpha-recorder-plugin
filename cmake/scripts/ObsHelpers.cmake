@@ -54,6 +54,58 @@ function(alpha_recorder_resolve_obs_runtime_root out_var obs_root)
     set(${out_var} "${resolved}" PARENT_SCOPE)
 endfunction()
 
+function(alpha_recorder_linux_library_dirs out_var obs_root)
+    set(candidates)
+    if(CMAKE_LIBRARY_ARCHITECTURE)
+        list(APPEND candidates "${obs_root}/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+    endif()
+    foreach(arch IN ITEMS x86_64-linux-gnu aarch64-linux-gnu arm-linux-gnueabihf)
+        list(APPEND candidates "${obs_root}/lib/${arch}")
+    endforeach()
+    list(APPEND candidates "${obs_root}/lib")
+
+    set(found)
+    foreach(candidate IN LISTS candidates)
+        if(EXISTS "${candidate}")
+            list(APPEND found "${candidate}")
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES found)
+    set(${out_var} "${found}" PARENT_SCOPE)
+endfunction()
+
+function(alpha_recorder_first_existing out_var)
+    foreach(candidate IN LISTS ARGN)
+        if(EXISTS "${candidate}")
+            set(${out_var} "${candidate}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(${out_var} "" PARENT_SCOPE)
+endfunction()
+
+function(alpha_recorder_linux_runtime_layout obs_root out_bin_dir out_plugin_dir out_data_dir out_lib_dirs)
+    set(bin_dir "${obs_root}/bin")
+    alpha_recorder_linux_library_dirs(lib_dirs "${obs_root}")
+
+    set(plugin_candidates)
+    foreach(lib_dir IN LISTS lib_dirs)
+        list(APPEND plugin_candidates "${lib_dir}/obs-plugins")
+    endforeach()
+    list(APPEND plugin_candidates "${obs_root}/obs-plugins")
+    alpha_recorder_first_existing(plugin_dir ${plugin_candidates})
+
+    alpha_recorder_first_existing(data_dir
+        "${obs_root}/share/obs/obs-studio"
+        "${obs_root}/data"
+    )
+
+    set(${out_bin_dir} "${bin_dir}" PARENT_SCOPE)
+    set(${out_plugin_dir} "${plugin_dir}" PARENT_SCOPE)
+    set(${out_data_dir} "${data_dir}" PARENT_SCOPE)
+    set(${out_lib_dirs} "${lib_dirs}" PARENT_SCOPE)
+endfunction()
+
 function(alpha_recorder_validate_obs_runtime obs_root)
     alpha_recorder_resolve_obs_runtime_root(obs_root "${obs_root}")
 
@@ -78,7 +130,7 @@ function(alpha_recorder_validate_obs_runtime obs_root)
         else()
             set(data_dir "${obs_root}/data")
         endif()
-    else()
+    elseif(WIN32)
         set(bin_dir "${obs_root}/bin/64bit")
         set(plugin_dir "${obs_root}/obs-plugins/64bit")
         set(data_dir "${obs_root}/data")
@@ -88,6 +140,19 @@ function(alpha_recorder_validate_obs_runtime obs_root)
             "${obs_root}/bin/obs.dll"
             "${obs_root}/bin/libobs.dll"
         )
+    else()
+        alpha_recorder_linux_runtime_layout("${obs_root}" bin_dir plugin_dir data_dir lib_dirs)
+        set(has_runtime OFF)
+        foreach(lib_dir IN LISTS lib_dirs)
+            alpha_recorder_any_exists(has_runtime_candidate
+                "${lib_dir}/libobs.so"
+                "${lib_dir}/libobs.so.0"
+            )
+            if(has_runtime_candidate)
+                set(has_runtime ON)
+                break()
+            endif()
+        endforeach()
     endif()
 
     if(NOT EXISTS "${bin_dir}" OR NOT EXISTS "${data_dir}" OR NOT EXISTS "${plugin_dir}" OR NOT has_runtime)
@@ -103,9 +168,16 @@ function(alpha_recorder_validate_obs_developer source_dir build_dir configuratio
             "${build_dir}/libobs/libobs.framework"
             "${build_dir}/libobs/${configuration}/libobs.framework"
         )
-    else()
+    elseif(WIN32)
         alpha_recorder_any_exists(has_library
             "${build_dir}/libobs/${configuration}/obs.lib"
+        )
+    else()
+        alpha_recorder_any_exists(has_library
+            "${build_dir}/libobs/libobs.so"
+            "${build_dir}/libobs/libobs.so.0"
+            "${build_dir}/libobs/${configuration}/libobs.so"
+            "${build_dir}/libobs/${configuration}/libobs.so.0"
         )
     endif()
 

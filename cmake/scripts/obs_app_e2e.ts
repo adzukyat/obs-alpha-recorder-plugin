@@ -393,6 +393,30 @@ function compactTelemetryLine(line: string): string {
   );
 }
 
+function linuxLibraryPathEntries(contentRoot: string, runtimeBin: string): string[] {
+  const candidates = [
+    runtimeBin,
+    join(contentRoot, "lib"),
+    join(contentRoot, "lib", "x86_64-linux-gnu"),
+    join(contentRoot, "lib", "aarch64-linux-gnu"),
+  ];
+  return candidates.filter((candidate, index) => existsSync(candidate) && candidates.indexOf(candidate) === index);
+}
+
+function isWslRuntime(): boolean {
+  if (platform !== "linux") {
+    return false;
+  }
+  if (process.env.WSL_DISTRO_NAME != null || process.env.WSL_INTEROP != null) {
+    return true;
+  }
+  try {
+    return readFileSync("/proc/sys/kernel/osrelease", "utf8").toLowerCase().includes("microsoft");
+  } catch {
+    return false;
+  }
+}
+
 function throwIfOverloaded(overload: OverloadMonitor, artifactRoot: string, width: number, height: number, fps: number): void {
   if (!overload.seen) {
     return;
@@ -1165,7 +1189,11 @@ async function main(): Promise<void> {
 
   const homeRoot = join(artifactRoot, "home");
   const portableConfig =
-    platform === "darwin" ? join(homeRoot, "Library", "Application Support", "obs-studio") : join(contentRoot, "config", "obs-studio");
+    platform === "darwin"
+      ? join(homeRoot, "Library", "Application Support", "obs-studio")
+      : platform === "linux"
+        ? join(homeRoot, ".config", "obs-studio")
+        : join(contentRoot, "config", "obs-studio");
   const simpleVideoEncoder = simpleRgbEncoder(args.rgbEncoder);
   if (platform === "darwin") {
     mkdirSync(join(homeRoot, "Library", "Logs", "DiagnosticReports"), { recursive: true });
@@ -1318,9 +1346,15 @@ finalization_format=${args.finalizationFormat}
   const env = {
     ...process.env,
     ...(platform === "darwin" ? { CFFIXED_USER_HOME: homeRoot, HOME: homeRoot } : {}),
+    ...(platform === "linux" ? { HOME: homeRoot, XDG_CONFIG_HOME: join(homeRoot, ".config") } : {}),
     PATH: `${stageBin}${platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
     DYLD_LIBRARY_PATH:
       platform === "darwin" ? `${stageBin}:${process.env.DYLD_LIBRARY_PATH ?? ""}` : process.env.DYLD_LIBRARY_PATH,
+    LD_LIBRARY_PATH:
+      platform === "linux"
+        ? `${linuxLibraryPathEntries(contentRoot, stageBin).join(":")}:${process.env.LD_LIBRARY_PATH ?? ""}`
+        : process.env.LD_LIBRARY_PATH,
+    ...(platform === "linux" && process.env.QT_QPA_PLATFORM == null && isWslRuntime() ? { QT_QPA_PLATFORM: "xcb" } : {}),
   };
 
   const obsCommand = [

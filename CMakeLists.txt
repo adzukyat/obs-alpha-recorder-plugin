@@ -19,6 +19,7 @@ endif()
 include(ProjectOptions)
 include(Warnings)
 include(FetchDeps)
+include(GNUInstallDirs)
 
 alpha_recorder_set_project_options()
 alpha_recorder_fetch_test_deps()
@@ -27,12 +28,26 @@ include(CTest)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/obs")
+if(APPLE)
+    set(_alpha_recorder_generated_obs_data_path "Resources")
+    set(_alpha_recorder_generated_obs_plugin_path "PlugIns")
+    set(_alpha_recorder_generated_obs_plugin_destination "PlugIns")
+elseif(WIN32)
+    set(_alpha_recorder_generated_obs_data_path "data")
+    set(_alpha_recorder_generated_obs_plugin_path "obs-plugins/64bit")
+    set(_alpha_recorder_generated_obs_plugin_destination "obs-plugins/64bit")
+else()
+    set(_alpha_recorder_generated_obs_data_path "share/obs/obs-studio")
+    set(_alpha_recorder_generated_obs_plugin_path "${CMAKE_INSTALL_LIBDIR}/obs-plugins")
+    set(_alpha_recorder_generated_obs_plugin_destination "${CMAKE_INSTALL_LIBDIR}/obs-plugins")
+endif()
+
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/obs/obsconfig.h"
 "#pragma once
 
-#define OBS_DATA_PATH \"Resources\"
-#define OBS_PLUGIN_PATH \"PlugIns\"
-#define OBS_PLUGIN_DESTINATION \"PlugIns\"
+#define OBS_DATA_PATH \"${_alpha_recorder_generated_obs_data_path}\"
+#define OBS_PLUGIN_PATH \"${_alpha_recorder_generated_obs_plugin_path}\"
+#define OBS_PLUGIN_DESTINATION \"${_alpha_recorder_generated_obs_plugin_destination}\"
 #define OBS_RELEASE_CANDIDATE 0
 #define OBS_BETA 0
 ")
@@ -50,6 +65,7 @@ target_include_directories(alpha_recorder_e2e_scenario
 set_target_properties(alpha_recorder_e2e_scenario PROPERTIES
     OUTPUT_NAME "alpha_recorder_e2e_scenario"
     FOLDER "alpha_recorder/core"
+    POSITION_INDEPENDENT_CODE ON
 )
 
 set(_alpha_recorder_build_full_targets OFF)
@@ -74,13 +90,18 @@ if(APPLE)
     else()
         set(alpha_recorder_obs_plugin_dir "${OBS_ROOT}/obs-plugins")
     endif()
-else()
+elseif(WIN32)
     set(alpha_recorder_obs_runtime_bin_dir "${OBS_ROOT}/bin/64bit")
     set(alpha_recorder_obs_plugin_dir "${OBS_ROOT}/obs-plugins/64bit")
+else()
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/ObsHelpers.cmake")
+    alpha_recorder_linux_runtime_layout("${OBS_ROOT}" alpha_recorder_obs_runtime_bin_dir alpha_recorder_obs_plugin_dir alpha_recorder_obs_data_dir alpha_recorder_obs_runtime_lib_dirs)
 endif()
 
 if(APPLE)
     list(APPEND CMAKE_BUILD_RPATH "${alpha_recorder_obs_runtime_bin_dir}")
+elseif(UNIX)
+    list(APPEND CMAKE_BUILD_RPATH ${alpha_recorder_obs_runtime_lib_dirs})
 endif()
 
 add_library(alpha_recorder_core STATIC
@@ -103,6 +124,7 @@ target_include_directories(alpha_recorder_core
 set_target_properties(alpha_recorder_core PROPERTIES
     OUTPUT_NAME "alpha_recorder_core"
     FOLDER "alpha_recorder/core"
+    POSITION_INDEPENDENT_CODE ON
 )
 endif()
 
@@ -369,6 +391,17 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
     )
 
     set(alpha_recorder_e2e_artifact_root "${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/alpha_recorder_e2e")
+    set(alpha_recorder_e2e_host_environment_modification
+        "ALPHA_RECORDER_STAGE_DIR=set:${OBS_ROOT}"
+        "PATH=path_list_prepend:${alpha_recorder_obs_runtime_bin_dir}"
+    )
+    if(UNIX AND NOT APPLE)
+        foreach(alpha_recorder_obs_runtime_lib_dir IN LISTS alpha_recorder_obs_runtime_lib_dirs)
+            list(APPEND alpha_recorder_e2e_host_environment_modification
+                "LD_LIBRARY_PATH=path_list_prepend:${alpha_recorder_obs_runtime_lib_dir}"
+            )
+        endforeach()
+    endif()
 
     function(alpha_recorder_add_e2e_scenario scenario_name scenario_path)
         set(host_test_name "alpha_recorder.e2e.${scenario_name}.host")
@@ -381,7 +414,7 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
         )
         set_tests_properties(${host_test_name} PROPERTIES
             LABELS "e2e"
-            ENVIRONMENT_MODIFICATION "ALPHA_RECORDER_STAGE_DIR=set:${OBS_ROOT};PATH=path_list_prepend:${alpha_recorder_obs_runtime_bin_dir}"
+            ENVIRONMENT_MODIFICATION "${alpha_recorder_e2e_host_environment_modification}"
         )
 
         add_test(NAME ${encoder_test_name}
@@ -496,6 +529,33 @@ if(_alpha_recorder_build_full_targets)
     alpha_recorder_probe_obs_app_e2e_hevc_encoder("NVENC" "hevc_nvenc" _alpha_recorder_obs_app_e2e_has_nvenc _alpha_recorder_obs_app_e2e_nvenc_reason)
     alpha_recorder_probe_obs_app_e2e_hevc_encoder("AMF" "hevc_amf" _alpha_recorder_obs_app_e2e_has_amf _alpha_recorder_obs_app_e2e_amf_reason)
 
+    set(_alpha_recorder_obs_app_e2e_has_obs_nvenc_plugin TRUE)
+    set(_alpha_recorder_obs_app_e2e_obs_nvenc_plugin_reason "OBS NVENC plugin is available")
+    if(UNIX AND NOT APPLE)
+        set(_alpha_recorder_obs_app_e2e_has_obs_nvenc_plugin FALSE)
+        set(_alpha_recorder_obs_app_e2e_obs_nvenc_plugin_reason
+            "OBS NVENC RGB encoder plugin is not present under ${alpha_recorder_obs_plugin_dir}, while software RGB HEVC-alpha targets may still register if FFmpeg opens hevc_nvenc"
+        )
+        foreach(_alpha_recorder_obs_nvenc_plugin_name IN ITEMS obs-nvenc.so libobs-nvenc.so)
+            if(EXISTS "${alpha_recorder_obs_plugin_dir}/${_alpha_recorder_obs_nvenc_plugin_name}")
+                set(_alpha_recorder_obs_app_e2e_has_obs_nvenc_plugin TRUE)
+                set(_alpha_recorder_obs_app_e2e_obs_nvenc_plugin_reason
+                    "OBS NVENC RGB encoder plugin found at ${alpha_recorder_obs_plugin_dir}/${_alpha_recorder_obs_nvenc_plugin_name}"
+                )
+                break()
+            endif()
+        endforeach()
+    endif()
+    set(_alpha_recorder_obs_app_e2e_has_nvenc_rgb FALSE)
+    if(_alpha_recorder_obs_app_e2e_has_nvenc AND _alpha_recorder_obs_app_e2e_has_obs_nvenc_plugin)
+        set(_alpha_recorder_obs_app_e2e_has_nvenc_rgb TRUE)
+        set(_alpha_recorder_obs_app_e2e_nvenc_rgb_reason "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+    elseif(_alpha_recorder_obs_app_e2e_has_nvenc)
+        set(_alpha_recorder_obs_app_e2e_nvenc_rgb_reason "${_alpha_recorder_obs_app_e2e_obs_nvenc_plugin_reason}")
+    else()
+        set(_alpha_recorder_obs_app_e2e_nvenc_rgb_reason "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+    endif()
+
     set(_alpha_recorder_obs_app_e2e_registered_targets)
     set(_alpha_recorder_obs_app_e2e_skipped_targets)
 
@@ -586,7 +646,7 @@ if(_alpha_recorder_build_full_targets)
     else()
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf "${_alpha_recorder_obs_app_e2e_amf_reason}")
     endif()
-    if(_alpha_recorder_obs_app_e2e_has_nvenc)
+    if(_alpha_recorder_obs_app_e2e_has_nvenc_rgb)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov fhd60-rgb-nvenc-hevc-alpha-png-mov
             FINALIZATION_FORMAT mask_png_mov
             RGB_ENCODER nvenc_hevc
@@ -596,8 +656,8 @@ if(_alpha_recorder_build_full_targets)
             RGB_ENCODER nvenc_hevc
         )
     else()
-        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
-        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
     endif()
     if(_alpha_recorder_obs_app_e2e_has_amf)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov fhd60-rgb-amf-hevc-alpha-png-mov
@@ -613,7 +673,7 @@ if(_alpha_recorder_build_full_targets)
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_hevc_amf "${_alpha_recorder_obs_app_e2e_amf_reason}")
     endif()
     function(alpha_recorder_add_obs_app_e2e_hardware_load_matrix load_name width height fps)
-        if(_alpha_recorder_obs_app_e2e_has_nvenc)
+        if(_alpha_recorder_obs_app_e2e_has_nvenc_rgb)
             alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_png_mov ${load_name}-rgb-nvenc-hevc-alpha-png-mov
                 FINALIZATION_FORMAT mask_png_mov
                 RGB_ENCODER nvenc_hevc
@@ -629,8 +689,8 @@ if(_alpha_recorder_build_full_targets)
                 FPS ${fps}
             )
         else()
-            alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
-            alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+            alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
+            alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         endif()
         if(_alpha_recorder_obs_app_e2e_has_amf)
             alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_${load_name}_rgb_amf_hevc_alpha_png_mov ${load_name}-rgb-amf-hevc-alpha-png-mov
@@ -688,7 +748,7 @@ endif()
 if(TARGET alpha_recorder_plugin)
     install(TARGETS alpha_recorder_plugin
         RUNTIME DESTINATION obs-plugins/64bit
-        LIBRARY DESTINATION obs-plugins/64bit
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/obs-plugins
         BUNDLE DESTINATION obs-plugins
     )
 endif()
@@ -696,7 +756,7 @@ endif()
 if(TARGET alpha_recorder_frontend)
     install(TARGETS alpha_recorder_frontend
         RUNTIME DESTINATION obs-plugins/64bit
-        LIBRARY DESTINATION obs-plugins/64bit
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/obs-plugins
         BUNDLE DESTINATION obs-plugins
     )
 endif()

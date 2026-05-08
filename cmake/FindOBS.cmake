@@ -62,6 +62,8 @@ find_library(OBS_LIBOBS_LIBRARY
     HINTS ${_alpha_recorder_obs_hint_paths}
     PATH_SUFFIXES
         lib
+        lib/x86_64-linux-gnu
+        lib/aarch64-linux-gnu
         bin/64bit
         bin
         Frameworks/libobs.framework/Versions/A
@@ -91,6 +93,12 @@ find_file(OBS_LIBOBS_DLL
     PATH_SUFFIXES bin/64bit bin lib rundir/RelWithDebInfo/bin/64bit rundir/RelWithDebInfo/bin
 )
 
+find_file(OBS_LIBOBS_SO
+    NAMES libobs.so libobs.so.0
+    HINTS ${_alpha_recorder_obs_hint_paths}
+    PATH_SUFFIXES lib lib/x86_64-linux-gnu lib/aarch64-linux-gnu build/libobs libobs
+)
+
 find_path(OBS_FRONTEND_API_INCLUDE_DIR
     NAMES obs-frontend-api.h
     HINTS "${_alpha_recorder_obs_frontend_source_dir}"
@@ -100,7 +108,7 @@ find_library(OBS_FRONTEND_API_LIBRARY
     NAMES obs-frontend-api.dylib obs-frontend-api libobs-frontend-api
     HINTS ${_alpha_recorder_obs_build_root_candidates}
         ${_alpha_recorder_obs_hint_paths}
-    PATH_SUFFIXES Frameworks frontend/api/RelWithDebInfo frontend/api/Debug frontend/api/Release frontend/api
+    PATH_SUFFIXES Frameworks lib lib/x86_64-linux-gnu lib/aarch64-linux-gnu frontend/api/RelWithDebInfo frontend/api/Debug frontend/api/Release frontend/api
 )
 
 if(APPLE AND OBS_ROOT)
@@ -131,6 +139,20 @@ find_file(OBS_FRONTEND_API_DLL
     HINTS ${_alpha_recorder_obs_hint_paths} ${_alpha_recorder_obs_build_root_candidates}
     PATH_SUFFIXES bin/64bit bin frontend/api/RelWithDebInfo frontend/api/Debug frontend/api/Release frontend/api
 )
+
+find_file(OBS_FRONTEND_API_SO
+    NAMES libobs-frontend-api.so libobs-frontend-api.so.1 obs-frontend-api.so
+    HINTS ${_alpha_recorder_obs_hint_paths} ${_alpha_recorder_obs_build_root_candidates}
+    PATH_SUFFIXES lib lib/x86_64-linux-gnu lib/aarch64-linux-gnu frontend/api/RelWithDebInfo frontend/api/Debug frontend/api/Release frontend/api
+)
+
+if(NOT OBS_LIBOBS_LIBRARY AND OBS_LIBOBS_SO)
+    set(OBS_LIBOBS_LIBRARY "${OBS_LIBOBS_SO}" CACHE FILEPATH "OBS libobs shared object" FORCE)
+endif()
+
+if(NOT OBS_FRONTEND_API_LIBRARY AND OBS_FRONTEND_API_SO)
+    set(OBS_FRONTEND_API_LIBRARY "${OBS_FRONTEND_API_SO}" CACHE FILEPATH "OBS frontend API shared object" FORCE)
+endif()
 
 if(OBS_INCLUDE_DIR AND OBS_LIBOBS_LIBRARY)
     if(NOT TARGET OBS::libobs)
@@ -194,4 +216,4 @@ find_package_handle_standard_args(OBS
     REQUIRED_VARS OBS_INCLUDE_DIR OBS_CONFIG_INCLUDE_DIR OBS_LIBOBS_LIBRARY
 )
 
-mark_as_advanced(OBS_INCLUDE_DIR OBS_CONFIG_INCLUDE_DIR OBS_LIBOBS_LIBRARY OBS_LIBOBS_DLL OBS_FRONTEND_API_INCLUDE_DIR OBS_FRONTEND_API_LIBRARY OBS_FRONTEND_API_DLL OBS_SIMDE_INCLUDE_DIR)
+mark_as_advanced(OBS_INCLUDE_DIR OBS_CONFIG_INCLUDE_DIR OBS_LIBOBS_LIBRARY OBS_LIBOBS_DLL OBS_LIBOBS_SO OBS_FRONTEND_API_INCLUDE_DIR OBS_FRONTEND_API_LIBRARY OBS_FRONTEND_API_DLL OBS_FRONTEND_API_SO OBS_SIMDE_INCLUDE_DIR)

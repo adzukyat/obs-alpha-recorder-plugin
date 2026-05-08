@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -132,10 +133,28 @@ namespace
         const std::filesystem::path data_dir = std::filesystem::exists(stage_dir / "Resources")
                                                    ? stage_dir / "Resources"
                                                    : stage_dir / "data";
-#else
+#elif defined(_WIN32)
         const std::filesystem::path bin_dir = stage_dir / "bin" / "64bit";
         const std::filesystem::path plugin_dir = stage_dir / "obs-plugins" / "64bit";
         const std::filesystem::path data_dir = stage_dir / "data";
+#else
+        const std::filesystem::path bin_dir = stage_dir / "bin";
+        std::filesystem::path plugin_dir = stage_dir / "lib" / "obs-plugins";
+        if (!std::filesystem::exists(plugin_dir))
+        {
+            for (const auto &candidate : {"x86_64-linux-gnu", "aarch64-linux-gnu"})
+            {
+                std::filesystem::path candidate_dir = stage_dir / "lib" / candidate / "obs-plugins";
+                if (std::filesystem::exists(candidate_dir))
+                {
+                    plugin_dir = std::move(candidate_dir);
+                    break;
+                }
+            }
+        }
+        const std::filesystem::path data_dir = std::filesystem::exists(stage_dir / "share" / "obs" / "obs-studio")
+                                                   ? stage_dir / "share" / "obs" / "obs-studio"
+                                                   : stage_dir / "data";
 #endif
 
         if (!std::filesystem::exists(bin_dir))
@@ -202,8 +221,10 @@ namespace
         video_info.fps_den = 1001;
 #ifdef __APPLE__
         video_info.graphics_module = "libobs-opengl.dylib";
-#else
+#elif defined(_WIN32)
         video_info.graphics_module = "libobs-opengl.dll";
+#else
+        video_info.graphics_module = "libobs-opengl.so";
 #endif
         video_info.output_format = VIDEO_FORMAT_RGBA;
 
@@ -235,8 +256,14 @@ namespace
         {
             plugin_path /= "Contents/MacOS/alpha_recorder_e2e";
         }
-#else
+#elif defined(_WIN32)
         const std::filesystem::path plugin_path = plugin_dir / "alpha_recorder_e2e.dll";
+#else
+        std::filesystem::path plugin_path = plugin_dir / "alpha_recorder_e2e.so";
+        if (!std::filesystem::exists(plugin_path))
+        {
+            plugin_path = plugin_dir / "libalpha_recorder_e2e.so";
+        }
 #endif
         if (!std::filesystem::exists(plugin_path))
         {

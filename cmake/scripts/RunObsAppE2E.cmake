@@ -40,6 +40,10 @@ if(NOT SKIP_BUILD)
 endif()
 
 if(NOT SKIP_STAGE)
+    set(stage_args)
+    if(UNIX AND NOT APPLE)
+        list(APPEND stage_args "-DSKIP_PLUGIN_OVERLAY=ON")
+    endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}"
             "-DREPO_ROOT=${REPO_ROOT}"
@@ -47,6 +51,7 @@ if(NOT SKIP_STAGE)
             "-DSTAGE_DIR=${STAGE_DIR}"
             "-DOBS_ROOT=${OBS_ROOT}"
             "-DCONFIGURATION=${CONFIGURATION}"
+            ${stage_args}
             -P "${CMAKE_CURRENT_LIST_DIR}/StageObsTree.cmake"
         COMMAND_ERROR_IS_FATAL ANY
     )
@@ -64,6 +69,10 @@ if(WIN32 AND DEFINED ENV{USERPROFILE})
             break()
         endif()
     endforeach()
+endif()
+
+if(NOT BUN_EXECUTABLE AND DEFINED ENV{HOME} AND EXISTS "$ENV{HOME}/.bun/bin/bun")
+    set(BUN_EXECUTABLE "$ENV{HOME}/.bun/bin/bun")
 endif()
 
 if(NOT BUN_EXECUTABLE)

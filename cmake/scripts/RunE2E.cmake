@@ -40,9 +40,22 @@ if(APPLE)
     if(NOT EXISTS "${stage_plugin_path}")
         set(stage_plugin_path "${STAGE_DIR}/obs-plugins/alpha_recorder_e2e.dylib")
     endif()
-else()
+elseif(WIN32)
     set(stage_bin_path "${STAGE_DIR}/bin/64bit")
     set(stage_plugin_path "${STAGE_DIR}/obs-plugins/64bit/alpha_recorder_e2e.dll")
+else()
+    set(stage_bin_path "${STAGE_DIR}/bin")
+    set(stage_plugin_path "")
+    file(GLOB_RECURSE linux_e2e_plugins LIST_DIRECTORIES false
+        "${STAGE_DIR}/lib/obs-plugins/alpha_recorder_e2e.so"
+        "${STAGE_DIR}/lib/obs-plugins/libalpha_recorder_e2e.so"
+        "${STAGE_DIR}/lib/*-linux-gnu/obs-plugins/alpha_recorder_e2e.so"
+        "${STAGE_DIR}/lib/*-linux-gnu/obs-plugins/libalpha_recorder_e2e.so"
+    )
+    list(SORT linux_e2e_plugins)
+    if(linux_e2e_plugins)
+        list(GET linux_e2e_plugins 0 stage_plugin_path)
+    endif()
 endif()
 
 if(NOT EXISTS "${stage_plugin_path}")
@@ -60,6 +73,10 @@ else()
     set(ENV{PATH} "${stage_bin_path}:$ENV{PATH}")
     if(APPLE)
         set(ENV{DYLD_LIBRARY_PATH} "${stage_bin_path}:$ENV{DYLD_LIBRARY_PATH}")
+    else()
+        file(GLOB linux_stage_lib_dirs LIST_DIRECTORIES true "${STAGE_DIR}/lib" "${STAGE_DIR}/lib/*-linux-gnu")
+        list(JOIN linux_stage_lib_dirs ":" linux_stage_library_path)
+        set(ENV{LD_LIBRARY_PATH} "${stage_bin_path}:${linux_stage_library_path}:$ENV{LD_LIBRARY_PATH}")
     endif()
 endif()
 
