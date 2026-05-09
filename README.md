@@ -17,8 +17,13 @@ Alpha Recorder defaults to enabled. If no finalization format has been saved,
 it prefers an available hardware HEVC encoder and falls back to PNG MOV. HEVC
 options are available only when the matching runtime encoder can actually open
 on the current machine. For HEVC mask outputs, the settings dialog can tune the
-quality profile, CQ value, encoder preset, and advanced GOP/B-frame/lookahead/AQ
-options instead of forcing lossless encoding for every recording.
+quality profile, CQ value, encoder-specific preset, NVENC tune mode, and
+advanced GOP/B-frame/lookahead/AQ options instead of forcing lossless encoding
+for every recording. NVENC exposes P1 through P7 plus Tune, while AMF exposes
+Speed, Balanced, and Quality. The profile buttons apply complete encoder
+presets: Lossless disables the lossy tuning path, High Quality enables the
+quality preset with B-frames/lookahead/AQ, Balanced uses lighter
+B-frame/lookahead/AQ settings, and Fast disables those latency-heavy options.
 
 Mask encoding runs behind a bounded asynchronous queue. If the selected mask
 encoder cannot keep up, Alpha Recorder aborts the mask movie output instead of
@@ -282,9 +287,9 @@ Implemented in the core library and live OBS workflow:
   bounded asynchronous writer queue
 - OBS recording lifecycle hooks, settings persistence, Tools menu integration,
   and obs-websocket vendor automation
-- HEVC mask encoder settings for quality profile, CQ, preset, GOP, B-frames,
-  lookahead, and adaptive quantization, shared by the Tools dialog,
-  obs-websocket automation, and live writer configuration
+- HEVC mask encoder settings for quality profile, CQ, encoder-specific preset,
+  NVENC tune, GOP, B-frames, lookahead, and adaptive quantization, shared by the
+  Tools dialog, obs-websocket automation, and live writer configuration
 - GPU-side Program alpha extraction that keeps OBS's normal recording color
   format independent of Alpha Recorder, with staged readback buffered through a
   small staging-surface ring

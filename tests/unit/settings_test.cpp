@@ -16,7 +16,8 @@ int main()
     if (!defaults.enabled || defaults.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
         defaults.hevc_encoder.quality_profile != alpha_recorder::obs::HevcQualityProfile::HighQuality ||
         defaults.hevc_encoder.quality_cq != 19U ||
-        defaults.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::Balanced ||
+        defaults.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::NvencP3 ||
+        defaults.hevc_encoder.nvenc_tune != alpha_recorder::obs::HevcNvencTune::HighQuality ||
         defaults.hevc_encoder.gop_size != 0U ||
         defaults.hevc_encoder.b_frames != 0U ||
         defaults.hevc_encoder.lookahead != 0U ||
@@ -31,6 +32,7 @@ int main()
         alpha_recorder::obs::settings_hevc_quality_profile_key() != "hevc_quality_profile" ||
         alpha_recorder::obs::settings_hevc_quality_cq_key() != "hevc_quality_cq" ||
         alpha_recorder::obs::settings_hevc_preset_key() != "hevc_preset" ||
+        alpha_recorder::obs::settings_hevc_nvenc_tune_key() != "hevc_nvenc_tune" ||
         alpha_recorder::obs::settings_hevc_gop_size_key() != "hevc_gop_size" ||
         alpha_recorder::obs::settings_hevc_b_frames_key() != "hevc_b_frames" ||
         alpha_recorder::obs::settings_hevc_lookahead_key() != "hevc_lookahead" ||
@@ -129,13 +131,23 @@ int main()
     }
 
     alpha_recorder::obs::HevcQualityProfile parsed_profile = alpha_recorder::obs::HevcQualityProfile::HighQuality;
-    alpha_recorder::obs::HevcEncoderPreset parsed_preset = alpha_recorder::obs::HevcEncoderPreset::Balanced;
+    alpha_recorder::obs::HevcEncoderPreset parsed_preset = alpha_recorder::obs::HevcEncoderPreset::NvencP3;
+    alpha_recorder::obs::HevcNvencTune parsed_tune = alpha_recorder::obs::HevcNvencTune::HighQuality;
     if (!alpha_recorder::obs::try_parse_hevc_quality_profile("fast", parsed_profile) ||
         parsed_profile != alpha_recorder::obs::HevcQualityProfile::Fast ||
         alpha_recorder::obs::hevc_quality_profile_config_value(alpha_recorder::obs::HevcQualityProfile::Balanced) != "balanced" ||
+        !alpha_recorder::obs::try_parse_hevc_encoder_preset("nvenc_p5", parsed_preset) ||
+        parsed_preset != alpha_recorder::obs::HevcEncoderPreset::NvencP5 ||
+        !alpha_recorder::obs::try_parse_hevc_encoder_preset("lossless", parsed_preset) ||
+        parsed_preset != alpha_recorder::obs::HevcEncoderPreset::NvencLossless ||
         !alpha_recorder::obs::try_parse_hevc_encoder_preset("quality", parsed_preset) ||
-        parsed_preset != alpha_recorder::obs::HevcEncoderPreset::Quality ||
-        alpha_recorder::obs::hevc_encoder_preset_config_value(alpha_recorder::obs::HevcEncoderPreset::Fast) != "fast" ||
+        parsed_preset != alpha_recorder::obs::HevcEncoderPreset::NvencP5 ||
+        alpha_recorder::obs::hevc_encoder_preset_config_value(alpha_recorder::obs::HevcEncoderPreset::AmfSpeed) != "amf_speed" ||
+        !alpha_recorder::obs::try_parse_hevc_nvenc_tune("lossless", parsed_tune) ||
+        parsed_tune != alpha_recorder::obs::HevcNvencTune::Lossless ||
+        !alpha_recorder::obs::try_parse_hevc_nvenc_tune("ull", parsed_tune) ||
+        parsed_tune != alpha_recorder::obs::HevcNvencTune::UltraLowLatency ||
+        alpha_recorder::obs::hevc_nvenc_tune_config_value(alpha_recorder::obs::HevcNvencTune::LowLatency) != "ll" ||
         alpha_recorder::obs::clamp_hevc_quality_cq(99U) != 51U ||
         alpha_recorder::obs::clamp_hevc_gop_size(1200U) != 1000U ||
         alpha_recorder::obs::clamp_hevc_b_frames(8U) != 4U ||
@@ -146,7 +158,7 @@ int main()
     }
 
     config_t *config = nullptr;
-    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=quality\nhevc_gop_size=1200\nhevc_b_frames=8\nhevc_lookahead=64\nhevc_adaptive_quantization=true\n") != CONFIG_SUCCESS || config == nullptr)
+    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=amf_quality\nhevc_nvenc_tune=ull\nhevc_gop_size=1200\nhevc_b_frames=8\nhevc_lookahead=64\nhevc_adaptive_quantization=true\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory config string\n";
         return 15;
@@ -157,7 +169,8 @@ int main()
     if (!loaded_settings.enabled || loaded_settings.finalization_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
         loaded_settings.hevc_encoder.quality_profile != alpha_recorder::obs::HevcQualityProfile::Fast ||
         loaded_settings.hevc_encoder.quality_cq != 51U ||
-        loaded_settings.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::Quality ||
+        loaded_settings.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::AmfQuality ||
+        loaded_settings.hevc_encoder.nvenc_tune != alpha_recorder::obs::HevcNvencTune::UltraLowLatency ||
         loaded_settings.hevc_encoder.gop_size != 1000U ||
         loaded_settings.hevc_encoder.b_frames != 4U ||
         loaded_settings.hevc_encoder.lookahead != 32U ||

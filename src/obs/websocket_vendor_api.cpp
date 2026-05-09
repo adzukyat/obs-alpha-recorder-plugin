@@ -42,6 +42,8 @@ namespace alpha_recorder::obs
             obs_data_set_int(response, settings_hevc_quality_cq_key().data(), settings.hevc_encoder.quality_cq);
             obs_data_set_string(response, settings_hevc_preset_key().data(),
                                 hevc_encoder_preset_config_value(settings.hevc_encoder.preset).data());
+            obs_data_set_string(response, settings_hevc_nvenc_tune_key().data(),
+                                hevc_nvenc_tune_config_value(settings.hevc_encoder.nvenc_tune).data());
             obs_data_set_int(response, settings_hevc_gop_size_key().data(), settings.hevc_encoder.gop_size);
             obs_data_set_int(response, settings_hevc_b_frames_key().data(), settings.hevc_encoder.b_frames);
             obs_data_set_int(response, settings_hevc_lookahead_key().data(), settings.hevc_encoder.lookahead);
@@ -145,6 +147,19 @@ namespace alpha_recorder::obs
                 settings.hevc_encoder.preset = parsed_preset;
             }
 
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_nvenc_tune_key().data()))
+            {
+                const char *tune_text = obs_data_get_string(request, settings_hevc_nvenc_tune_key().data());
+                HevcNvencTune parsed_tune = settings.hevc_encoder.nvenc_tune;
+                if (tune_text == nullptr || !try_parse_hevc_nvenc_tune(tune_text, parsed_tune))
+                {
+                    write_error(response, "Unsupported hevc_nvenc_tune.");
+                    return;
+                }
+
+                settings.hevc_encoder.nvenc_tune = parsed_tune;
+            }
+
             if (request != nullptr && obs_data_has_user_value(request, settings_hevc_gop_size_key().data()))
             {
                 const long long requested_gop = obs_data_get_int(request, settings_hevc_gop_size_key().data());
@@ -180,6 +195,8 @@ namespace alpha_recorder::obs
             config_set_int(config, settings_section().data(), settings_hevc_quality_cq_key().data(), settings.hevc_encoder.quality_cq);
             config_set_string(config, settings_section().data(), settings_hevc_preset_key().data(),
                               hevc_encoder_preset_config_value(settings.hevc_encoder.preset).data());
+            config_set_string(config, settings_section().data(), settings_hevc_nvenc_tune_key().data(),
+                              hevc_nvenc_tune_config_value(settings.hevc_encoder.nvenc_tune).data());
             config_set_int(config, settings_section().data(), settings_hevc_gop_size_key().data(), settings.hevc_encoder.gop_size);
             config_set_int(config, settings_section().data(), settings_hevc_b_frames_key().data(), settings.hevc_encoder.b_frames);
             config_set_int(config, settings_section().data(), settings_hevc_lookahead_key().data(), settings.hevc_encoder.lookahead);

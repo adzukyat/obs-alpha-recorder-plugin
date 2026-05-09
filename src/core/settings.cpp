@@ -52,6 +52,16 @@ namespace alpha_recorder::obs
                 }
             }
 
+            if (config_has_user_value(config, settings_section().data(), settings_hevc_nvenc_tune_key().data()))
+            {
+                const char *stored_tune = config_get_string(config, settings_section().data(), settings_hevc_nvenc_tune_key().data());
+                HevcNvencTune parsed_tune = settings.nvenc_tune;
+                if (stored_tune != nullptr && try_parse_hevc_nvenc_tune(std::string_view{stored_tune}, parsed_tune))
+                {
+                    settings.nvenc_tune = parsed_tune;
+                }
+            }
+
             if (config_has_user_value(config, settings_section().data(), settings_hevc_gop_size_key().data()))
             {
                 const int stored_gop = config_get_int(config, settings_section().data(), settings_hevc_gop_size_key().data());

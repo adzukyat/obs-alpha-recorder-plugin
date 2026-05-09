@@ -21,6 +21,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStandardItemModel>
@@ -117,6 +118,8 @@ namespace
                        static_cast<int>(alpha_recorder::obs::clamp_hevc_quality_cq(normalized_settings.hevc_encoder.quality_cq)));
         config_set_string(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_preset_key().data(),
                           alpha_recorder::obs::hevc_encoder_preset_config_value(normalized_settings.hevc_encoder.preset).data());
+        config_set_string(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_nvenc_tune_key().data(),
+                          alpha_recorder::obs::hevc_nvenc_tune_config_value(normalized_settings.hevc_encoder.nvenc_tune).data());
         config_set_int(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_gop_size_key().data(),
                        static_cast<int>(alpha_recorder::obs::clamp_hevc_gop_size(normalized_settings.hevc_encoder.gop_size)));
         config_set_int(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_b_frames_key().data(),
@@ -237,11 +240,17 @@ namespace
             hevcFormLayout->addRow("Quality", qualityLayout);
 
             presetCombo_ = new QComboBox(this);
-            presetCombo_->addItem("Fast", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::Fast));
-            presetCombo_->addItem("P3 - Balanced", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::Balanced));
-            presetCombo_->addItem("Quality", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::Quality));
             presetCombo_->setMinimumWidth(165);
             hevcFormLayout->addRow("Preset", presetCombo_);
+
+            tuneCombo_ = new QComboBox(this);
+            tuneCombo_->addItem("Lossless", static_cast<int>(alpha_recorder::obs::HevcNvencTune::Lossless));
+            tuneCombo_->addItem("High Quality", static_cast<int>(alpha_recorder::obs::HevcNvencTune::HighQuality));
+            tuneCombo_->addItem("Low Latency", static_cast<int>(alpha_recorder::obs::HevcNvencTune::LowLatency));
+            tuneCombo_->addItem("Ultra Low Latency", static_cast<int>(alpha_recorder::obs::HevcNvencTune::UltraLowLatency));
+            tuneCombo_->setMinimumWidth(165);
+            tuneRowLabel_ = new QLabel("Tune", this);
+            hevcFormLayout->addRow(tuneRowLabel_, tuneCombo_);
 
             auto *rateControlCombo = new QComboBox(this);
             rateControlCombo->addItem("VBR");
@@ -271,7 +280,9 @@ namespace
             mainLayout->addWidget(hevcGroupBox_);
 
             select_hevc_profile(settings.hevc_encoder.quality_profile);
+            populate_preset_combo(settings.finalization_format, settings.hevc_encoder.preset);
             select_hevc_preset(settings.hevc_encoder.preset);
+            select_nvenc_tune(settings.hevc_encoder.nvenc_tune);
             const std::uint32_t initialCq = alpha_recorder::obs::clamp_hevc_quality_cq(settings.hevc_encoder.quality_cq);
             qualitySlider_->setValue(static_cast<int>(initialCq));
             qualitySpinBox_->setValue(static_cast<int>(initialCq));
@@ -280,9 +291,12 @@ namespace
             lookaheadSpinBox_->setValue(static_cast<int>(alpha_recorder::obs::clamp_hevc_lookahead(settings.hevc_encoder.lookahead)));
             aqCombo_->setCurrentIndex(settings.hevc_encoder.adaptive_quantization ? 1 : 0);
 
-            connect(finalizationFormatCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { update_hevc_controls(); });
+            connect(finalizationFormatCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+                populate_preset_combo(selected_finalization_format(), selected_hevc_preset());
+                update_hevc_controls();
+            });
             connect(profileButtonGroup_, qOverload<int>(&QButtonGroup::idClicked), this, [this](int id) {
-                qualitySpinBox_->setValue(static_cast<int>(default_cq_for_profile(static_cast<alpha_recorder::obs::HevcQualityProfile>(id))));
+                apply_hevc_profile_defaults(static_cast<alpha_recorder::obs::HevcQualityProfile>(id));
                 update_hevc_controls();
             });
             connect(qualitySlider_, &QSlider::valueChanged, qualitySpinBox_, &QSpinBox::setValue);
@@ -331,12 +345,24 @@ namespace
             settings.hevc_encoder.quality_profile = selected_hevc_profile();
             settings.hevc_encoder.quality_cq = static_cast<std::uint32_t>(qualitySpinBox_->value());
             settings.hevc_encoder.preset = selected_hevc_preset();
+            settings.hevc_encoder.nvenc_tune = selected_nvenc_tune();
             settings.hevc_encoder.gop_size = static_cast<std::uint32_t>(gopSpinBox_->value());
             settings.hevc_encoder.b_frames = static_cast<std::uint32_t>(bFramesSpinBox_->value());
             settings.hevc_encoder.lookahead = static_cast<std::uint32_t>(lookaheadSpinBox_->value());
             settings.hevc_encoder.adaptive_quantization = aqCombo_->currentIndex() == 1;
 
             return settings;
+        }
+
+        FinalizationFormat selected_finalization_format() const
+        {
+            const int currentIndex = finalizationFormatCombo_->currentIndex();
+            if (currentIndex >= 0)
+            {
+                return static_cast<FinalizationFormat>(finalizationFormatCombo_->itemData(currentIndex).toInt());
+            }
+
+            return FinalizationFormat::MaskPngMov;
         }
 
         void select_finalization_format(FinalizationFormat format)
@@ -415,21 +441,50 @@ namespace
             return alpha_recorder::obs::HevcQualityProfile::HighQuality;
         }
 
-        std::uint32_t default_cq_for_profile(alpha_recorder::obs::HevcQualityProfile profile) const
+        struct HevcProfileDefaults
+        {
+            std::uint32_t quality_cq;
+            alpha_recorder::obs::HevcEncoderPreset nvenc_preset;
+            alpha_recorder::obs::HevcEncoderPreset amf_preset;
+            alpha_recorder::obs::HevcNvencTune nvenc_tune;
+            std::uint32_t gop_size;
+            std::uint32_t b_frames;
+            std::uint32_t lookahead;
+            bool adaptive_quantization;
+        };
+
+        HevcProfileDefaults defaults_for_profile(alpha_recorder::obs::HevcQualityProfile profile) const
         {
             switch (profile)
             {
             case alpha_recorder::obs::HevcQualityProfile::Lossless:
-                return 0U;
+                return {0U, alpha_recorder::obs::HevcEncoderPreset::NvencLossless, alpha_recorder::obs::HevcEncoderPreset::AmfQuality,
+                        alpha_recorder::obs::HevcNvencTune::Lossless, 0U, 0U, 0U, false};
             case alpha_recorder::obs::HevcQualityProfile::HighQuality:
-                return 19U;
+                return {19U, alpha_recorder::obs::HevcEncoderPreset::NvencP5, alpha_recorder::obs::HevcEncoderPreset::AmfQuality,
+                        alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, 2U, 16U, true};
             case alpha_recorder::obs::HevcQualityProfile::Balanced:
-                return 23U;
+                return {23U, alpha_recorder::obs::HevcEncoderPreset::NvencP3, alpha_recorder::obs::HevcEncoderPreset::AmfBalanced,
+                        alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, 1U, 8U, true};
             case alpha_recorder::obs::HevcQualityProfile::Fast:
-                return 28U;
+                return {28U, alpha_recorder::obs::HevcEncoderPreset::NvencP2, alpha_recorder::obs::HevcEncoderPreset::AmfSpeed,
+                        alpha_recorder::obs::HevcNvencTune::LowLatency, 0U, 0U, 0U, false};
             }
 
-            return 19U;
+            return {19U, alpha_recorder::obs::HevcEncoderPreset::NvencP3, alpha_recorder::obs::HevcEncoderPreset::AmfBalanced,
+                    alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, 1U, 8U, true};
+        }
+
+        void apply_hevc_profile_defaults(alpha_recorder::obs::HevcQualityProfile profile)
+        {
+            const HevcProfileDefaults defaults = defaults_for_profile(profile);
+            qualitySpinBox_->setValue(static_cast<int>(defaults.quality_cq));
+            select_hevc_preset(selected_finalization_format() == FinalizationFormat::MaskHevcAmf ? defaults.amf_preset : defaults.nvenc_preset);
+            select_nvenc_tune(defaults.nvenc_tune);
+            gopSpinBox_->setValue(static_cast<int>(defaults.gop_size));
+            bFramesSpinBox_->setValue(static_cast<int>(defaults.b_frames));
+            lookaheadSpinBox_->setValue(static_cast<int>(defaults.lookahead));
+            aqCombo_->setCurrentIndex(defaults.adaptive_quantization ? 1 : 0);
         }
 
         void select_hevc_preset(alpha_recorder::obs::HevcEncoderPreset preset)
@@ -447,6 +502,21 @@ namespace
             presetCombo_->setCurrentIndex(1);
         }
 
+        void select_nvenc_tune(alpha_recorder::obs::HevcNvencTune tune)
+        {
+            const int requestedValue = static_cast<int>(tune);
+            for (int index = 0; index < tuneCombo_->count(); ++index)
+            {
+                if (tuneCombo_->itemData(index).toInt() == requestedValue)
+                {
+                    tuneCombo_->setCurrentIndex(index);
+                    return;
+                }
+            }
+
+            tuneCombo_->setCurrentIndex(0);
+        }
+
         alpha_recorder::obs::HevcEncoderPreset selected_hevc_preset() const
         {
             const int currentIndex = presetCombo_->currentIndex();
@@ -455,20 +525,92 @@ namespace
                 return static_cast<alpha_recorder::obs::HevcEncoderPreset>(presetCombo_->itemData(currentIndex).toInt());
             }
 
-            return alpha_recorder::obs::HevcEncoderPreset::Balanced;
+            return selected_finalization_format() == FinalizationFormat::MaskHevcAmf ? alpha_recorder::obs::HevcEncoderPreset::AmfBalanced
+                                                                                    : alpha_recorder::obs::HevcEncoderPreset::NvencP3;
+        }
+
+        alpha_recorder::obs::HevcNvencTune selected_nvenc_tune() const
+        {
+            const int currentIndex = tuneCombo_->currentIndex();
+            if (currentIndex >= 0)
+            {
+                return static_cast<alpha_recorder::obs::HevcNvencTune>(tuneCombo_->itemData(currentIndex).toInt());
+            }
+
+            return alpha_recorder::obs::HevcNvencTune::HighQuality;
+        }
+
+        bool preset_available_for_format(FinalizationFormat format, alpha_recorder::obs::HevcEncoderPreset preset) const
+        {
+            switch (preset)
+            {
+            case alpha_recorder::obs::HevcEncoderPreset::NvencLossless:
+            case alpha_recorder::obs::HevcEncoderPreset::NvencP1:
+            case alpha_recorder::obs::HevcEncoderPreset::NvencP2:
+            case alpha_recorder::obs::HevcEncoderPreset::NvencP3:
+            case alpha_recorder::obs::HevcEncoderPreset::NvencP4:
+            case alpha_recorder::obs::HevcEncoderPreset::NvencP5:
+            case alpha_recorder::obs::HevcEncoderPreset::NvencP6:
+            case alpha_recorder::obs::HevcEncoderPreset::NvencP7:
+                return format == FinalizationFormat::MaskHevcNvenc;
+            case alpha_recorder::obs::HevcEncoderPreset::AmfSpeed:
+            case alpha_recorder::obs::HevcEncoderPreset::AmfBalanced:
+            case alpha_recorder::obs::HevcEncoderPreset::AmfQuality:
+                return format == FinalizationFormat::MaskHevcAmf;
+            }
+
+            return false;
+        }
+
+        void populate_preset_combo(FinalizationFormat format, alpha_recorder::obs::HevcEncoderPreset preferredPreset)
+        {
+            const QSignalBlocker blocker{presetCombo_};
+            presetCombo_->clear();
+            if (format == FinalizationFormat::MaskHevcAmf)
+            {
+                presetCombo_->addItem("Speed", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::AmfSpeed));
+                presetCombo_->addItem("Balanced", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::AmfBalanced));
+                presetCombo_->addItem("Quality", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::AmfQuality));
+            }
+            else
+            {
+                presetCombo_->addItem("Lossless", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencLossless));
+                presetCombo_->addItem("P1 - Fastest", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP1));
+                presetCombo_->addItem("P2 - Faster", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP2));
+                presetCombo_->addItem("P3 - Fast", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP3));
+                presetCombo_->addItem("P4 - Medium", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP4));
+                presetCombo_->addItem("P5 - Quality", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP5));
+                presetCombo_->addItem("P6 - Higher Quality", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP6));
+                presetCombo_->addItem("P7 - Slowest", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP7));
+            }
+
+            if (preset_available_for_format(format, preferredPreset))
+            {
+                select_hevc_preset(preferredPreset);
+                return;
+            }
+
+            select_hevc_preset(defaults_for_profile(selected_hevc_profile()).amf_preset);
+            if (format != FinalizationFormat::MaskHevcAmf)
+            {
+                select_hevc_preset(defaults_for_profile(selected_hevc_profile()).nvenc_preset);
+            }
         }
 
         void update_hevc_controls()
         {
             const int formatIndex = finalizationFormatCombo_->currentIndex();
-            const bool hevcSelected = formatIndex >= 0 &&
-                                      static_cast<FinalizationFormat>(finalizationFormatCombo_->itemData(formatIndex).toInt()) !=
-                                          FinalizationFormat::MaskPngMov;
+            const FinalizationFormat selectedFormat = selected_finalization_format();
+            const bool hevcSelected = formatIndex >= 0 && selectedFormat != FinalizationFormat::MaskPngMov;
+            const bool nvencSelected = selectedFormat == FinalizationFormat::MaskHevcNvenc;
             hevcGroupBox_->setVisible(hevcSelected);
             const bool qualityEnabled = hevcSelected && selected_hevc_profile() != alpha_recorder::obs::HevcQualityProfile::Lossless;
             qualitySlider_->setEnabled(qualityEnabled);
             qualitySpinBox_->setEnabled(qualityEnabled);
             presetCombo_->setEnabled(qualityEnabled);
+            tuneRowLabel_->setVisible(nvencSelected);
+            tuneCombo_->setVisible(nvencSelected);
+            tuneCombo_->setEnabled(qualityEnabled && nvencSelected);
             gopSpinBox_->setEnabled(qualityEnabled);
             bFramesSpinBox_->setEnabled(qualityEnabled);
             lookaheadSpinBox_->setEnabled(qualityEnabled);
@@ -486,6 +628,8 @@ namespace
         QSlider *qualitySlider_ = nullptr;
         QSpinBox *qualitySpinBox_ = nullptr;
         QComboBox *presetCombo_ = nullptr;
+        QLabel *tuneRowLabel_ = nullptr;
+        QComboBox *tuneCombo_ = nullptr;
         QCheckBox *advancedCheckBox_ = nullptr;
         QFrame *advancedFrame_ = nullptr;
         QSpinBox *gopSpinBox_ = nullptr;

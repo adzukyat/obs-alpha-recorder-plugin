@@ -27,16 +27,33 @@ namespace alpha_recorder::obs
 
     enum class HevcEncoderPreset
     {
-        Fast,
-        Balanced,
-        Quality,
+        NvencLossless,
+        NvencP1,
+        NvencP2,
+        NvencP3,
+        NvencP4,
+        NvencP5,
+        NvencP6,
+        NvencP7,
+        AmfSpeed,
+        AmfBalanced,
+        AmfQuality,
+    };
+
+    enum class HevcNvencTune
+    {
+        Lossless,
+        HighQuality,
+        LowLatency,
+        UltraLowLatency,
     };
 
     struct HevcEncoderSettings
     {
         HevcQualityProfile quality_profile = HevcQualityProfile::HighQuality;
         std::uint32_t quality_cq = 19;
-        HevcEncoderPreset preset = HevcEncoderPreset::Balanced;
+        HevcEncoderPreset preset = HevcEncoderPreset::NvencP3;
+        HevcNvencTune nvenc_tune = HevcNvencTune::HighQuality;
         std::uint32_t gop_size = 0;
         std::uint32_t b_frames = 0;
         std::uint32_t lookahead = 0;
@@ -85,6 +102,11 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline constexpr std::string_view settings_hevc_preset_key() noexcept
     {
         return "hevc_preset";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_nvenc_tune_key() noexcept
+    {
+        return "hevc_nvenc_tune";
     }
 
     [[nodiscard]] inline constexpr std::string_view settings_hevc_gop_size_key() noexcept
@@ -218,47 +240,179 @@ namespace alpha_recorder::obs
     {
         switch (preset)
         {
-        case HevcEncoderPreset::Fast:
-            return "fast";
-        case HevcEncoderPreset::Balanced:
-            return "balanced";
-        case HevcEncoderPreset::Quality:
-            return "quality";
+        case HevcEncoderPreset::NvencLossless:
+            return "nvenc_lossless";
+        case HevcEncoderPreset::NvencP1:
+            return "nvenc_p1";
+        case HevcEncoderPreset::NvencP2:
+            return "nvenc_p2";
+        case HevcEncoderPreset::NvencP3:
+            return "nvenc_p3";
+        case HevcEncoderPreset::NvencP4:
+            return "nvenc_p4";
+        case HevcEncoderPreset::NvencP5:
+            return "nvenc_p5";
+        case HevcEncoderPreset::NvencP6:
+            return "nvenc_p6";
+        case HevcEncoderPreset::NvencP7:
+            return "nvenc_p7";
+        case HevcEncoderPreset::AmfSpeed:
+            return "amf_speed";
+        case HevcEncoderPreset::AmfBalanced:
+            return "amf_balanced";
+        case HevcEncoderPreset::AmfQuality:
+            return "amf_quality";
         }
 
-        return "balanced";
+        return "nvenc_p3";
     }
 
     [[nodiscard]] inline constexpr std::string_view hevc_encoder_preset_display_name(HevcEncoderPreset preset) noexcept
     {
         switch (preset)
         {
-        case HevcEncoderPreset::Fast:
-            return "Fast";
-        case HevcEncoderPreset::Balanced:
+        case HevcEncoderPreset::NvencLossless:
+            return "Lossless";
+        case HevcEncoderPreset::NvencP1:
+            return "P1";
+        case HevcEncoderPreset::NvencP2:
+            return "P2";
+        case HevcEncoderPreset::NvencP3:
+            return "P3";
+        case HevcEncoderPreset::NvencP4:
+            return "P4";
+        case HevcEncoderPreset::NvencP5:
+            return "P5";
+        case HevcEncoderPreset::NvencP6:
+            return "P6";
+        case HevcEncoderPreset::NvencP7:
+            return "P7";
+        case HevcEncoderPreset::AmfSpeed:
+            return "Speed";
+        case HevcEncoderPreset::AmfBalanced:
             return "Balanced";
-        case HevcEncoderPreset::Quality:
+        case HevcEncoderPreset::AmfQuality:
             return "Quality";
         }
 
-        return "Balanced";
+        return "P3";
     }
 
     [[nodiscard]] inline bool try_parse_hevc_encoder_preset(std::string_view value, HevcEncoderPreset &preset) noexcept
     {
-        if (value == "fast")
+        if (value == "nvenc_lossless" || value == "lossless")
         {
-            preset = HevcEncoderPreset::Fast;
+            preset = HevcEncoderPreset::NvencLossless;
             return true;
         }
-        if (value == "balanced")
+        if (value == "nvenc_p1" || value == "p1")
         {
-            preset = HevcEncoderPreset::Balanced;
+            preset = HevcEncoderPreset::NvencP1;
             return true;
         }
-        if (value == "quality")
+        if (value == "nvenc_p2" || value == "p2" || value == "fast")
         {
-            preset = HevcEncoderPreset::Quality;
+            preset = HevcEncoderPreset::NvencP2;
+            return true;
+        }
+        if (value == "nvenc_p3" || value == "p3" || value == "balanced")
+        {
+            preset = HevcEncoderPreset::NvencP3;
+            return true;
+        }
+        if (value == "nvenc_p4" || value == "p4")
+        {
+            preset = HevcEncoderPreset::NvencP4;
+            return true;
+        }
+        if (value == "nvenc_p5" || value == "p5" || value == "quality")
+        {
+            preset = HevcEncoderPreset::NvencP5;
+            return true;
+        }
+        if (value == "nvenc_p6" || value == "p6")
+        {
+            preset = HevcEncoderPreset::NvencP6;
+            return true;
+        }
+        if (value == "nvenc_p7" || value == "p7")
+        {
+            preset = HevcEncoderPreset::NvencP7;
+            return true;
+        }
+        if (value == "amf_speed")
+        {
+            preset = HevcEncoderPreset::AmfSpeed;
+            return true;
+        }
+        if (value == "amf_balanced")
+        {
+            preset = HevcEncoderPreset::AmfBalanced;
+            return true;
+        }
+        if (value == "amf_quality")
+        {
+            preset = HevcEncoderPreset::AmfQuality;
+            return true;
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] inline constexpr std::string_view hevc_nvenc_tune_config_value(HevcNvencTune tune) noexcept
+    {
+        switch (tune)
+        {
+        case HevcNvencTune::Lossless:
+            return "lossless";
+        case HevcNvencTune::HighQuality:
+            return "hq";
+        case HevcNvencTune::LowLatency:
+            return "ll";
+        case HevcNvencTune::UltraLowLatency:
+            return "ull";
+        }
+
+        return "hq";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view hevc_nvenc_tune_display_name(HevcNvencTune tune) noexcept
+    {
+        switch (tune)
+        {
+        case HevcNvencTune::Lossless:
+            return "Lossless";
+        case HevcNvencTune::HighQuality:
+            return "High Quality";
+        case HevcNvencTune::LowLatency:
+            return "Low Latency";
+        case HevcNvencTune::UltraLowLatency:
+            return "Ultra Low Latency";
+        }
+
+        return "High Quality";
+    }
+
+    [[nodiscard]] inline bool try_parse_hevc_nvenc_tune(std::string_view value, HevcNvencTune &tune) noexcept
+    {
+        if (value == "lossless")
+        {
+            tune = HevcNvencTune::Lossless;
+            return true;
+        }
+        if (value == "hq" || value == "high_quality")
+        {
+            tune = HevcNvencTune::HighQuality;
+            return true;
+        }
+        if (value == "ll" || value == "low_latency")
+        {
+            tune = HevcNvencTune::LowLatency;
+            return true;
+        }
+        if (value == "ull" || value == "ultra_low_latency")
+        {
+            tune = HevcNvencTune::UltraLowLatency;
             return true;
         }
 

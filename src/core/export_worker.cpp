@@ -120,12 +120,26 @@ namespace alpha_recorder::obs
         {
             switch (preset)
             {
-            case HevcEncoderPreset::Fast:
+            case HevcEncoderPreset::NvencLossless:
+                return "lossless";
+            case HevcEncoderPreset::NvencP1:
+                return "p1";
+            case HevcEncoderPreset::NvencP2:
                 return "p2";
-            case HevcEncoderPreset::Balanced:
+            case HevcEncoderPreset::NvencP3:
                 return "p3";
-            case HevcEncoderPreset::Quality:
+            case HevcEncoderPreset::NvencP4:
+                return "p4";
+            case HevcEncoderPreset::NvencP5:
                 return "p5";
+            case HevcEncoderPreset::NvencP6:
+                return "p6";
+            case HevcEncoderPreset::NvencP7:
+                return "p7";
+            case HevcEncoderPreset::AmfSpeed:
+            case HevcEncoderPreset::AmfBalanced:
+            case HevcEncoderPreset::AmfQuality:
+                break;
             }
 
             return "p3";
@@ -135,12 +149,21 @@ namespace alpha_recorder::obs
         {
             switch (preset)
             {
-            case HevcEncoderPreset::Fast:
+            case HevcEncoderPreset::AmfSpeed:
                 return "speed";
-            case HevcEncoderPreset::Balanced:
+            case HevcEncoderPreset::AmfBalanced:
                 return "balanced";
-            case HevcEncoderPreset::Quality:
+            case HevcEncoderPreset::AmfQuality:
                 return "quality";
+            case HevcEncoderPreset::NvencLossless:
+            case HevcEncoderPreset::NvencP1:
+            case HevcEncoderPreset::NvencP2:
+            case HevcEncoderPreset::NvencP3:
+            case HevcEncoderPreset::NvencP4:
+            case HevcEncoderPreset::NvencP5:
+            case HevcEncoderPreset::NvencP6:
+            case HevcEncoderPreset::NvencP7:
+                break;
             }
 
             return "balanced";
@@ -226,7 +249,7 @@ namespace alpha_recorder::obs
                 }
 
                 (void)av_opt_set(encoder.priv_data, "preset", nvenc_preset_value(config.hevc_encoder.preset), 0);
-                (void)av_opt_set(encoder.priv_data, "tune", config.hevc_encoder.quality_profile == HevcQualityProfile::Fast ? "ll" : "hq", 0);
+                (void)av_opt_set(encoder.priv_data, "tune", hevc_nvenc_tune_config_value(config.hevc_encoder.nvenc_tune).data(), 0);
                 (void)av_opt_set(encoder.priv_data, "rc", "vbr", 0);
                 (void)av_opt_set_int(encoder.priv_data, "cq", profile_default_cq(config.hevc_encoder.quality_profile,
                                                                                   config.hevc_encoder.quality_cq),

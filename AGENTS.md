@@ -29,8 +29,12 @@ path that can run without desktop automation.
   - HEVC encoder controls when NVENC/AMF mask output is selected:
     - Quality Profile.
     - CQ.
-    - Preset.
+    - Encoder-specific Preset.
+    - Tune for NVENC.
     - Advanced GOP, B-frames, Lookahead, and AQ controls.
+  - NVENC exposes P1 through P7 preset values and Tune; AMF exposes Speed,
+    Balanced, and Quality presets without Tune.
+  - Quality Profile buttons apply full encoder presets, not CQ-only shortcuts.
 - Missing settings default to Enabled ON.
 - When no finalization format has been saved, the plugin prefers an available
   hardware HEVC encoder before falling back to PNG MOV.
@@ -48,6 +52,7 @@ path that can run without desktop automation.
   - `AlphaRecorder.hevc_quality_profile`
   - `AlphaRecorder.hevc_quality_cq`
   - `AlphaRecorder.hevc_preset`
+  - `AlphaRecorder.hevc_nvenc_tune`
   - `AlphaRecorder.hevc_gop_size`
   - `AlphaRecorder.hevc_b_frames`
   - `AlphaRecorder.hevc_lookahead`
@@ -230,8 +235,8 @@ Completed:
 - obs-websocket vendor API for test automation:
   - `alpha_recorder.GetSettings`
   - `alpha_recorder.SetSettings`
-- obs-websocket settings coverage for HEVC quality profile, CQ, preset, GOP,
-  B-frames, lookahead, and adaptive quantization.
+- obs-websocket settings coverage for HEVC quality profile, CQ, preset, NVENC
+  tune, GOP, B-frames, lookahead, and adaptive quantization.
 - CMake-native OBS bootstrap, staging, deterministic E2E, and OBS app E2E
   scripts:
   - `cmake/scripts/BootstrapObs.cmake`
