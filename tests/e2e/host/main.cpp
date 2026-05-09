@@ -68,6 +68,38 @@ namespace
         return {};
     }
 
+    std::filesystem::path read_environment_path(const char *name)
+    {
+#ifdef _WIN32
+        size_t required_size = 0;
+        if (getenv_s(&required_size, nullptr, 0, name) != 0 || required_size == 0U)
+        {
+            return {};
+        }
+
+        std::string value(required_size, '\0');
+        if (getenv_s(&required_size, value.data(), value.size(), name) != 0 || required_size == 0U)
+        {
+            return {};
+        }
+
+        if (!value.empty() && value.back() == '\0')
+        {
+            value.pop_back();
+        }
+
+        return std::filesystem::path{value};
+#else
+        const char *value = std::getenv(name);
+        if (value == nullptr || value[0] == '\0')
+        {
+            return {};
+        }
+
+        return std::filesystem::path{value};
+#endif
+    }
+
     std::filesystem::path resolve_artifact_root(int argc, char **argv)
     {
         const std::filesystem::path cli_root = read_argument(argc, argv, "--artifact-root");
@@ -76,19 +108,13 @@ namespace
             return cli_root;
         }
 
-        const char *artifact_root_env = std::getenv("ALPHA_RECORDER_E2E_ARTIFACT_ROOT");
-        const std::filesystem::path env_root = (artifact_root_env != nullptr && *artifact_root_env != '\0')
-                                                   ? std::filesystem::path{artifact_root_env}
-                                                   : std::filesystem::path{};
+        const std::filesystem::path env_root = read_environment_path("ALPHA_RECORDER_E2E_ARTIFACT_ROOT");
         if (!env_root.empty())
         {
             return env_root;
         }
 
-        const char *stage_root_env = std::getenv("ALPHA_RECORDER_STAGE_DIR");
-        const std::filesystem::path stage_root = (stage_root_env != nullptr && *stage_root_env != '\0')
-                                                     ? std::filesystem::path{stage_root_env}
-                                                     : std::filesystem::path{};
+        const std::filesystem::path stage_root = read_environment_path("ALPHA_RECORDER_STAGE_DIR");
         if (!stage_root.empty())
         {
             return stage_root / "e2e";
@@ -112,10 +138,10 @@ namespace
             return cli_stage_dir;
         }
 
-        const char *stage_dir_env = std::getenv("ALPHA_RECORDER_STAGE_DIR");
-        if (stage_dir_env != nullptr && *stage_dir_env != '\0')
+        const std::filesystem::path stage_dir = read_environment_path("ALPHA_RECORDER_STAGE_DIR");
+        if (!stage_dir.empty())
         {
-            return std::filesystem::path{stage_dir_env};
+            return stage_dir;
         }
 
         return {};

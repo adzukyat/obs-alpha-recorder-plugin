@@ -38,7 +38,7 @@ namespace alpha_recorder::obs
 
             if (config_has_user_value(config, settings_section().data(), settings_hevc_quality_cq_key().data()))
             {
-                const int stored_cq = config_get_int(config, settings_section().data(), settings_hevc_quality_cq_key().data());
+                const std::int64_t stored_cq = config_get_int(config, settings_section().data(), settings_hevc_quality_cq_key().data());
                 settings.quality_cq = clamp_hevc_quality_cq(static_cast<std::uint32_t>(stored_cq < 0 ? 0 : stored_cq));
             }
 
@@ -64,19 +64,19 @@ namespace alpha_recorder::obs
 
             if (config_has_user_value(config, settings_section().data(), settings_hevc_gop_size_key().data()))
             {
-                const int stored_gop = config_get_int(config, settings_section().data(), settings_hevc_gop_size_key().data());
+                const std::int64_t stored_gop = config_get_int(config, settings_section().data(), settings_hevc_gop_size_key().data());
                 settings.gop_size = clamp_hevc_gop_size(static_cast<std::uint32_t>(stored_gop < 0 ? 0 : stored_gop));
             }
 
             if (config_has_user_value(config, settings_section().data(), settings_hevc_b_frames_key().data()))
             {
-                const int stored_b_frames = config_get_int(config, settings_section().data(), settings_hevc_b_frames_key().data());
+                const std::int64_t stored_b_frames = config_get_int(config, settings_section().data(), settings_hevc_b_frames_key().data());
                 settings.b_frames = clamp_hevc_b_frames(static_cast<std::uint32_t>(stored_b_frames < 0 ? 0 : stored_b_frames));
             }
 
             if (config_has_user_value(config, settings_section().data(), settings_hevc_lookahead_key().data()))
             {
-                const int stored_lookahead = config_get_int(config, settings_section().data(), settings_hevc_lookahead_key().data());
+                const std::int64_t stored_lookahead = config_get_int(config, settings_section().data(), settings_hevc_lookahead_key().data());
                 settings.lookahead = clamp_hevc_lookahead(static_cast<std::uint32_t>(stored_lookahead < 0 ? 0 : stored_lookahead));
             }
 
