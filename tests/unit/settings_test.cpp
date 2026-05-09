@@ -116,14 +116,6 @@ int main()
         return 12;
     }
 
-    if (!alpha_recorder::obs::try_parse_finalization_format("mask_prores_422", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
-        !alpha_recorder::obs::try_parse_finalization_format("prores_4444", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
-        !alpha_recorder::obs::try_parse_finalization_format("lossless_hevc", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc)
-    {
-        std::cerr << "legacy finalization format migration did not parse as expected\n";
-        return 12;
-    }
-
     if (alpha_recorder::obs::try_parse_finalization_format("not-a-format", parsed_format))
     {
         std::cerr << "invalid finalization format value should be rejected\n";
@@ -210,7 +202,7 @@ int main()
     }
 
     config_set_bool(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_enabled_key().data(), true);
-    config_set_string(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data(), "lossless_hevc");
+    config_set_string(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data(), "mask_hevc_nvenc");
     if (config_save(file_config) != CONFIG_SUCCESS)
     {
         std::cerr << "failed to seed the file-backed config\n";
@@ -227,7 +219,7 @@ int main()
     const std::string expected_rewritten_text{alpha_recorder::obs::finalization_format_config_value(expected_rewritten_format)};
     if (!rewritten_settings.enabled || rewritten_settings.finalization_format != expected_rewritten_format || rewritten_format == nullptr || std::string{rewritten_format} != expected_rewritten_text)
     {
-        std::cerr << "lossless hevc config values were not preserved in the persisted config\n";
+        std::cerr << "unavailable hevc config values were not normalized in the persisted config\n";
         config_close(file_config);
         return 42;
     }

@@ -174,16 +174,6 @@ function simpleRgbEncoder(encoder: string): string {
   }
 }
 
-function normalizedFinalizationFormat(format: string): string {
-  if (format === "mask_prores_422" || format === "prores_4444") {
-    return "mask_png_mov";
-  }
-  if (format === "lossless_hevc") {
-    return "mask_hevc_nvenc";
-  }
-  return format;
-}
-
 function writeText(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, text, "utf8");
@@ -1409,7 +1399,7 @@ finalization_format=${args.finalizationFormat}
     if (!settings.responseData?.enabled) {
       throw new Error("Alpha Recorder did not report enabled=true through the vendor API");
     }
-    const expectedFinalizationFormat = normalizedFinalizationFormat(args.finalizationFormat);
+    const expectedFinalizationFormat = args.finalizationFormat;
     if (settings.responseData?.finalization_format !== expectedFinalizationFormat) {
       throw new Error(`Alpha Recorder did not accept finalization_format=${args.finalizationFormat}: ${JSON.stringify(settings)}`);
     }

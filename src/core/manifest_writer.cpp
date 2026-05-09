@@ -112,28 +112,6 @@ namespace alpha_recorder
             return true;
         }
 
-        bool read_json_optional_string(json_t *object, const char *key, std::string &value, std::string *error_message)
-        {
-            json_t *const entry = json_object_get(object, key);
-            if (entry == nullptr)
-            {
-                return true;
-            }
-
-            const char *const text = json_string_value(entry);
-            if (text == nullptr)
-            {
-                if (error_message != nullptr)
-                {
-                    *error_message = std::string{"manifest field \""} + key + "\" is not a string";
-                }
-                return false;
-            }
-
-            value = text;
-            return true;
-        }
-
         bool read_json_u64(json_t *object, const char *key, std::uint64_t &value, std::string *error_message)
         {
             json_t *const entry = json_object_get(object, key);
@@ -209,7 +187,7 @@ namespace alpha_recorder
             if (!read_json_u32(root, "container_format_version", summary.container_format_version, error_message) ||
                 !read_json_string(root, "project_name", summary.project_name, error_message) ||
                 !read_json_string(root, "project_version", summary.project_version, error_message) ||
-                !read_json_optional_string(root, "finalization_format", summary.finalization_format, error_message) ||
+                !read_json_string(root, "finalization_format", summary.finalization_format, error_message) ||
                 !read_json_string(root, "sidecar_path", sidecar_path_text, error_message) ||
                 !read_json_string(root, "manifest_path", manifest_path_text, error_message) ||
                 !read_json_u64(root, "pair_count", pair_count, error_message) ||
@@ -297,7 +275,7 @@ namespace alpha_recorder
                 write_json_string(stream, summary.project_version);
                 stream << ",\n";
                 stream << "  \"finalization_format\": ";
-                write_json_string(stream, summary.finalization_format.empty() ? std::string_view{"mask_png_mov"} : std::string_view{summary.finalization_format});
+                write_json_string(stream, summary.finalization_format);
                 stream << ",\n";
                 stream << "  \"sidecar_path\": ";
                 write_json_string(stream, summary.sidecar_path.generic_string());

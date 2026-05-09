@@ -348,47 +348,9 @@ int main()
         return 27;
     }
 
-    const std::string legacy_finalization_line = "  \"finalization_format\": \"mask_png_mov\",\n";
-    const std::size_t legacy_finalization_pos = manifest_text.find(legacy_finalization_line);
-    if (legacy_finalization_pos == std::string::npos)
-    {
-        std::cerr << "failed to locate the finalization format field for the legacy manifest check\n";
-        return 40;
-    }
-
-    const std::filesystem::path legacy_manifest_path = temp_root / "session.legacy.manifest.json";
-    std::string legacy_manifest_text = manifest_text;
-    legacy_manifest_text.erase(legacy_finalization_pos, legacy_finalization_line.size());
-
-    {
-        std::ofstream legacy_manifest_stream(legacy_manifest_path, std::ios::binary | std::ios::trunc);
-        if (!legacy_manifest_stream)
-        {
-            std::cerr << "failed to create the legacy manifest for compatibility testing\n";
-            return 41;
-        }
-
-        legacy_manifest_stream << legacy_manifest_text;
-    }
-
-    alpha_recorder::ManifestWriter legacy_manifest_reader;
-    alpha_recorder::AlphaSessionSummary legacy_summary;
-    std::string legacy_read_error;
-    if (!legacy_manifest_reader.read(legacy_manifest_path, legacy_summary, &legacy_read_error))
-    {
-        std::cerr << "legacy manifest should still be readable: " << legacy_read_error << "\n";
-        return 42;
-    }
-
-    if (legacy_summary.finalization_format != "mask_png_mov")
-    {
-        std::cerr << "legacy manifest should default the missing finalization format to mask_png_mov\n";
-        return 43;
-    }
-
     alpha_recorder::AlphaSessionSummary overload_summary = summary;
     overload_summary.manifest_path = temp_root / "session.overload.manifest.json";
-    overload_summary.finalization_format = "lossless_hevc";
+    overload_summary.finalization_format = "mask_hevc_nvenc";
     overload_summary.overload_detected = true;
 
     alpha_recorder::ManifestWriter manifest_writer;
@@ -406,7 +368,7 @@ int main()
     }
 
     const std::string overload_manifest_text((std::istreambuf_iterator<char>(overload_manifest_stream)), std::istreambuf_iterator<char>());
-    if (!contains_text(overload_manifest_text, "\"finalization_format\": \"lossless_hevc\"") || !contains_text(overload_manifest_text, "ERR_OVERLOAD"))
+    if (!contains_text(overload_manifest_text, "\"finalization_format\": \"mask_hevc_nvenc\"") || !contains_text(overload_manifest_text, "ERR_OVERLOAD"))
     {
         std::cerr << "overload manifest did not include the expected metadata\n";
         return 30;
@@ -442,7 +404,7 @@ int main()
     }
 
     alpha_recorder::AlphaSessionSummary locked_update_summary = locked_summary;
-    locked_update_summary.finalization_format = "lossless_hevc";
+    locked_update_summary.finalization_format = "mask_hevc_nvenc";
     locked_update_summary.overload_detected = true;
 
     if (manifest_writer.write(locked_update_summary))

@@ -33,7 +33,7 @@ E2E path that can run without desktop automation.
 - Scenario files are retained only for synthetic/non-UI E2E paths.
 - External capture apps are not part of the product path.
 - The shipping OBS runtime writes the playable alpha mask movie directly.
-- Legacy raw sidecar and manifest primitives remain only for synthetic/non-UI
+- Raw sidecar and manifest primitives remain only for synthetic/non-UI
   E2E support.
 - Build and staging produce one normal user OBS plugin artifact named
   `alpha_recorder`.
@@ -42,7 +42,6 @@ E2E path that can run without desktop automation.
 - The separate `alpha_recorder_e2e` module is test-only for deterministic and
   synthetic E2E support.
 - `alpha_recorder_e2e` must not register runtime UI or obs-websocket hooks.
-- There is no `alpha_recorder_frontend` plugin artifact.
 
 ## Non-Goals
 
@@ -146,14 +145,14 @@ Settings can also be driven by obs-websocket vendor API for automated E2E:
 
 ## Technical Design
 
-The repo contains core primitives for admission gating, legacy sidecar support,
+The repo contains core primitives for admission gating, sidecar support,
 settings, and live mask movie encoding. The OBS integration adds live capture,
 lifecycle wiring, settings, and automated control.
 
 The current tree provides:
 
 - OBS recording lifecycle hooks plus a Tools menu settings dialog.
-- A core static library for pair gating, legacy sidecar primitives, settings,
+- A core static library for pair gating, sidecar primitives, settings,
   and live mask movie encoding.
 - Unit test executables registered with CTest.
 - Deterministic E2E executables and CMake-native staging helpers.

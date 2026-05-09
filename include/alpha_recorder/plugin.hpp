@@ -530,18 +530,6 @@ namespace alpha_recorder::obs
             }
         }
 
-        if (value == "mask_prores_422" || value == "prores_4444")
-        {
-            format = FinalizationFormat::MaskPngMov;
-            return true;
-        }
-
-        if (value == "lossless_hevc")
-        {
-            format = FinalizationFormat::MaskHevcNvenc;
-            return true;
-        }
-
         return false;
     }
 
