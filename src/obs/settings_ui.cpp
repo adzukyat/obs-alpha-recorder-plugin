@@ -252,11 +252,6 @@ namespace
             tuneRowLabel_ = new QLabel("Tune", this);
             hevcFormLayout->addRow(tuneRowLabel_, tuneCombo_);
 
-            auto *rateControlCombo = new QComboBox(this);
-            rateControlCombo->addItem("VBR");
-            rateControlCombo->setMinimumWidth(165);
-            rateControlCombo->setToolTip("NVENC uses VBR with CQ. AMF maps the same quality value to constant QP.");
-            hevcFormLayout->addRow("Rate Control", rateControlCombo);
             hevcLayout->addLayout(hevcFormLayout);
 
             advancedCheckBox_ = new QCheckBox("Advanced", this);
