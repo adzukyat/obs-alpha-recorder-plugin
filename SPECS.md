@@ -357,8 +357,8 @@ curl -fsSL https://bun.sh/install | bash
 
 For WSL app E2E, validate that WSLg exposes `DISPLAY`, `WAYLAND_DISPLAY`,
 `XDG_RUNTIME_DIR`, and the Wayland socket before launching OBS. Use a native
-Linux checkout such as `a native Linux checkout`; avoid building
-from a Windows-mounted `/mnt/*` checkout for normal validation.
+Linux checkout; avoid building from a Windows-mounted `/mnt/*` checkout for
+normal validation.
 
 ## Validation Contract
 

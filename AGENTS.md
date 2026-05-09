@@ -119,11 +119,10 @@ cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_
 
 ## Validation Notes
 
-- For Windows-specific proof, use the real Windows host when requested:
-  `the requested Windows host`, repo path `the repository path`.
-- For WSL/Linux validation, prefer a native checkout such as
-  `a native Linux checkout`; avoid normal validation from
-  Windows-mounted `/mnt/*` paths.
+- For Windows-specific proof, use the real requested Windows host and
+  repository path.
+- For WSL/Linux validation, prefer a native Linux checkout; avoid normal
+  validation from Windows-mounted `/mnt/*` paths.
 - The OBS app E2E aggregate depends only on runnable profiles. Directly building
   a skipped target should print its skip reason and avoid launching OBS.
 - Detailed OBS app E2E behavior, target matrix rules, artifact names, and
