@@ -31,58 +31,15 @@
 #include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
-#else
-#include <dlfcn.h>
-#endif
-
-OBS_DECLARE_MODULE()
-OBS_MODULE_USE_DEFAULT_LOCALE("alpha_recorder_frontend", "en-US")
-
 namespace
 {
 
     using alpha_recorder::obs::FinalizationFormat;
     using alpha_recorder::obs::Settings;
 
-    using RuntimeSyncFunction = bool (*)();
-
-    RuntimeSyncFunction resolve_runtime_sync_function() noexcept
-    {
-        obs_module_t *module = obs_get_module("alpha_recorder");
-        if (module == nullptr)
-        {
-            return nullptr;
-        }
-
-        void *module_lib = obs_get_module_lib(module);
-        if (module_lib == nullptr)
-        {
-            return nullptr;
-        }
-
-#ifdef _WIN32
-        return reinterpret_cast<RuntimeSyncFunction>(GetProcAddress(static_cast<HMODULE>(module_lib), "alpha_recorder_sync_runtime_hooks"));
-#else
-        return reinterpret_cast<RuntimeSyncFunction>(dlsym(module_lib, "alpha_recorder_sync_runtime_hooks"));
-#endif
-    }
-
     bool sync_runtime_hooks(QString &warning_message)
     {
-        const RuntimeSyncFunction runtime_sync = resolve_runtime_sync_function();
-        if (runtime_sync == nullptr)
-        {
-            warning_message = "Alpha Recorder saved the settings, but could not contact the recording runtime. Restart OBS if enabling does not take effect immediately.";
-            blog(LOG_WARNING, "%s", warning_message.toUtf8().constData());
-            return false;
-        }
-
-        if (!runtime_sync())
+        if (!alpha_recorder::obs::register_runtime_hooks())
         {
             warning_message = "Alpha Recorder saved the settings, but the recording runtime did not accept the update. Restart OBS if enabling does not take effect immediately.";
             blog(LOG_WARNING, "%s", warning_message.toUtf8().constData());
@@ -637,37 +594,37 @@ namespace
 
 } // namespace
 
-extern "C" bool obs_module_load(void)
+namespace alpha_recorder::obs
 {
-    return true;
-}
 
-MODULE_EXPORT const char *obs_module_description(void)
-{
-    return "OBS settings dialog for alpha_recorder";
-}
-
-extern "C" void obs_module_post_load(void)
-{
-    settingsAction = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction("Alpha Recorder Settings"));
-    if (settingsAction == nullptr)
+    void register_settings_ui() noexcept
     {
-        return;
+        if (!settingsAction.isNull())
+        {
+            return;
+        }
+
+        settingsAction = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction("Alpha Recorder Settings"));
+        if (settingsAction == nullptr)
+        {
+            return;
+        }
+
+        QObject::connect(settingsAction, &QAction::triggered, settingsAction, []()
+                         {
+            QMainWindow *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+            AlphaRecorderSettingsDialog dialog(mainWindow);
+            dialog.exec(); });
     }
 
-    QObject::connect(settingsAction, &QAction::triggered, settingsAction, []()
-                     {
-        QMainWindow *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
-        AlphaRecorderSettingsDialog dialog(mainWindow);
-        dialog.exec(); });
-}
-
-extern "C" void obs_module_unload(void)
-{
-    if (!settingsAction.isNull())
+    void unregister_settings_ui() noexcept
     {
-        settingsAction->disconnect();
-        settingsAction->setEnabled(false);
+        if (!settingsAction.isNull())
+        {
+            settingsAction->disconnect();
+            settingsAction->setEnabled(false);
+        }
+        settingsAction.clear();
     }
-    settingsAction.clear();
-}
+
+} // namespace alpha_recorder::obs

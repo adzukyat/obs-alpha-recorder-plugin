@@ -152,10 +152,15 @@ To stage a portable OBS tree with Alpha Recorder overlaid, build the
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_stage_obs_tree
 ```
 
-On Windows, the staged plugin DLLs land under
-`out/stage/obs/obs-plugins/64bit`. On macOS, bundles land under
-`out/stage/obs/obs-plugins`. On Linux, plugin `.so` files land under the
-staged OBS library plugin directory such as
+Staging overlays one normal user plugin artifact, `alpha_recorder`, containing
+both the recording runtime and `Tools > Alpha Recorder Settings`. When
+deterministic E2E support is built, staging may also overlay the separate
+test-only `alpha_recorder_e2e` module. There is no `alpha_recorder_frontend`
+plugin artifact.
+
+On Windows, staged plugin DLLs land under `out/stage/obs/obs-plugins/64bit`.
+On macOS, bundles land under `out/stage/obs/obs-plugins`. On Linux, plugin
+`.so` files land under the staged OBS library plugin directory such as
 `out/stage/obs/lib/x86_64-linux-gnu/obs-plugins`.
 
 ## Test

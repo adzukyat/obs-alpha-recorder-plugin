@@ -132,10 +132,12 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     add_library(alpha_recorder_plugin MODULE
         src/obs/plugin.cpp
         src/obs/recording_session_controller.cpp
+        src/obs/settings_ui.cpp
         src/obs/websocket_vendor_api.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_plugin)
     alpha_recorder_apply_warnings(alpha_recorder_plugin)
+    target_compile_definitions(alpha_recorder_plugin PRIVATE QT_NO_VERSION_TAGGING)
     target_link_libraries(alpha_recorder_plugin PRIVATE alpha_recorder_core OBS::libobs OBS::frontend-api)
     target_include_directories(alpha_recorder_plugin PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -201,41 +203,7 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
             endforeach()
         endif()
 
-        add_library(alpha_recorder_frontend MODULE
-            src/obs/settings_ui.cpp
-        )
-        alpha_recorder_setup_target(alpha_recorder_frontend)
-        alpha_recorder_apply_warnings(alpha_recorder_frontend)
-        target_compile_definitions(alpha_recorder_frontend PRIVATE QT_NO_VERSION_TAGGING)
-        target_include_directories(alpha_recorder_frontend PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-        target_link_libraries(alpha_recorder_frontend PRIVATE alpha_recorder_core OBS::libobs OBS::frontend-api Qt6::Widgets)
-        set_target_properties(alpha_recorder_frontend PROPERTIES
-            OUTPUT_NAME "alpha_recorder_frontend"
-            FOLDER "alpha_recorder/obs"
-        )
-
-        if(APPLE)
-            set_target_properties(alpha_recorder_frontend PROPERTIES
-                BUNDLE TRUE
-                BUNDLE_EXTENSION plugin
-            )
-            add_custom_command(TARGET alpha_recorder_frontend POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
-                        "$<TARGET_BUNDLE_DIR:alpha_recorder_frontend>"
-                        "${alpha_recorder_obs_plugin_dir}/alpha_recorder_frontend.plugin"
-                COMMAND codesign --force --sign - "${alpha_recorder_obs_plugin_dir}/alpha_recorder_frontend.plugin"
-                VERBATIM
-            )
-        else()
-            add_custom_command(TARGET alpha_recorder_frontend POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        "$<TARGET_FILE:alpha_recorder_frontend>"
-                        "${alpha_recorder_obs_plugin_dir}/$<TARGET_FILE_NAME:alpha_recorder_frontend>"
-                VERBATIM
-            )
-        endif()
+        target_link_libraries(alpha_recorder_plugin PRIVATE Qt6::Widgets)
     endif()
 endif()
 
@@ -447,9 +415,6 @@ if(_alpha_recorder_build_full_targets AND TARGET alpha_recorder_plugin)
         DEPENDS alpha_recorder_plugin
         VERBATIM
     )
-    if(TARGET alpha_recorder_frontend)
-        add_dependencies(alpha_recorder_stage_obs_tree alpha_recorder_frontend)
-    endif()
     if(TARGET alpha_recorder_e2e_output)
         add_dependencies(alpha_recorder_stage_obs_tree alpha_recorder_e2e_output)
     endif()
@@ -747,14 +712,6 @@ endif()
 
 if(TARGET alpha_recorder_plugin)
     install(TARGETS alpha_recorder_plugin
-        RUNTIME DESTINATION obs-plugins/64bit
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/obs-plugins
-        BUNDLE DESTINATION obs-plugins
-    )
-endif()
-
-if(TARGET alpha_recorder_frontend)
-    install(TARGETS alpha_recorder_frontend
         RUNTIME DESTINATION obs-plugins/64bit
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/obs-plugins
         BUNDLE DESTINATION obs-plugins

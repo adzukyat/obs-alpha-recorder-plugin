@@ -40,7 +40,7 @@ namespace alpha_recorder::obs
 namespace
 {
 #if !defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
-    void alpha_recorder_frontend_event(enum obs_frontend_event event, void *) noexcept
+    void alpha_recorder_recording_frontend_event(enum obs_frontend_event event, void *) noexcept
     {
         if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING)
         {
@@ -59,23 +59,16 @@ extern "C" void obs_module_post_load(void)
 {
 #if !defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
     alpha_recorder::obs::register_websocket_vendor_api();
-    obs_frontend_add_event_callback(alpha_recorder_frontend_event, nullptr);
-#endif
-}
-
-MODULE_EXPORT bool alpha_recorder_sync_runtime_hooks(void)
-{
-#if defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
-    return true;
-#else
-    return alpha_recorder::obs::register_runtime_hooks();
+    obs_frontend_add_event_callback(alpha_recorder_recording_frontend_event, nullptr);
+    alpha_recorder::obs::register_settings_ui();
 #endif
 }
 
 extern "C" void obs_module_unload(void)
 {
 #if !defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
-    obs_frontend_remove_event_callback(alpha_recorder_frontend_event, nullptr);
+    alpha_recorder::obs::unregister_settings_ui();
+    obs_frontend_remove_event_callback(alpha_recorder_recording_frontend_event, nullptr);
     alpha_recorder::obs::unregister_websocket_vendor_api();
     alpha_recorder::obs::unregister_runtime_hooks();
 #endif

@@ -552,6 +552,8 @@ namespace alpha_recorder::obs
     void unregister_runtime_hooks() noexcept;
     void register_websocket_vendor_api() noexcept;
     void unregister_websocket_vendor_api() noexcept;
+    void register_settings_ui() noexcept;
+    void unregister_settings_ui() noexcept;
     bool register_output_module() noexcept;
     bool register_e2e_sources() noexcept;
     bool initialize_module() noexcept;

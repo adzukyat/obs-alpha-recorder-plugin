@@ -170,11 +170,31 @@ if(APPLE)
     file(COPY "${obs_plugin_source}/" DESTINATION "${portable_plugin_target_dir}")
 endif()
 
+set(alpha_recorder_plugin_cleanup_dirs "${plugin_target_dir}")
+if(APPLE)
+    list(APPEND alpha_recorder_plugin_cleanup_dirs "${app_plugin_target_dir}" "${portable_plugin_target_dir}")
+endif()
+foreach(alpha_recorder_plugin_cleanup_dir IN LISTS alpha_recorder_plugin_cleanup_dirs)
+    if(NOT EXISTS "${alpha_recorder_plugin_cleanup_dir}")
+        continue()
+    endif()
+    foreach(alpha_recorder_owned_plugin IN ITEMS "${PLUGIN_NAME}" alpha_recorder_frontend alpha_recorder_e2e)
+        foreach(alpha_recorder_owned_plugin_path IN ITEMS
+            "${alpha_recorder_plugin_cleanup_dir}/${alpha_recorder_owned_plugin}.plugin"
+            "${alpha_recorder_plugin_cleanup_dir}/${alpha_recorder_owned_plugin}.dylib"
+            "${alpha_recorder_plugin_cleanup_dir}/${alpha_recorder_owned_plugin}.dll"
+            "${alpha_recorder_plugin_cleanup_dir}/${alpha_recorder_owned_plugin}.so"
+            "${alpha_recorder_plugin_cleanup_dir}/lib${alpha_recorder_owned_plugin}.so"
+        )
+            file(REMOVE_RECURSE "${alpha_recorder_owned_plugin_path}")
+        endforeach()
+    endforeach()
+endforeach()
+
 set(main_plugin_path "")
-set(frontend_plugin_path "")
 set(e2e_plugin_path "")
 if(NOT SKIP_PLUGIN_OVERLAY)
-    foreach(plugin IN ITEMS "${PLUGIN_NAME}" alpha_recorder_frontend alpha_recorder_e2e)
+    foreach(plugin IN ITEMS "${PLUGIN_NAME}" alpha_recorder_e2e)
         alpha_recorder_find_plugin(plugin_path "${plugin}")
         if(plugin STREQUAL "${PLUGIN_NAME}" AND plugin_path STREQUAL "")
             message(FATAL_ERROR "Failed to locate ${PLUGIN_NAME} in the build tree: ${BUILD_DIR}")
@@ -196,8 +216,6 @@ if(NOT SKIP_PLUGIN_OVERLAY)
             endif()
             if(plugin STREQUAL "${PLUGIN_NAME}")
                 set(main_plugin_path "${plugin_path}")
-            elseif(plugin STREQUAL "alpha_recorder_frontend")
-                set(frontend_plugin_path "${plugin_path}")
             elseif(plugin STREQUAL "alpha_recorder_e2e")
                 set(e2e_plugin_path "${plugin_path}")
             endif()
@@ -211,7 +229,6 @@ alpha_recorder_write_json_manifest("${STAGE_DIR}/stage.manifest.json"
     "stageDir=${STAGE_DIR}"
     "configuration=${CONFIGURATION}"
     "pluginPath=${main_plugin_path}"
-    "frontendPluginPath=${frontend_plugin_path}"
     "e2ePluginPath=${e2e_plugin_path}"
 )
 

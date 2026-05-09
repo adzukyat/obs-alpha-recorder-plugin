@@ -34,7 +34,7 @@ endif()
 
 if(NOT SKIP_BUILD)
     execute_process(
-        COMMAND "${CMAKE_COMMAND}" --build "${BUILD_DIR}" --config "${CONFIGURATION}" --target alpha_recorder_plugin alpha_recorder_frontend alpha_recorder_e2e_output
+        COMMAND "${CMAKE_COMMAND}" --build "${BUILD_DIR}" --config "${CONFIGURATION}" --target alpha_recorder_plugin alpha_recorder_e2e_output
         COMMAND_ERROR_IS_FATAL ANY
     )
 endif()

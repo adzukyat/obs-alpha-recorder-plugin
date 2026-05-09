@@ -66,6 +66,11 @@ path that can run without desktop automation.
 - Legacy raw sidecar and manifest primitives remain for synthetic/non-UI E2E
   support, but the shipping OBS runtime writes the playable alpha mask movie
   directly.
+- Build and staging produce one normal user OBS plugin artifact named
+  `alpha_recorder`, containing both runtime recording hooks and
+  `Tools > Alpha Recorder Settings`. The separate `alpha_recorder_e2e` module
+  is test-only for deterministic/synthetic E2E support and must not register
+  runtime UI or obs-websocket hooks.
 
 ## Non-Goals
 
@@ -263,7 +268,10 @@ Completed:
 - Optional CTest registration behind:
   - `ALPHA_RECORDER_ENABLE_OBS_APP_E2E`
 - OBS staging updates that copy the full OBS plugin set before overlaying Alpha
-  Recorder binaries.
+  Recorder binaries. The overlay contains the single user plugin
+  `alpha_recorder` and, when deterministic E2E support is built, the optional
+  test-only `alpha_recorder_e2e`; there is no `alpha_recorder_frontend`
+  artifact.
 
 Still useful follow-up work:
 
