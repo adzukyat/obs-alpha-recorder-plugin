@@ -1,4 +1,4 @@
-# Alpha Recorder for OBS :movie_camera:
+# :movie_camera: Alpha Recorder for OBS
 
 Alpha Recorder is an OBS plugin that records a separate grayscale alpha-mask
 movie next to your normal OBS recording.
@@ -14,7 +14,7 @@ Use OBS the way you already do:
 > Alpha Recorder does not replace your normal OBS recording. The RGB recording
 > stays the primary output, and the alpha mask is written as a sidecar file.
 
-## What You Get :sparkles:
+## :sparkles: What You Get
 
 - :white_check_mark: Normal OBS Start Recording / Stop Recording workflow.
 - :white_check_mark: A separate grayscale alpha-mask movie for compositing.
@@ -23,28 +23,28 @@ Use OBS the way you already do:
 - :white_check_mark: Hardware HEVC mask output when NVENC or AMF is available.
 - :white_check_mark: Lossless PNG MOV fallback when hardware HEVC is not usable.
 
-## Output Files :file_folder:
+## :file_folder: Output Files
 
 If OBS records this:
 
 ```text
-C:\Recordings\MyRec.mkv
+~/Recordings/MyRec.mkv
 ```
 
 Alpha Recorder writes one of these beside it:
 
 | Selected format | Alpha output | Good for |
 | --- | --- | --- |
-| `mask_png_mov` | `C:\Recordings\MyRec.alpha.mov` | Lossless grayscale masks |
-| `mask_hevc_nvenc` | `C:\Recordings\MyRec.alpha.mp4` | NVIDIA HEVC sidecar masks |
-| `mask_hevc_amf` | `C:\Recordings\MyRec.alpha.mp4` | AMD HEVC sidecar masks |
+| `mask_png_mov` | `~/Recordings/MyRec.alpha.mov` | Lossless grayscale masks |
+| `mask_hevc_nvenc` | `~/Recordings/MyRec.alpha.mp4` | NVIDIA HEVC sidecar masks |
+| `mask_hevc_amf` | `~/Recordings/MyRec.alpha.mp4` | AMD HEVC sidecar masks |
 
 > [!NOTE]
 > The alpha movie is a visible grayscale video, not a video file with its own
 > transparency channel. White pixels represent high alpha, black pixels
 > represent low alpha.
 
-## Quick Start :rocket:
+## :rocket: Quick Start
 
 1. Build and stage the plugin from source.
 2. Launch the staged OBS runtime.
@@ -57,24 +57,16 @@ Missing settings default to enabled. If you have not chosen a finalization
 format yet, Alpha Recorder tries an available hardware HEVC encoder first and
 falls back to PNG MOV.
 
-## Settings :gear:
+## :gear: Settings
 
 The settings dialog lives at `Tools > Alpha Recorder Settings`.
 
-| Setting | What it does |
-| --- | --- |
-| Enabled | Turns the sidecar alpha recording on or off |
-| Finalization Format | Chooses PNG MOV, HEVC NVENC, or HEVC AMF |
-| Quality Profile | Applies a complete HEVC tuning preset |
-| CQ | Adjusts HEVC constant-quality value |
-| Preset | Uses NVENC P1-P7 or AMF Speed/Balanced/Quality |
-| Tune | NVENC-only tuning mode |
-| Advanced HEVC options | GOP, B-frames, lookahead, and adaptive quantization |
+<img width="540" height="581" src="https://github.com/user-attachments/assets/ecfaecf7-79db-4c6d-8e28-62fc2aa7f350" />
 
 HEVC controls appear only when the matching encoder can actually open on the
 current machine.
 
-## Build From Source :hammer_and_wrench:
+## :hammer_and_wrench: Build From Source
 
 Alpha Recorder builds against a real OBS developer tree. The repo includes OBS
 as a submodule and CMake helpers for bootstrapping the pinned OBS runtime.
@@ -128,7 +120,7 @@ Use the matching preset for your platform. The staged runtime is written under
 > app-level E2E harness. The complete validation notes live in
 > [`SPECS.md`](SPECS.md).
 
-## Test :test_tube:
+## :test_tube: Test
 
 Run focused unit tests:
 
@@ -159,26 +151,13 @@ through obs-websocket, records real RGB and alpha outputs, and verifies decoded
 sync. Runtime-specific targets that cannot run on the current machine are
 skipped with a clear reason.
 
-## Automation :robot:
+> [!WARNING]
+> AMF targets have not been tested since I do not own a Radeon GPU.
+> Feel free to submit patches if you find any bugs.
 
-Automated tests can control settings through obs-websocket:
-
-- Vendor: `alpha_recorder`
-- Requests: `GetSettings`, `SetSettings`
-
-## Troubleshooting :bulb:
+## :bulb: Troubleshooting
 
 | Symptom | Likely reason |
 | --- | --- |
 | HEVC option is missing | The matching NVENC or AMF encoder cannot open on this machine |
-| A matrix target is skipped | Configure detected missing encoder/runtime support |
 | No alpha file appears | Alpha Recorder may be disabled, or the alpha session failed to start |
-| OBS recording is fine but alpha is missing | The alpha pipeline may have aborted to protect the main recording |
-| WSL app E2E will not launch OBS | Check WSLg environment and prefer a native Linux checkout |
-
-## Project Docs :books:
-
-- [`SPECS.md`](SPECS.md) has the technical contract, architecture, and full
-  validation matrix.
-- [`AGENTS.md`](AGENTS.md) is the short working guide for agents editing this
-  repository.
