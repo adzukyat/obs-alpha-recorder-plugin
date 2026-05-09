@@ -60,6 +60,7 @@ find_path(OBS_CONFIG_INCLUDE_DIR
 find_library(OBS_LIBOBS_LIBRARY
     NAMES libobs obs
     HINTS ${_alpha_recorder_obs_hint_paths}
+        ${_alpha_recorder_obs_build_root_candidates}
     PATH_SUFFIXES
         lib
         lib/x86_64-linux-gnu
