@@ -773,8 +773,16 @@ technique Draw
             recording_paused_ = obs_frontend_recording_paused();
             video_info_ = video_info;
             recording_path_ = recording_path;
-            recording_texture_encoded_ =
+            const bool detected_texture_encoded =
                 recording_output_uses_texture_encoder(recording_output_, video_info_.output_format);
+            recording_texture_encoded_ = recording_texture_encoded_ || detected_texture_encoded;
+            if (recording_texture_encoded_)
+            {
+                for (EncodedAlphaFrame &encoded_frame : pending_encoded_alpha_frames_)
+                {
+                    encoded_frame.texture_encoded = true;
+                }
+            }
             start_alignment_worker_locked();
             notify_alignment_worker_locked();
 
@@ -800,12 +808,8 @@ technique Draw
                 obs_output_add_packet_callback(recording_output_, &RecordingSessionController::on_video_packet, this);
                 packet_callback_connected_ = true;
             }
-            std::string drain_error;
-            reconcile_output_frame_count_locked(drain_error);
-            if (!drain_error.empty())
-            {
-                log_and_show_error(drain_error, false);
-            }
+            // Encoder startup packets can still arrive out of PTS order here; let
+            // the alignment worker wait for its reorder window before consuming them.
             return true;
         }
 
