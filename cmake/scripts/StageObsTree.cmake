@@ -178,7 +178,7 @@ foreach(alpha_recorder_plugin_cleanup_dir IN LISTS alpha_recorder_plugin_cleanup
     if(NOT EXISTS "${alpha_recorder_plugin_cleanup_dir}")
         continue()
     endif()
-    foreach(alpha_recorder_owned_plugin IN ITEMS "${PLUGIN_NAME}" alpha_recorder_frontend alpha_recorder_e2e)
+    foreach(alpha_recorder_owned_plugin IN ITEMS "${PLUGIN_NAME}" alpha_recorder_e2e)
         foreach(alpha_recorder_owned_plugin_path IN ITEMS
             "${alpha_recorder_plugin_cleanup_dir}/${alpha_recorder_owned_plugin}.plugin"
             "${alpha_recorder_plugin_cleanup_dir}/${alpha_recorder_owned_plugin}.dylib"
