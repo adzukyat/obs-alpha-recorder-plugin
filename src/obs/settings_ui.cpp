@@ -144,6 +144,17 @@ namespace
         return candidate.patch > current.patch;
     }
 
+    QString version_display_text(const QString &versionText)
+    {
+        QString normalized = versionText.trimmed();
+        while (normalized.startsWith('v'))
+        {
+            normalized.remove(0, 1);
+        }
+
+        return QStringLiteral("v%1").arg(normalized);
+    }
+
     std::size_t write_version_response(char *ptr, std::size_t size, std::size_t nmemb, void *userdata)
     {
         auto *response = static_cast<std::string *>(userdata);
@@ -691,7 +702,7 @@ namespace
 
         void set_version_label_text(const QString &statusText)
         {
-            versionLabel_->setText(QStringLiteral("Alpha Recorder v%1 - %2").arg(current_version_text(), statusText));
+            versionLabel_->setText(QStringLiteral("Alpha Recorder %1 - %2").arg(version_display_text(current_version_text()), statusText));
         }
 
         void check_latest_version()
@@ -731,8 +742,9 @@ namespace
                     if (version_is_newer(latestVersion, dialog->current_version_text()))
                     {
                         const QString source = QString::fromStdString(latestVersionResult.source).toHtmlEscaped();
-                        dialog->versionLabel_->setText(QStringLiteral("Alpha Recorder v%1 - latest %2 is v%3. <a href=\"%4\">Open GitHub Releases.</a>")
-                                                           .arg(dialog->current_version_text(), source, latestVersion.toHtmlEscaped(), QString::fromUtf8(kReleasePageUrl)));
+                        dialog->versionLabel_->setText(QStringLiteral("Alpha Recorder %1 - latest %2 is %3. <a href=\"%4\">Open GitHub Releases.</a>")
+                                                           .arg(version_display_text(dialog->current_version_text()), source,
+                                                                version_display_text(latestVersion).toHtmlEscaped(), QString::fromUtf8(kReleasePageUrl)));
                         return;
                     }
 
