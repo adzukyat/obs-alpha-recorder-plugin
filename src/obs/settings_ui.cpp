@@ -19,23 +19,174 @@
 #include <QLayout>
 #include <QMainWindow>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPointer>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStandardItemModel>
+#include <QStringList>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <curl/curl.h>
+
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <thread>
+
 #include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
+#include "alpha_recorder/version.hpp"
 
 namespace
 {
 
     using alpha_recorder::obs::FinalizationFormat;
     using alpha_recorder::obs::Settings;
+
+    constexpr const char *kLatestVersionUrl = "https://raw.githubusercontent.com/adzukyat/obs-alpha-recorder-plugin/main/VERSION";
+    constexpr const char *kReleasePageUrl = "https://github.com/adzukyat/obs-alpha-recorder-plugin/releases";
+
+    struct VersionCheckState
+    {
+        std::atomic_bool cancelled{false};
+    };
+
+    struct VersionTriple
+    {
+        int major = 0;
+        int minor = 0;
+        int patch = 0;
+    };
+
+    bool parse_version_triple(const QString &versionText, VersionTriple &version)
+    {
+        QString normalized = versionText.trimmed();
+        if (normalized.startsWith('v'))
+        {
+            normalized.remove(0, 1);
+        }
+        const int suffixIndex = normalized.indexOf('-');
+        if (suffixIndex >= 0)
+        {
+            normalized.truncate(suffixIndex);
+        }
+        const int metadataIndex = normalized.indexOf('+');
+        if (metadataIndex >= 0)
+        {
+            normalized.truncate(metadataIndex);
+        }
+
+        const QStringList parts = normalized.split('.');
+        if (parts.size() != 3)
+        {
+            return false;
+        }
+
+        bool ok = false;
+        const int major = parts[0].toInt(&ok);
+        if (!ok)
+        {
+            return false;
+        }
+        const int minor = parts[1].toInt(&ok);
+        if (!ok)
+        {
+            return false;
+        }
+        const int patch = parts[2].toInt(&ok);
+        if (!ok)
+        {
+            return false;
+        }
+
+        version = {major, minor, patch};
+        return true;
+    }
+
+    bool version_is_newer(const QString &candidateText, const QString &currentText)
+    {
+        VersionTriple candidate;
+        VersionTriple current;
+        if (!parse_version_triple(candidateText, candidate) || !parse_version_triple(currentText, current))
+        {
+            return false;
+        }
+
+        if (candidate.major != current.major)
+        {
+            return candidate.major > current.major;
+        }
+        if (candidate.minor != current.minor)
+        {
+            return candidate.minor > current.minor;
+        }
+        return candidate.patch > current.patch;
+    }
+
+    std::size_t write_version_response(char *ptr, std::size_t size, std::size_t nmemb, void *userdata)
+    {
+        auto *response = static_cast<std::string *>(userdata);
+        const std::size_t byteCount = size * nmemb;
+        response->append(ptr, byteCount);
+        return byteCount;
+    }
+
+    int version_check_progress(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+    {
+        const auto *state = static_cast<const VersionCheckState *>(clientp);
+        return state != nullptr && state->cancelled.load() ? 1 : 0;
+    }
+
+    bool fetch_latest_version_text(std::string &latestVersion, std::string &errorMessage, VersionCheckState &state)
+    {
+        static std::once_flag curlInitFlag;
+        std::call_once(curlInitFlag, []() {
+            curl_global_init(CURL_GLOBAL_DEFAULT);
+        });
+
+        CURL *curl = curl_easy_init();
+        if (curl == nullptr)
+        {
+            errorMessage = "libcurl initialization failed";
+            return false;
+        }
+
+        char errorBuffer[CURL_ERROR_SIZE] = {};
+        curl_easy_setopt(curl, CURLOPT_URL, kLatestVersionUrl);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Alpha Recorder version check");
+        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
+        curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errorBuffer);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_version_response);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &latestVersion);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, version_check_progress);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);
+
+        const CURLcode result = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+
+        if (state.cancelled.load())
+        {
+            errorMessage = "cancelled";
+            return false;
+        }
+        if (result != CURLE_OK)
+        {
+            errorMessage = errorBuffer[0] != '\0' ? errorBuffer : curl_easy_strerror(result);
+            return false;
+        }
+
+        return true;
+    }
 
     bool sync_runtime_hooks(QString &warning_message)
     {
@@ -114,6 +265,15 @@ namespace
             mainLayout->setSizeConstraint(QLayout::SetFixedSize);
             mainLayout->setContentsMargins(18, 16, 18, 16);
             mainLayout->setSpacing(12);
+
+            versionLabel_ = new QLabel(this);
+            versionLabel_->setTextFormat(Qt::RichText);
+            versionLabel_->setTextInteractionFlags(Qt::TextBrowserInteraction);
+            versionLabel_->setOpenExternalLinks(true);
+            versionLabel_->setWordWrap(true);
+            set_version_label_text("checking latest version...");
+            mainLayout->addWidget(versionLabel_);
+            check_latest_version();
 
             auto *introLabel = new QLabel("Configure alpha recording and tune the mask encoder used for HEVC outputs.", this);
             introLabel->setWordWrap(true);
@@ -263,6 +423,15 @@ namespace
             mainLayout->addWidget(buttonBox);
         }
 
+        ~AlphaRecorderSettingsDialog() override
+        {
+            versionCheckState_.cancelled.store(true);
+            if (versionCheckThread_.joinable())
+            {
+                versionCheckThread_.join();
+            }
+        }
+
     protected:
         void accept() override
         {
@@ -304,6 +473,63 @@ namespace
             settings.hevc_encoder.adaptive_quantization = aqCombo_->currentIndex() == 1;
 
             return settings;
+        }
+
+        QString current_version_text() const
+        {
+            const std::string_view version = alpha_recorder::project_version();
+            return QString::fromUtf8(version.data(), static_cast<int>(version.size()));
+        }
+
+        void set_version_label_text(const QString &statusText)
+        {
+            versionLabel_->setText(QStringLiteral("Alpha Recorder v%1 - %2").arg(current_version_text(), statusText));
+        }
+
+        void check_latest_version()
+        {
+            QPointer<AlphaRecorderSettingsDialog> dialog{this};
+            VersionCheckState *state = &versionCheckState_;
+            versionCheckThread_ = std::thread([dialog, state]() {
+                std::string latestVersionText;
+                std::string errorMessage;
+                const bool ok = fetch_latest_version_text(latestVersionText, errorMessage, *state);
+                if (state->cancelled.load() || dialog.isNull())
+                {
+                    return;
+                }
+
+                QMetaObject::invokeMethod(dialog.data(), [dialog, ok, latestVersionText, errorMessage]() {
+                    if (dialog.isNull())
+                    {
+                        return;
+                    }
+
+                    if (!ok)
+                    {
+                        blog(LOG_WARNING, "Alpha Recorder latest version check failed: %s", errorMessage.c_str());
+                        dialog->set_version_label_text("latest version check unavailable");
+                        return;
+                    }
+
+                    const QString latestVersion = QString::fromStdString(latestVersionText).trimmed();
+                    if (latestVersion.isEmpty())
+                    {
+                        blog(LOG_WARNING, "Alpha Recorder latest version check returned an empty response.");
+                        dialog->set_version_label_text("latest version check unavailable");
+                        return;
+                    }
+
+                    if (version_is_newer(latestVersion, dialog->current_version_text()))
+                    {
+                        dialog->versionLabel_->setText(QStringLiteral("Alpha Recorder v%1 - latest is v%2. <a href=\"%3\">Download the latest release.</a>")
+                                                           .arg(dialog->current_version_text(), latestVersion.toHtmlEscaped(), QString::fromUtf8(kReleasePageUrl)));
+                        return;
+                    }
+
+                    dialog->set_version_label_text("up to date");
+                }, Qt::QueuedConnection);
+            });
         }
 
         FinalizationFormat selected_finalization_format() const
@@ -574,6 +800,7 @@ namespace
         }
 
         QCheckBox *enabledCheckBox_ = nullptr;
+        QLabel *versionLabel_ = nullptr;
         QComboBox *finalizationFormatCombo_ = nullptr;
         QGroupBox *hevcGroupBox_ = nullptr;
         QButtonGroup *profileButtonGroup_ = nullptr;
@@ -588,6 +815,8 @@ namespace
         QSpinBox *bFramesSpinBox_ = nullptr;
         QSpinBox *lookaheadSpinBox_ = nullptr;
         QComboBox *aqCombo_ = nullptr;
+        VersionCheckState versionCheckState_{};
+        std::thread versionCheckThread_{};
     };
 
     QPointer<QAction> settingsAction = nullptr;

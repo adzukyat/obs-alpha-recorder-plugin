@@ -205,6 +205,7 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
         endif()
 
         find_package(Qt6 REQUIRED COMPONENTS Widgets)
+        find_package(CURL REQUIRED)
 
         if(APPLE AND EXISTS "${OBS_ROOT}/Frameworks/QtWidgets.framework")
             foreach(_alpha_recorder_qt_component IN ITEMS Core Gui Widgets)
@@ -218,7 +219,7 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
             endforeach()
         endif()
 
-        target_link_libraries(alpha_recorder_plugin PRIVATE Qt6::Widgets)
+        target_link_libraries(alpha_recorder_plugin PRIVATE Qt6::Widgets CURL::libcurl)
     endif()
 endif()
 

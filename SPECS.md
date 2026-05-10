@@ -97,6 +97,9 @@ Settings include:
 
 - Enabled toggle.
 - Finalization Format dropdown.
+- Installed version status. The dialog checks the GitHub repository `VERSION`
+  file asynchronously and links to GitHub Releases when the installed version is
+  older.
 - HEVC encoder controls when NVENC/AMF mask output is selected:
   - Quality Profile.
   - CQ.
