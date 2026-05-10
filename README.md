@@ -1,3 +1,5 @@
+<img width="1920" height="1080" alt="Alpha Recorder Hero" src="https://github.com/user-attachments/assets/0d18331a-3550-4cf7-a78a-a810488a6b42" />
+
 # :movie_camera: Alpha Recorder for OBS
 
 Alpha Recorder is an OBS plugin that records a separate grayscale alpha-mask
