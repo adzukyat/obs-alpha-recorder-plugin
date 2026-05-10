@@ -71,6 +71,18 @@ current machine.
 Alpha Recorder builds against a real OBS developer tree. The repo includes OBS
 as a submodule and CMake helpers for bootstrapping the pinned OBS runtime.
 
+## :package: Release Artifacts
+
+Tagged releases publish platform packages from GitHub Actions:
+
+- `alpha-recorder-vX.X.X-windows-x64.zip`
+- `alpha-recorder-vX.X.X-macos-arm64.zip`
+- `alpha-recorder-vX.X.X-linux-x64.tar.gz`
+
+The release workflow runs only for `vX.X.X` tags that GitHub verifies as signed.
+Use an annotated signed tag, such as `git tag -s v0.1.0`, before pushing a
+release tag.
+
 ### 1. Initialize OBS
 
 ```sh

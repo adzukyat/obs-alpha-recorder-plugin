@@ -117,6 +117,12 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```
 
+Package the built user plugin for release:
+
+```sh
+cmake -DREPO_ROOT="$PWD" -DBUILD_DIR="$PWD/out/build/macos-arm64" -DPACKAGE_DIR="$PWD/out/package/alpha-recorder" -P cmake/scripts/PackagePlugin.cmake
+```
+
 ## Validation Notes
 
 - For Windows-specific proof, use the real requested Windows host and
@@ -125,5 +131,7 @@ cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_
   validation from Windows-mounted `/mnt/*` paths.
 - The OBS app E2E aggregate depends only on runnable profiles. Directly building
   a skipped target should print its skip reason and avoid launching OBS.
+- GitHub release artifacts are built by `.github/workflows/release.yml` from
+  annotated signed `vX.X.X` tags verified through the GitHub API before build.
 - Detailed OBS app E2E behavior, target matrix rules, artifact names, and
   Linux/WSL environment notes live in [`SPECS.md`](SPECS.md).

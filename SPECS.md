@@ -332,6 +332,21 @@ than direct Wayland in SSH-launched runs.
 macOS stages an app-style `OBS.app/Contents` tree and launches the bundle
 executable rather than a loose standalone binary.
 
+## Release Packaging Contract
+
+GitHub Actions release builds are tag-driven. Release tags must match
+`vX.X.X`-style names and must be annotated tags whose signatures GitHub verifies
+before any build or release job runs. Lightweight tags and unverified tags are
+rejected.
+
+The release artifacts contain the user plugin package layout plus `README.md`
+and `LICENSE`; they do not include the staged OBS runtime or the test-only
+`alpha_recorder_e2e` module.
+
+- Windows: `alpha-recorder-vX.X.X-windows-x64.zip`.
+- macOS: `alpha-recorder-vX.X.X-macos-arm64.zip`.
+- Linux: `alpha-recorder-vX.X.X-linux-x64.tar.gz`.
+
 ## Linux and WSL Notes
 
 On Linux or WSL Ubuntu, install build/runtime prerequisites first. The exact OBS

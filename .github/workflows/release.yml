@@ -1,0 +1,210 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Signed release tag to build, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-tag:
+    name: Verify signed tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release-tag.outputs.tag }}
+      version: ${{ steps.release-tag.outputs.version }}
+    steps:
+      - name: Resolve release tag
+        id: release-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          fi
+          if [[ ! "${tag}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must look like vX.X.X; got '${tag}'"
+            exit 1
+          fi
+          {
+            echo "tag=${tag}"
+            echo "version=${tag#v}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify tag signature with GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release-tag.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}")"
+          ref_type="$(jq -r '.object.type' <<< "${ref_json}")"
+          ref_sha="$(jq -r '.object.sha' <<< "${ref_json}")"
+          if [[ "${ref_type}" != "tag" ]]; then
+            echo "::error::${TAG_NAME} is a lightweight tag. Create an annotated signed tag with git tag -s or git tag -a -s."
+            exit 1
+          fi
+
+          tag_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${ref_sha}")"
+          verified="$(jq -r '.verification.verified' <<< "${tag_json}")"
+          reason="$(jq -r '.verification.reason' <<< "${tag_json}")"
+          if [[ "${verified}" != "true" ]]; then
+            echo "::error::${TAG_NAME} is not verified by GitHub. verification.reason=${reason}"
+            exit 1
+          fi
+          echo "${TAG_NAME} is a verified signed tag."
+
+  build:
+    name: Build ${{ matrix.artifact_suffix }}
+    needs: verify-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact_suffix: windows-x64
+            runner: windows-latest
+            configure_preset: windows-x64-msvc
+            build_preset: windows-x64-msvc-relwithdebinfo
+            archive_format: zip
+            archive_ext: zip
+          - artifact_suffix: macos-arm64
+            runner: macos-15
+            configure_preset: macos-arm64
+            build_preset: macos-arm64-relwithdebinfo
+            archive_format: zip
+            archive_ext: zip
+          - artifact_suffix: linux-x64
+            runner: ubuntu-24.04
+            configure_preset: linux-x64
+            build_preset: linux-x64-relwithdebinfo
+            archive_format: gnutar
+            archive_ext: tar.gz
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.verify-tag.outputs.tag }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build git pkg-config curl unzip zip \
+            extra-cmake-modules ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
+            libavfilter-dev libavdevice-dev libswscale-dev libjansson-dev uthash-dev \
+            qt6-base-dev qt6-base-private-dev qt6-svg-dev libx11-dev libx11-xcb-dev libxcomposite-dev libxdamage-dev \
+            libxrandr-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-shm0-dev \
+            libxcb-composite0-dev libxcb-randr0-dev libxcb-xinerama0-dev libxcb-xinput-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libwayland-dev wayland-protocols \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libv4l-dev libudev-dev libdrm-dev libva-dev libvpl-dev \
+            libcurl4-openssl-dev libmbedtls-dev libspeexdsp-dev libasio-dev libsimde-dev \
+            libwebsocketpp-dev libx264-dev libluajit-5.1-dev swig python3-dev nlohmann-json3-dev \
+            libqrcodegencpp-dev libpci-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ninja
+
+      - name: Bootstrap pinned OBS
+        shell: bash
+        run: cmake -DREPO_ROOT="${PWD}" -DBUILD_FROM_SOURCE=ON -P cmake/scripts/BootstrapObs.cmake
+
+      - name: Configure
+        shell: bash
+        run: >
+          cmake --preset "${{ matrix.configure_preset }}"
+          -DALPHA_RECORDER_BUILD_UNIT_TESTS=OFF
+          -DALPHA_RECORDER_BUILD_E2E_TESTS=OFF
+
+      - name: Build plugin
+        shell: bash
+        run: cmake --build --preset "${{ matrix.build_preset }}" --target alpha_recorder_plugin
+
+      - name: Package plugin
+        shell: bash
+        run: >
+          cmake
+          -DREPO_ROOT="${PWD}"
+          -DBUILD_DIR="${PWD}/out/build/${{ matrix.configure_preset }}"
+          -DPACKAGE_DIR="${PWD}/out/package/alpha-recorder"
+          -DCONFIGURATION=RelWithDebInfo
+          -P cmake/scripts/PackagePlugin.cmake
+
+      - name: Resolve package name
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "name=alpha-recorder-v${{ needs.verify-tag.outputs.version }}-${{ matrix.artifact_suffix }}.${{ matrix.archive_ext }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_root="${PWD}"
+          mkdir -p "${repo_root}/out/release"
+          cd "${repo_root}/out/package"
+          if [[ "${{ matrix.archive_format }}" == "zip" ]]; then
+            cmake -E tar cf "${repo_root}/out/release/${{ steps.package.outputs.name }}" --format=zip alpha-recorder
+          else
+            cmake -E tar czf "${repo_root}/out/release/${{ steps.package.outputs.name }}" --format=gnutar alpha-recorder
+          fi
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: out/release/${{ steps.package.outputs.name }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs:
+      - verify-tag
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: dist
+          pattern: alpha-recorder-v${{ needs.verify-tag.outputs.version }}-*
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.verify-tag.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l dist
+          gh release create "${TAG_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Alpha Recorder ${TAG_NAME}" \
+            --generate-notes \
+            --verify-tag
