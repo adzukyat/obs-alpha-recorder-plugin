@@ -46,16 +46,27 @@ Alpha Recorder writes one of these beside it:
 
 ## :rocket: Quick Start
 
-1. Build and stage the plugin from source.
-2. Launch the staged OBS runtime.
-3. Open `Tools > Alpha Recorder Settings`.
-4. Make sure Alpha Recorder is enabled.
-5. Choose a finalization format, or leave the default.
-6. Record normally in OBS.
+1. Download the package for your platform from
+   [Releases](https://github.com/adzukyat/obs-alpha-recorder-plugin/releases).
+2. Extract the package.
+3. Close OBS if it is running.
+4. Copy the plugin from the extracted package into your OBS plugin directory:
 
-Missing settings default to enabled. If you have not chosen a finalization
-format yet, Alpha Recorder tries an available hardware HEVC encoder first and
-falls back to PNG MOV.
+| Platform | Copy from the extracted package | Copy to |
+| --- | --- | --- |
+| Windows | `alpha-recorder/obs-plugins/64bit/alpha_recorder.dll` | `C:\Program Files\obs-studio\obs-plugins\64bit\alpha_recorder.dll` |
+| macOS | `alpha-recorder/obs-plugins/alpha_recorder.plugin` | `/Applications/OBS.app/Contents/PlugIns/alpha_recorder.plugin` |
+| Linux | `alpha-recorder/lib/obs-plugins/libalpha_recorder.so` | `/usr/lib/x86_64-linux-gnu/obs-plugins/libalpha_recorder.so` or `/usr/lib/obs-plugins/libalpha_recorder.so` |
+
+If OBS is installed somewhere else, copy the plugin into the matching plugin
+directory inside that OBS installation. On macOS, right-click `OBS.app`, choose
+`Show Package Contents`, then open `Contents/PlugIns`.
+
+5. Launch OBS.
+6. Open `Tools > Alpha Recorder Settings`.
+7. Make sure Alpha Recorder is enabled.
+8. Choose a finalization format, or leave the default.
+9. Record normally in OBS.
 
 ## :gear: Settings
 
@@ -70,18 +81,6 @@ current machine.
 
 Alpha Recorder builds against a real OBS developer tree. The repo includes OBS
 as a submodule and CMake helpers for bootstrapping the pinned OBS runtime.
-
-## :package: Release Artifacts
-
-Tagged releases publish platform packages from GitHub Actions:
-
-- `alpha-recorder-vX.X.X-windows-x64.zip`
-- `alpha-recorder-vX.X.X-macos-arm64.zip`
-- `alpha-recorder-vX.X.X-linux-x64.tar.gz`
-
-The release workflow runs only for `vX.X.X` tags that GitHub verifies as signed.
-Keep the root [`VERSION`](VERSION) file aligned with the release tag, then push
-an annotated signed tag such as `git tag -s "v$(cat VERSION)"`.
 
 ### 1. Initialize OBS
 
