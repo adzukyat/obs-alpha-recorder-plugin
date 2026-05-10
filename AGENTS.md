@@ -133,6 +133,9 @@ cmake -DREPO_ROOT="$PWD" -DBUILD_DIR="$PWD/out/build/macos-arm64" -DPACKAGE_DIR=
   a skipped target should print its skip reason and avoid launching OBS.
 - The project release version lives in the root `VERSION` file. CMake reads it
   for `project(... VERSION ...)` and generates `alpha_recorder/version.hpp`.
+- The settings dialog's installed-version check compares against GitHub's latest
+  published release and verified signed `v*` tags, not the repository `VERSION`
+  file on `main`.
 - GitHub release artifacts are built by `.github/workflows/release.yml` from
   annotated signed `vX.X.X` tags verified through the GitHub API before build.
 - Detailed OBS app E2E behavior, target matrix rules, artifact names, and

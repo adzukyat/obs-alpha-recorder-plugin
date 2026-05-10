@@ -15,6 +15,9 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLayout>
 #include <QMainWindow>
@@ -48,7 +51,8 @@ namespace
     using alpha_recorder::obs::FinalizationFormat;
     using alpha_recorder::obs::Settings;
 
-    constexpr const char *kLatestVersionUrl = "https://raw.githubusercontent.com/adzukyat/obs-alpha-recorder-plugin/main/VERSION";
+    constexpr const char *kLatestReleaseApiUrl = "https://api.github.com/repos/adzukyat/obs-alpha-recorder-plugin/releases/latest";
+    constexpr const char *kTagRefsApiUrl = "https://api.github.com/repos/adzukyat/obs-alpha-recorder-plugin/git/matching-refs/tags/v";
     constexpr const char *kReleasePageUrl = "https://github.com/adzukyat/obs-alpha-recorder-plugin/releases";
 
     struct VersionCheckState
@@ -61,6 +65,18 @@ namespace
         int major = 0;
         int minor = 0;
         int patch = 0;
+    };
+
+    struct HttpResponse
+    {
+        std::string body;
+        long status = 0;
+    };
+
+    struct LatestVersionResult
+    {
+        std::string version;
+        std::string source;
     };
 
     bool parse_version_triple(const QString &versionText, VersionTriple &version)
@@ -142,7 +158,38 @@ namespace
         return state != nullptr && state->cancelled.load() ? 1 : 0;
     }
 
-    bool fetch_latest_version_text(std::string &latestVersion, std::string &errorMessage, VersionCheckState &state)
+    bool json_document_from_response(const std::string &responseBody, QJsonDocument &document, std::string &errorMessage)
+    {
+        QJsonParseError parseError{};
+        document = QJsonDocument::fromJson(QByteArray::fromStdString(responseBody), &parseError);
+        if (parseError.error != QJsonParseError::NoError)
+        {
+            errorMessage = "GitHub version response was not valid JSON: " + parseError.errorString().toStdString();
+            return false;
+        }
+
+        return true;
+    }
+
+    bool update_latest_version_candidate(const QString &candidateText, const char *source, LatestVersionResult &latest)
+    {
+        VersionTriple ignored;
+        if (!parse_version_triple(candidateText, ignored))
+        {
+            return false;
+        }
+
+        const QString currentLatest = QString::fromStdString(latest.version);
+        if (latest.version.empty() || version_is_newer(candidateText, currentLatest))
+        {
+            latest.version = candidateText.trimmed().toStdString();
+            latest.source = source;
+        }
+
+        return true;
+    }
+
+    bool fetch_github_json(const char *url, HttpResponse &response, std::string &errorMessage, VersionCheckState &state)
     {
         static std::once_flag curlInitFlag;
         std::call_once(curlInitFlag, []() {
@@ -157,22 +204,28 @@ namespace
         }
 
         char errorBuffer[CURL_ERROR_SIZE] = {};
-        curl_easy_setopt(curl, CURLOPT_URL, kLatestVersionUrl);
+        struct curl_slist *headers = nullptr;
+        headers = curl_slist_append(headers, "Accept: application/vnd.github+json");
+        headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
+
+        curl_easy_setopt(curl, CURLOPT_URL, url);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "Alpha Recorder version check");
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 8L);
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errorBuffer);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_version_response);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &latestVersion);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, version_check_progress);
         curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &state);
 
         const CURLcode result = curl_easy_perform(curl);
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.status);
         curl_easy_cleanup(curl);
+        curl_slist_free_all(headers);
 
         if (state.cancelled.load())
         {
@@ -182,6 +235,161 @@ namespace
         if (result != CURLE_OK)
         {
             errorMessage = errorBuffer[0] != '\0' ? errorBuffer : curl_easy_strerror(result);
+            return false;
+        }
+        if (response.status >= 400)
+        {
+            errorMessage = "GitHub API returned HTTP " + std::to_string(response.status);
+            return false;
+        }
+
+        return true;
+    }
+
+    bool read_latest_release_version(LatestVersionResult &latest, std::string &errorMessage, VersionCheckState &state)
+    {
+        HttpResponse response;
+        std::string fetchError;
+        if (!fetch_github_json(kLatestReleaseApiUrl, response, fetchError, state))
+        {
+            if (response.status == 404)
+            {
+                return true;
+            }
+
+            errorMessage = fetchError;
+            return false;
+        }
+
+        QJsonDocument document;
+        if (!json_document_from_response(response.body, document, errorMessage) || !document.isObject())
+        {
+            if (errorMessage.empty())
+            {
+                errorMessage = "GitHub latest release response was not an object";
+            }
+            return false;
+        }
+
+        const QJsonObject object = document.object();
+        const QString tagName = object.value(QStringLiteral("tag_name")).toString().trimmed();
+        if (tagName.isEmpty())
+        {
+            errorMessage = "GitHub latest release response did not include tag_name";
+            return false;
+        }
+
+        update_latest_version_candidate(tagName, "GitHub release", latest);
+        return true;
+    }
+
+    bool read_signed_tag_candidate(const QString &tagUrl, LatestVersionResult &latest, std::string &errorMessage,
+                                   VersionCheckState &state)
+    {
+        const QByteArray tagUrlBytes = tagUrl.toUtf8();
+        HttpResponse response;
+        if (!fetch_github_json(tagUrlBytes.constData(), response, errorMessage, state))
+        {
+            return false;
+        }
+
+        QJsonDocument document;
+        if (!json_document_from_response(response.body, document, errorMessage) || !document.isObject())
+        {
+            if (errorMessage.empty())
+            {
+                errorMessage = "GitHub tag response was not an object";
+            }
+            return false;
+        }
+
+        const QJsonObject object = document.object();
+        const QJsonObject verification = object.value(QStringLiteral("verification")).toObject();
+        if (!verification.value(QStringLiteral("verified")).toBool(false))
+        {
+            return true;
+        }
+
+        const QString tagName = object.value(QStringLiteral("tag")).toString().trimmed();
+        update_latest_version_candidate(tagName, "signed GitHub tag", latest);
+        return true;
+    }
+
+    bool read_signed_tag_versions(LatestVersionResult &latest, std::string &errorMessage, VersionCheckState &state)
+    {
+        HttpResponse response;
+        if (!fetch_github_json(kTagRefsApiUrl, response, errorMessage, state))
+        {
+            return false;
+        }
+
+        QJsonDocument document;
+        if (!json_document_from_response(response.body, document, errorMessage) || !document.isArray())
+        {
+            if (errorMessage.empty())
+            {
+                errorMessage = "GitHub tag refs response was not an array";
+            }
+            return false;
+        }
+
+        for (const QJsonValue &value : document.array())
+        {
+            if (state.cancelled.load())
+            {
+                errorMessage = "cancelled";
+                return false;
+            }
+
+            const QJsonObject refObject = value.toObject();
+            const QJsonObject object = refObject.value(QStringLiteral("object")).toObject();
+            if (object.value(QStringLiteral("type")).toString() != QStringLiteral("tag"))
+            {
+                continue;
+            }
+
+            const QString tagUrl = object.value(QStringLiteral("url")).toString().trimmed();
+            if (tagUrl.isEmpty())
+            {
+                continue;
+            }
+
+            if (!read_signed_tag_candidate(tagUrl, latest, errorMessage, state))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool fetch_latest_version_text(LatestVersionResult &latest, std::string &errorMessage, VersionCheckState &state)
+    {
+        std::string releaseError;
+        const bool releaseOk = read_latest_release_version(latest, releaseError, state);
+        if (!releaseOk && state.cancelled.load())
+        {
+            return false;
+        }
+
+        std::string tagError;
+        const bool tagOk = read_signed_tag_versions(latest, tagError, state);
+        if (!tagOk && state.cancelled.load())
+        {
+            return false;
+        }
+
+        if (latest.version.empty())
+        {
+            errorMessage = "GitHub did not return a published release or verified signed v* tag";
+            if (!releaseError.empty())
+            {
+                errorMessage += "; latest release: " + releaseError;
+            }
+            if (!tagError.empty())
+            {
+                errorMessage += "; signed tags: " + tagError;
+            }
             return false;
         }
 
@@ -491,15 +699,15 @@ namespace
             QPointer<AlphaRecorderSettingsDialog> dialog{this};
             VersionCheckState *state = &versionCheckState_;
             versionCheckThread_ = std::thread([dialog, state]() {
-                std::string latestVersionText;
+                LatestVersionResult latestVersionResult;
                 std::string errorMessage;
-                const bool ok = fetch_latest_version_text(latestVersionText, errorMessage, *state);
+                const bool ok = fetch_latest_version_text(latestVersionResult, errorMessage, *state);
                 if (state->cancelled.load() || dialog.isNull())
                 {
                     return;
                 }
 
-                QMetaObject::invokeMethod(dialog.data(), [dialog, ok, latestVersionText, errorMessage]() {
+                QMetaObject::invokeMethod(dialog.data(), [dialog, ok, latestVersionResult, errorMessage]() {
                     if (dialog.isNull())
                     {
                         return;
@@ -512,7 +720,7 @@ namespace
                         return;
                     }
 
-                    const QString latestVersion = QString::fromStdString(latestVersionText).trimmed();
+                    const QString latestVersion = QString::fromStdString(latestVersionResult.version).trimmed();
                     if (latestVersion.isEmpty())
                     {
                         blog(LOG_WARNING, "Alpha Recorder latest version check returned an empty response.");
@@ -522,8 +730,9 @@ namespace
 
                     if (version_is_newer(latestVersion, dialog->current_version_text()))
                     {
-                        dialog->versionLabel_->setText(QStringLiteral("Alpha Recorder v%1 - latest is v%2. <a href=\"%3\">Download the latest release.</a>")
-                                                           .arg(dialog->current_version_text(), latestVersion.toHtmlEscaped(), QString::fromUtf8(kReleasePageUrl)));
+                        const QString source = QString::fromStdString(latestVersionResult.source).toHtmlEscaped();
+                        dialog->versionLabel_->setText(QStringLiteral("Alpha Recorder v%1 - latest %2 is v%3. <a href=\"%4\">Open GitHub Releases.</a>")
+                                                           .arg(dialog->current_version_text(), source, latestVersion.toHtmlEscaped(), QString::fromUtf8(kReleasePageUrl)));
                         return;
                     }
 
