@@ -131,6 +131,8 @@ cmake -DREPO_ROOT="$PWD" -DBUILD_DIR="$PWD/out/build/macos-arm64" -DPACKAGE_DIR=
   validation from Windows-mounted `/mnt/*` paths.
 - The OBS app E2E aggregate depends only on runnable profiles. Directly building
   a skipped target should print its skip reason and avoid launching OBS.
+- The project release version lives in the root `VERSION` file. CMake reads it
+  for `project(... VERSION ...)` and generates `alpha_recorder/version.hpp`.
 - GitHub release artifacts are built by `.github/workflows/release.yml` from
   annotated signed `vX.X.X` tags verified through the GitHub API before build.
 - Detailed OBS app E2E behavior, target matrix rules, artifact names, and

@@ -339,9 +339,15 @@ GitHub Actions release builds are tag-driven. Release tags must match
 before any build or release job runs. Lightweight tags and unverified tags are
 rejected.
 
-The release artifacts contain the user plugin package layout plus `README.md`
-and `LICENSE`; they do not include the staged OBS runtime or the test-only
-`alpha_recorder_e2e` module.
+The canonical project release version lives in the root `VERSION` file. CMake
+uses that file for `project(... VERSION ...)` and generates
+`alpha_recorder/version.hpp`, which is the runtime source for manifest
+`project_version` metadata. The release workflow also rejects a signed release
+tag when its `vX.X.X` payload does not match `VERSION`.
+
+The release artifacts contain the user plugin package layout plus `README.md`,
+`LICENSE`, and `VERSION`; they do not include the staged OBS runtime or the
+test-only `alpha_recorder_e2e` module.
 
 - Windows: `alpha-recorder-vX.X.X-windows-x64.zip`.
 - macOS: `alpha-recorder-vX.X.X-macos-arm64.zip`.

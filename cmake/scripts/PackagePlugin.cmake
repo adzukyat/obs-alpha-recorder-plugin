@@ -83,7 +83,7 @@ else()
     file(COPY_FILE "${plugin_path}" "${plugin_target_dir}/${plugin_file_name}" ONLY_IF_DIFFERENT)
 endif()
 
-foreach(doc_file IN ITEMS README.md LICENSE)
+foreach(doc_file IN ITEMS README.md LICENSE VERSION)
     if(EXISTS "${REPO_ROOT}/${doc_file}")
         file(COPY_FILE "${REPO_ROOT}/${doc_file}" "${PACKAGE_DIR}/${doc_file}" ONLY_IF_DIFFERENT)
     endif()

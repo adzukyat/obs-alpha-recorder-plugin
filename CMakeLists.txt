@@ -1,7 +1,13 @@
 cmake_minimum_required(VERSION 3.24)
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" ALPHA_RECORDER_PROJECT_VERSION)
+string(STRIP "${ALPHA_RECORDER_PROJECT_VERSION}" ALPHA_RECORDER_PROJECT_VERSION)
+if(NOT ALPHA_RECORDER_PROJECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+([-.+][0-9A-Za-z.-]+)?$")
+    message(FATAL_ERROR "VERSION must contain a semantic version such as X.Y.Z; got '${ALPHA_RECORDER_PROJECT_VERSION}'")
+endif()
+
 project(alpha_recorder_plugin
-    VERSION 0.1.0
+    VERSION "${ALPHA_RECORDER_PROJECT_VERSION}"
     DESCRIPTION "OBS native plugin scaffold for pair-based RGBA recording"
     LANGUAGES CXX
 )
@@ -25,6 +31,13 @@ alpha_recorder_set_project_options()
 alpha_recorder_fetch_test_deps()
 
 include(CTest)
+
+set(ALPHA_RECORDER_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/alpha_recorder/version.hpp.in"
+    "${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}/alpha_recorder/version.hpp"
+    @ONLY
+)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/obs")
@@ -59,6 +72,7 @@ alpha_recorder_setup_target(alpha_recorder_e2e_scenario)
 alpha_recorder_apply_warnings(alpha_recorder_e2e_scenario)
 target_include_directories(alpha_recorder_e2e_scenario
     PUBLIC
+        $<BUILD_INTERFACE:${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
@@ -118,6 +132,7 @@ target_link_libraries(alpha_recorder_core PRIVATE OBS::libobs)
 target_link_libraries(alpha_recorder_core PUBLIC alpha_recorder_e2e_scenario jansson::jansson FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale)
 target_include_directories(alpha_recorder_core
     PUBLIC
+        $<BUILD_INTERFACE:${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
@@ -718,4 +733,5 @@ if(TARGET alpha_recorder_plugin)
     )
 endif()
 
-install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY include/ DESTINATION include PATTERN "*.in" EXCLUDE)
+install(DIRECTORY "${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}/" DESTINATION include)

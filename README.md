@@ -80,8 +80,8 @@ Tagged releases publish platform packages from GitHub Actions:
 - `alpha-recorder-vX.X.X-linux-x64.tar.gz`
 
 The release workflow runs only for `vX.X.X` tags that GitHub verifies as signed.
-Use an annotated signed tag, such as `git tag -s v0.1.0`, before pushing a
-release tag.
+Keep the root [`VERSION`](VERSION) file aligned with the release tag, then push
+an annotated signed tag such as `git tag -s "v$(cat VERSION)"`.
 
 ### 1. Initialize OBS
 

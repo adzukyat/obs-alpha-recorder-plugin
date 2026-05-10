@@ -19,6 +19,7 @@
 
 #include "alpha_recorder/manifest_writer.hpp"
 #include "alpha_recorder/sidecar_writer.hpp"
+#include "alpha_recorder/version.hpp"
 
 namespace
 {
@@ -342,7 +343,8 @@ int main()
     }
 
     const std::string manifest_text((std::istreambuf_iterator<char>(manifest_stream)), std::istreambuf_iterator<char>());
-    if (!contains_text(manifest_text, "\"schema\": \"alpha_recorder.session_summary.v1\"") || !contains_text(manifest_text, "\"project_name\": \"alpha_recorder\"") || !contains_text(manifest_text, "\"project_version\": \"0.1.0\"") || !contains_text(manifest_text, "\"finalization_format\": \"mask_png_mov\"") || !contains_text(manifest_text, "\"pair_count\": 2") || !contains_text(manifest_text, "\"record_count\": 2") || !contains_text(manifest_text, "\"first_sequence\": 7") || !contains_text(manifest_text, "\"last_sequence\": 8") || !contains_text(manifest_text, "\"first_pts\": 1000") || !contains_text(manifest_text, "\"last_pts\": 1040") || !contains_text(manifest_text, sidecar_path.filename().generic_string()) || !contains_text(manifest_text, manifest_path.filename().generic_string()))
+    const std::string expected_project_version = std::string("\"project_version\": \"") + std::string(alpha_recorder::project_version()) + "\"";
+    if (!contains_text(manifest_text, "\"schema\": \"alpha_recorder.session_summary.v1\"") || !contains_text(manifest_text, "\"project_name\": \"alpha_recorder\"") || !contains_text(manifest_text, expected_project_version) || !contains_text(manifest_text, "\"finalization_format\": \"mask_png_mov\"") || !contains_text(manifest_text, "\"pair_count\": 2") || !contains_text(manifest_text, "\"record_count\": 2") || !contains_text(manifest_text, "\"first_sequence\": 7") || !contains_text(manifest_text, "\"last_sequence\": 8") || !contains_text(manifest_text, "\"first_pts\": 1000") || !contains_text(manifest_text, "\"last_pts\": 1040") || !contains_text(manifest_text, sidecar_path.filename().generic_string()) || !contains_text(manifest_text, manifest_path.filename().generic_string()))
     {
         std::cerr << "manifest content is missing expected session metadata\n";
         return 27;

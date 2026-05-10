@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Signed release tag to build, for example v0.1.0"
+        description: "Signed release tag to build, for example vX.Y.Z"
         required: true
         type: string
 
@@ -99,6 +99,16 @@ jobs:
           ref: ${{ needs.verify-tag.outputs.tag }}
           fetch-depth: 0
           submodules: recursive
+
+      - name: Check VERSION matches tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ "${version}" != "${{ needs.verify-tag.outputs.version }}" ]]; then
+            echo "::error::VERSION (${version}) must match release tag ${{ needs.verify-tag.outputs.tag }}"
+            exit 1
+          fi
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
