@@ -19,7 +19,7 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 > Alpha
 > Recorderは通常の録画ファイルにアルファを追加するものではありません。メインの動画は引き続きRGBとして残り、別のファイルとしてマスク動画が書き出されます。適宜、動画編集ソフトなどで合成してご利用ください。
 
-## :sparkles: 機能
+## 機能
 
 - HEVCハードウェアエンコーダー（NVENC /
   AMF）を使用したアルファマスクの書き出しに対応
@@ -28,7 +28,7 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 - アルファとメイン動画の開始位置とフレームが完全に同期
 - Windows、macOS、およびLinux版OBSで動作
 
-## :rocket: クイックスタート
+## クイックスタート
 
 1. [Releases](https://github.com/adzukyat/obs-alpha-recorder-plugin/releases)
    から最新版をダウンロードして解凍します。
@@ -49,13 +49,13 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 
 基本的にはこれで準備完了です。あとはいつも通りOBSで録画するだけで、アルファマスクが別のファイルとして書き出されます。必要に応じて書き出し形式の設定を変更してください。
 
-## :gear: 設定
+## 設定
 
 <img width="540" height="581" src="https://github.com/user-attachments/assets/ecfaecf7-79db-4c6d-8e28-62fc2aa7f350" />
 
 ※HEVC関連の設定はNVENCやAMFが利用できない環境では表示されません。
 
-## :bulb: トラブルシューティング
+## トラブルシューティング
 
 | 症状                               | 考えられる理由                                                      |
 | ---------------------------------- | ------------------------------------------------------------------- |
@@ -63,7 +63,7 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 | マスクが出力されない               | Alpha Recorderの設定の「Enabled」がオフになっている                 |
 | Spout2でアルファが黒くなってしまう | Spout2のソース設定で「Composite Mode」をOpaqueからDefaultに変更する |
 
-## :hammer_and_wrench: ビルド
+## ビルド
 
 Alpha
 RecorderはC++で書かれたOBSプラグインで、サブモジュールにOBSを含みます。ビルドにはCMakeとOBSのビルド環境が必要です。また、アプリケーションE2Eテストを実行するにはBunランタイムが必要になります。
@@ -139,7 +139,7 @@ sudo apt install -y build-essential cmake ninja-build git pkg-config curl unzip 
 curl -fsSL https://bun.sh/install | bash
 ```
 
-## :test_tube: テスト
+## テスト
 
 単体テストの実行
 
