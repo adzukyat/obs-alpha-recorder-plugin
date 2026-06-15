@@ -213,6 +213,7 @@ async function relayProcessStream(
   stream: ReadableStream<Uint8Array> | null,
   output: LogSink | null,
   overload: OverloadMonitor,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (stream == null) {
     return;
@@ -221,25 +222,39 @@ async function relayProcessStream(
   const decoder = new TextDecoder();
   const reader = stream.getReader();
   let bufferedLine = "";
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    const text = decoder.decode(value, { stream: true });
-    output?.write(text);
-
-    bufferedLine += text;
-    const lines = bufferedLine.split(/\r?\n/);
-    bufferedLine = lines.pop() ?? "";
-    for (const line of lines) {
-      noteOverloadLine(line, overload);
-    }
+  const abortReader = () => {
+    void reader.cancel().catch(() => {});
+  };
+  if (signal?.aborted) {
+    abortReader();
   }
+  signal?.addEventListener("abort", abortReader, { once: true });
 
-  const tail = bufferedLine + decoder.decode();
-  noteOverloadLine(tail, overload);
+  try {
+    while (!signal?.aborted) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      const text = decoder.decode(value, { stream: true });
+      output?.write(text);
+
+      bufferedLine += text;
+      const lines = bufferedLine.split(/\r?\n/);
+      bufferedLine = lines.pop() ?? "";
+      for (const line of lines) {
+        noteOverloadLine(line, overload);
+      }
+    }
+
+    if (!signal?.aborted) {
+      const tail = bufferedLine + decoder.decode();
+      noteOverloadLine(tail, overload);
+    }
+  } finally {
+    signal?.removeEventListener("abort", abortReader);
+    reader.releaseLock();
+  }
 }
 
 function noteOverloadLine(line: string, overload: OverloadMonitor): void {
@@ -322,6 +337,28 @@ function scanObsLogsForOverload(portableConfig: string, overload: OverloadMonito
       return;
     }
   }
+}
+
+function findAlphaRecorderError(portableConfig: string): string | null {
+  for (const logFile of obsLogFiles(portableConfig)) {
+    const text = readFileSync(logFile, "utf8");
+    const line = text
+      .split(/\r?\n/)
+      .find((candidate) => /Alpha Recorder (?:could not|failed|aborted|rejected)/i.test(candidate));
+    if (line != null) {
+      return `${basename(logFile)}: ${line.trim()}`;
+    }
+  }
+  return null;
+}
+
+function throwIfAlphaRecorderLoggedError(portableConfig: string, artifactRoot: string): void {
+  const line = findAlphaRecorderError(portableConfig);
+  if (line == null) {
+    return;
+  }
+
+  throw new Error(`OBS logged an Alpha Recorder error during OBS app E2E: ${line}. Artifacts: ${artifactRoot}`);
 }
 
 type AlphaRecorderTelemetryLine = {
@@ -455,6 +492,101 @@ function resolveObsExecutable(stageDir: string): { exe: string; cwd: string; con
   }
 
   throw new Error(`Staged OBS executable is missing under ${stageDir}`);
+}
+
+type ObsProcess = ReturnType<typeof spawn>;
+
+async function waitForPromise(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return await new Promise<boolean>((resolveWait) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolveWait(false);
+      }
+    }, timeoutMs);
+
+    promise.then(
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolveWait(true);
+        }
+      },
+      () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolveWait(true);
+        }
+      },
+    );
+  });
+}
+
+function sendObsSignal(obs: ObsProcess, signal: "SIGTERM" | "SIGKILL"): void {
+  if (obs.exitCode != null) {
+    return;
+  }
+
+  try {
+    obs.kill(signal);
+  } catch (error) {
+    console.warn(`Failed to send ${signal} to OBS pid ${obs.pid}: ${String(error)}`);
+  }
+}
+
+function forceKillObs(obs: ObsProcess): void {
+  if (obs.exitCode != null) {
+    return;
+  }
+
+  if (platform === "win32") {
+    const result = spawnSync({
+      cmd: ["taskkill", "/PID", String(obs.pid), "/T", "/F"],
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 10000,
+    });
+    if (result.exitCode !== 0 && obs.exitCode == null) {
+      const stderr = new TextDecoder().decode(result.stderr).trim();
+      console.warn(`taskkill failed for OBS pid ${obs.pid}: ${stderr || `exit code ${result.exitCode}`}`);
+    }
+    return;
+  }
+
+  sendObsSignal(obs, "SIGKILL");
+}
+
+async function terminateObs(obs: ObsProcess): Promise<void> {
+  if (obs.exitCode != null) {
+    return;
+  }
+
+  sendObsSignal(obs, "SIGTERM");
+  if (await waitForPromise(obs.exited, 10000)) {
+    return;
+  }
+
+  console.warn(`OBS pid ${obs.pid} did not exit within 10s after SIGTERM; forcing shutdown.`);
+  forceKillObs(obs);
+  if (!(await waitForPromise(obs.exited, 10000))) {
+    obs.unref();
+    throw new Error(`OBS pid ${obs.pid} did not exit after forced shutdown`);
+  }
+}
+
+async function drainObsProcessRelays(relays: Promise<void>[], abortController: AbortController): Promise<void> {
+  const relaysDrained = await waitForPromise(Promise.allSettled(relays), 5000);
+  if (relaysDrained) {
+    return;
+  }
+
+  abortController.abort();
+  if (!(await waitForPromise(Promise.allSettled(relays), 2000))) {
+    console.warn("Timed out waiting for OBS process log streams to drain after OBS exited.");
+  }
 }
 
 class ObsWebSocket {
@@ -1374,13 +1506,37 @@ finalization_format=${args.finalizationFormat}
   const overload: OverloadMonitor = { seen: false, firstLine: "" };
   const obsProcessLog = createWriteStream(obsProcessLogPath, { flags: "a" });
   obsProcessLog.write(`# OBS app E2E process log\n# Command: ${obsCommand.join(" ")}\n\n`);
-  const stdoutRelay = relayProcessStream(obs.stdout, obsProcessLog, overload);
-  const stderrRelay = relayProcessStream(obs.stderr, obsProcessLog, overload);
+  const relayAbortController = new AbortController();
+  const stdoutRelay = relayProcessStream(obs.stdout, obsProcessLog, overload, relayAbortController.signal);
+  const stderrRelay = relayProcessStream(obs.stderr, obsProcessLog, overload, relayAbortController.signal);
 
   console.log(`OBS app E2E artifacts: ${artifactRoot}`);
   console.log(`OBS process log: ${obsProcessLogPath}`);
 
   let socket: ObsWebSocket | undefined = undefined;
+  let obsCleanedUp = false;
+  const cleanupObs = async (): Promise<void> => {
+    if (obsCleanedUp) {
+      return;
+    }
+
+    socket?.close();
+    socket = undefined;
+    if (args.keepObsOpen) {
+      obs.unref();
+      relayAbortController.abort();
+      await waitForPromise(Promise.allSettled([stdoutRelay, stderrRelay]), 2000);
+      await new Promise<void>((resolveEnd) => obsProcessLog.end(resolveEnd));
+      obsCleanedUp = true;
+      return;
+    }
+
+    await terminateObs(obs);
+    await drainObsProcessRelays([stdoutRelay, stderrRelay], relayAbortController);
+    await new Promise<void>((resolveEnd) => obsProcessLog.end(resolveEnd));
+    obsCleanedUp = true;
+  };
+
   try {
     socket = await ObsWebSocket.connect(port, password);
     const setSettings = await requestWithStartupRetry(socket, "CallVendorRequest", {
@@ -1420,6 +1576,7 @@ finalization_format=${args.finalizationFormat}
 
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
 
+    const recordedAttempts: Array<VerificationAttempt & { rgbPath: string }> = [];
     const attempts: Array<{
       kind: "sync" | "durability";
       attemptIndex: number;
@@ -1443,11 +1600,20 @@ finalization_format=${args.finalizationFormat}
       await waitForRecordState(socket, false, stopWaitTimeoutSeconds(durationSeconds));
       scanObsLogsForOverload(portableConfig, overload);
       throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps);
+      throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot);
+      recordedAttempts.push({ ...attempt, rgbPath: String(stopResponse?.outputPath ?? "") });
+    }
+
+    await cleanupObs();
+
+    for (const attempt of recordedAttempts) {
+      const durationSeconds = attempt.durationSeconds;
+      const label = attempt.kind === "sync" ? `sync ${attempt.attemptIndex}/${args.syncAttempts}` : "durability";
       const outputs = await verifyRecordingOutputs(
         stageBin,
         args.repoRoot,
         artifactRoot,
-        String(stopResponse?.outputPath ?? ""),
+        attempt.rgbPath,
         expectedFinalizationFormat,
         args.rgbEncoder,
         args.width,
@@ -1528,12 +1694,7 @@ finalization_format=${args.finalizationFormat}
       console.log(`  perf ${label}: ${compactTelemetryLine(telemetry.line)}`);
     }
   } finally {
-    socket?.close();
-    if (!args.keepObsOpen) {
-      obs.kill();
-      await Promise.allSettled([stdoutRelay, stderrRelay]);
-      await new Promise<void>((resolveEnd) => obsProcessLog.end(resolveEnd));
-    }
+    await cleanupObs();
   }
 }
 

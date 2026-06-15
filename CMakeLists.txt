@@ -92,6 +92,14 @@ find_package(OBS REQUIRED MODULE)
 find_package(jansson REQUIRED)
 find_package(FFmpeg REQUIRED avcodec avformat avutil swscale)
 
+set(_alpha_recorder_ffmpeg_include_dirs
+    "${FFmpeg_avcodec_INCLUDE_DIR}"
+    "${FFmpeg_avformat_INCLUDE_DIR}"
+    "${FFmpeg_avutil_INCLUDE_DIR}"
+    "${FFmpeg_swscale_INCLUDE_DIR}"
+)
+list(REMOVE_DUPLICATES _alpha_recorder_ffmpeg_include_dirs)
+
 if(APPLE)
     if(EXISTS "${OBS_ROOT}/Frameworks")
         set(alpha_recorder_obs_runtime_bin_dir "${OBS_ROOT}/Frameworks")
@@ -130,6 +138,10 @@ alpha_recorder_setup_target(alpha_recorder_core)
 alpha_recorder_apply_warnings(alpha_recorder_core)
 target_link_libraries(alpha_recorder_core PRIVATE OBS::libobs)
 target_link_libraries(alpha_recorder_core PUBLIC alpha_recorder_e2e_scenario jansson::jansson FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale)
+target_include_directories(alpha_recorder_core
+    BEFORE PRIVATE
+        ${_alpha_recorder_ffmpeg_include_dirs}
+)
 target_include_directories(alpha_recorder_core
     PUBLIC
         $<BUILD_INTERFACE:${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}>
