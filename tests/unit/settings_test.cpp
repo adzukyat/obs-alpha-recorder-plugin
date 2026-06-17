@@ -24,7 +24,8 @@ int main()
         defaults.hevc_encoder.lookahead != 0U ||
         defaults.hevc_encoder.adaptive_quantization ||
         defaults.hevc_encoder.nvenc_split_encode != alpha_recorder::obs::HevcNvencSplitEncodeMode::Auto ||
-        defaults.hevc_encoder.nvenc_gpu_index != -1)
+        defaults.hevc_encoder.nvenc_gpu_index != -1 ||
+        defaults.diagnostic_logging)
     {
         std::cerr << "default settings are incorrect\n";
         return 1;
@@ -41,7 +42,8 @@ int main()
         alpha_recorder::obs::settings_hevc_lookahead_key() != "hevc_lookahead" ||
         alpha_recorder::obs::settings_hevc_adaptive_quantization_key() != "hevc_adaptive_quantization" ||
         alpha_recorder::obs::settings_hevc_nvenc_split_encode_key() != "hevc_nvenc_split_encode" ||
-        alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key() != "hevc_nvenc_gpu_index")
+        alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key() != "hevc_nvenc_gpu_index" ||
+        alpha_recorder::obs::settings_diagnostic_logging_key() != "diagnostic_logging")
     {
         std::cerr << "settings keys do not match the expected config layout\n";
         return 2;
@@ -167,11 +169,25 @@ int main()
         return 14;
     }
 
+    const std::size_t mib = 1024U * 1024U;
+    if (alpha_recorder::obs::alpha_mask_writer_queue_frame_limit(60U, 1U) != 60U ||
+        alpha_recorder::obs::alpha_mask_writer_queue_frame_limit(30000U, 1001U) != 30U ||
+        alpha_recorder::obs::alpha_mask_writer_queue_frame_limit(240U, 1U) != 120U ||
+        alpha_recorder::obs::alpha_mask_writer_queue_byte_limit(1920U, 1080U, 60U, 1U) != 192U * mib ||
+        alpha_recorder::obs::alpha_mask_writer_queue_byte_limit(7680U, 4320U, 60U, 1U) !=
+            static_cast<std::size_t>(7680U) * static_cast<std::size_t>(4320U) * 60U ||
+        alpha_recorder::obs::alpha_mask_writer_queue_byte_limit(7680U, 4320U, 120U, 1U) != 2048U * mib ||
+        alpha_recorder::obs::alpha_mask_writer_queue_byte_limit(0U, 4320U, 60U, 1U) != 192U * mib)
+    {
+        std::cerr << "writer queue limit helpers are incorrect\n";
+        return 15;
+    }
+
     config_t *config = nullptr;
-    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=amf_quality\nhevc_nvenc_tune=ull\nhevc_gop_size=1200\nhevc_b_frames=8\nhevc_lookahead=64\nhevc_adaptive_quantization=true\nhevc_nvenc_split_encode=3\nhevc_nvenc_gpu_index=99\n") != CONFIG_SUCCESS || config == nullptr)
+    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=amf_quality\nhevc_nvenc_tune=ull\nhevc_gop_size=1200\nhevc_b_frames=8\nhevc_lookahead=64\nhevc_adaptive_quantization=true\nhevc_nvenc_split_encode=3\nhevc_nvenc_gpu_index=99\ndiagnostic_logging=true\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory config string\n";
-        return 15;
+        return 16;
     }
 
     const alpha_recorder::obs::Settings loaded_settings = alpha_recorder::obs::load_settings(config);
@@ -186,16 +202,17 @@ int main()
         loaded_settings.hevc_encoder.lookahead != 32U ||
         !loaded_settings.hevc_encoder.adaptive_quantization ||
         loaded_settings.hevc_encoder.nvenc_split_encode != alpha_recorder::obs::HevcNvencSplitEncodeMode::ThreeWay ||
-        loaded_settings.hevc_encoder.nvenc_gpu_index != 99)
+        loaded_settings.hevc_encoder.nvenc_gpu_index != 99 ||
+        !loaded_settings.diagnostic_logging)
     {
         std::cerr << "valid config values were not preserved by the loader\n";
-        return 16;
+        return 17;
     }
 
     if (config_open_string(&config, "[AlphaRecorder]\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory default config string\n";
-        return 17;
+        return 18;
     }
 
     const alpha_recorder::obs::Settings missing_key_settings = alpha_recorder::obs::load_settings(config);
@@ -204,7 +221,7 @@ int main()
         missing_key_settings.finalization_format != alpha_recorder::obs::preferred_runtime_finalization_format())
     {
         std::cerr << "missing settings did not use enabled and preferred runtime defaults\n";
-        return 18;
+        return 19;
     }
 
     const std::filesystem::path temp_root = std::filesystem::temp_directory_path() / "alpha_recorder_settings_test";

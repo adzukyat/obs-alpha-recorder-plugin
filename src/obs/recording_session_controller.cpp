@@ -1,5 +1,6 @@
 #include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
+#include "diagnostic_log.hpp"
 #include "recording_session_controller_cadence.hpp"
 #include "recording_session_controller_gate.hpp"
 
@@ -263,6 +264,11 @@ technique Draw
         char buffer[64];
         (void)std::snprintf(buffer, sizeof(buffer), "%.2fMiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
         return std::string{buffer};
+    }
+
+    [[nodiscard]] const char *bool_text(bool value) noexcept
+    {
+        return value ? "true" : "false";
     }
 
     struct LivePipelineTelemetry
@@ -829,9 +835,16 @@ technique Draw
             std::string writer_error;
             if (!writer_.open(config, &writer_error))
             {
-                log_and_show_error(writer_error.empty() ? std::string{"Alpha Recorder could not open the alpha mask movie for recording path: "} +
-                                                              recording_path.generic_string()
-                                                        : writer_error,
+                const std::string message = writer_error.empty()
+                                                ? std::string{"Alpha Recorder could not open the alpha mask movie for recording path: "} +
+                                                      recording_path.generic_string()
+                                                : writer_error;
+                if (settings_.diagnostic_logging)
+                {
+                    alpha_recorder::obs::append_diagnostic_log_line(std::string{"Alpha Recorder segment open failed: path=\""} +
+                                                                    mask_path.generic_string() + "\" error=\"" + message + "\"");
+                }
+                log_and_show_error(message,
                                    show_popup);
                 return false;
             }
@@ -840,6 +853,7 @@ technique Draw
             recording_path_ = recording_path;
             session_aborted_ = false;
             live_telemetry_.reset();
+            log_segment_start_locked(mask_path, config);
             return true;
         }
 
@@ -872,32 +886,81 @@ technique Draw
         void log_performance_summary_locked(const std::filesystem::path &mask_path,
                                             const alpha_recorder::obs::AlphaMaskVideoWriterStats &writer_stats)
         {
-            blog(LOG_INFO,
-                 "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} queues={alpha_max=%zu output_max=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s}",
-                 mask_path.generic_string().c_str(),
-                 format_timing_summary(live_telemetry_.capture_total).c_str(),
-                 static_cast<unsigned long long>(live_telemetry_.rendered_callbacks),
-                 static_cast<unsigned long long>(live_telemetry_.captured_frames),
-                 format_timing_summary(live_telemetry_.capture_map).c_str(),
-                 format_timing_summary(live_telemetry_.capture_render).c_str(),
-                 format_timing_summary(live_telemetry_.capture_stage).c_str(),
-                 format_timing_summary(live_telemetry_.alignment_batch).c_str(),
-                 static_cast<unsigned long long>(live_telemetry_.aligned_frames),
-                 static_cast<unsigned long long>(live_telemetry_.raw_video_frames),
-                 static_cast<unsigned long long>(live_telemetry_.packet_frames),
-                 live_telemetry_.max_pending_alpha_frames,
-                 live_telemetry_.max_pending_output_frames,
-                 live_telemetry_.max_pending_encoded_frames,
-                 writer_stats.max_queued_frames,
-                 format_bytes(static_cast<std::uint64_t>(writer_stats.max_queued_bytes)).c_str(),
-                 static_cast<unsigned long long>(writer_stats.enqueued_frames),
-                 writer_stats.enqueued_frames == 0U ? 0.0 : ns_to_ms(writer_stats.enqueue_time_ns_total / writer_stats.enqueued_frames),
-                 ns_to_ms(writer_stats.enqueue_time_ns_max),
-                 static_cast<unsigned long long>(writer_stats.encoded_frames),
-                 writer_stats.encoded_frames == 0U ? 0.0 : ns_to_ms(writer_stats.encode_time_ns_total / writer_stats.encoded_frames),
-                 ns_to_ms(writer_stats.encode_time_ns_max),
-                 ns_to_ms(writer_stats.finalize_time_ns),
-                 format_bytes(writer_stats.queued_bytes_total).c_str());
+            const std::string message = performance_summary_text_locked(mask_path, writer_stats);
+            blog(LOG_INFO, "%s", message.c_str());
+            if (settings_.diagnostic_logging)
+            {
+                alpha_recorder::obs::append_diagnostic_log_line(message);
+            }
+        }
+
+        void log_segment_start_locked(const std::filesystem::path &mask_path,
+                                      const alpha_recorder::obs::AlphaMaskVideoWriterConfig &config)
+        {
+            if (!settings_.diagnostic_logging)
+            {
+                return;
+            }
+
+            char buffer[1536];
+            const std::size_t queue_frame_limit =
+                alpha_recorder::obs::alpha_mask_writer_queue_frame_limit(config.fps_num, config.fps_den);
+            const std::size_t queue_byte_limit =
+                alpha_recorder::obs::alpha_mask_writer_queue_byte_limit(config.width, config.height, config.fps_num,
+                                                                        config.fps_den);
+            (void)std::snprintf(
+                buffer, sizeof(buffer),
+                "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u b_frames=%u lookahead=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
+                mask_path.generic_string().c_str(),
+                std::string{alpha_recorder::obs::finalization_format_config_value(config.finalization_format)}.c_str(),
+                config.width, config.height, config.fps_num, config.fps_den, queue_frame_limit,
+                format_bytes(static_cast<std::uint64_t>(queue_byte_limit)).c_str(),
+                std::string{alpha_recorder::obs::hevc_quality_profile_config_value(config.hevc_encoder.quality_profile)}.c_str(),
+                config.hevc_encoder.quality_cq,
+                std::string{alpha_recorder::obs::hevc_encoder_preset_config_value(config.hevc_encoder.preset)}.c_str(),
+                std::string{alpha_recorder::obs::hevc_nvenc_tune_config_value(config.hevc_encoder.nvenc_tune)}.c_str(),
+                config.hevc_encoder.gop_size, config.hevc_encoder.b_frames, config.hevc_encoder.lookahead,
+                bool_text(config.hevc_encoder.adaptive_quantization),
+                std::string{alpha_recorder::obs::hevc_nvenc_split_encode_config_value(config.hevc_encoder.nvenc_split_encode)}.c_str(),
+                static_cast<int>(config.hevc_encoder.nvenc_gpu_index));
+            alpha_recorder::obs::append_diagnostic_log_line(buffer);
+        }
+
+        std::string performance_summary_text_locked(const std::filesystem::path &mask_path,
+                                                    const alpha_recorder::obs::AlphaMaskVideoWriterStats &writer_stats)
+        {
+            const std::string capture_total = format_timing_summary(live_telemetry_.capture_total);
+            const std::string capture_map = format_timing_summary(live_telemetry_.capture_map);
+            const std::string capture_render = format_timing_summary(live_telemetry_.capture_render);
+            const std::string capture_stage = format_timing_summary(live_telemetry_.capture_stage);
+            const std::string alignment_batch = format_timing_summary(live_telemetry_.alignment_batch);
+            const std::string writer_max_bytes = format_bytes(static_cast<std::uint64_t>(writer_stats.max_queued_bytes));
+            const std::string writer_limit_bytes = format_bytes(static_cast<std::uint64_t>(writer_stats.queue_byte_limit));
+            const std::string writer_queued_bytes = format_bytes(writer_stats.queued_bytes_total);
+
+            char buffer[2048];
+            (void)std::snprintf(
+                buffer, sizeof(buffer),
+                "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} queues={alpha_max=%zu output_max=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s writer_limit_frames=%zu writer_limit_bytes=%s writer_overflow_repeats=%llu} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s}",
+                mask_path.generic_string().c_str(), capture_total.c_str(),
+                static_cast<unsigned long long>(live_telemetry_.rendered_callbacks),
+                static_cast<unsigned long long>(live_telemetry_.captured_frames), capture_map.c_str(),
+                capture_render.c_str(), capture_stage.c_str(), alignment_batch.c_str(),
+                static_cast<unsigned long long>(live_telemetry_.aligned_frames),
+                static_cast<unsigned long long>(live_telemetry_.raw_video_frames),
+                static_cast<unsigned long long>(live_telemetry_.packet_frames),
+                live_telemetry_.max_pending_alpha_frames, live_telemetry_.max_pending_output_frames,
+                live_telemetry_.max_pending_encoded_frames, writer_stats.max_queued_frames,
+                writer_max_bytes.c_str(), writer_stats.queue_frame_limit, writer_limit_bytes.c_str(),
+                static_cast<unsigned long long>(writer_stats.overflow_repeated_frames),
+                static_cast<unsigned long long>(writer_stats.enqueued_frames),
+                writer_stats.enqueued_frames == 0U ? 0.0 : ns_to_ms(writer_stats.enqueue_time_ns_total / writer_stats.enqueued_frames),
+                ns_to_ms(writer_stats.enqueue_time_ns_max),
+                static_cast<unsigned long long>(writer_stats.encoded_frames),
+                writer_stats.encoded_frames == 0U ? 0.0 : ns_to_ms(writer_stats.encode_time_ns_total / writer_stats.encoded_frames),
+                ns_to_ms(writer_stats.encode_time_ns_max), ns_to_ms(writer_stats.finalize_time_ns),
+                writer_queued_bytes.c_str());
+            return std::string{buffer};
         }
 
         [[nodiscard]] bool alignment_worker_has_work_locked() const noexcept
@@ -978,7 +1041,9 @@ technique Draw
 
         bool write_alpha_frame_locked(const alpha_recorder::obs::AlphaFrame &frame, std::string &error_message)
         {
-            if (frame.empty() || !writer_.write_frame(frame.alpha, &error_message))
+            alpha_recorder::obs::AlphaMaskVideoWriterFrameDisposition disposition =
+                alpha_recorder::obs::AlphaMaskVideoWriterFrameDisposition::Queued;
+            if (frame.empty() || !writer_.write_frame(frame.alpha, &error_message, &disposition))
             {
                 session_aborted_ = true;
                 if (error_message.empty())
@@ -988,7 +1053,10 @@ technique Draw
                 return false;
             }
 
-            last_alpha_frame_ = frame;
+            if (disposition == alpha_recorder::obs::AlphaMaskVideoWriterFrameDisposition::Queued)
+            {
+                last_alpha_frame_ = frame;
+            }
             ++next_sequence_;
             return true;
         }

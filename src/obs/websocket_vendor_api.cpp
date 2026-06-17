@@ -53,6 +53,7 @@ namespace alpha_recorder::obs
             obs_data_set_string(response, settings_hevc_nvenc_split_encode_key().data(),
                                 hevc_nvenc_split_encode_config_value(settings.hevc_encoder.nvenc_split_encode).data());
             obs_data_set_int(response, settings_hevc_nvenc_gpu_index_key().data(), settings.hevc_encoder.nvenc_gpu_index);
+            obs_data_set_bool(response, settings_diagnostic_logging_key().data(), settings.diagnostic_logging);
             obs_data_t *formats = obs_data_create();
             for (const FinalizationFormatOption &option : finalization_format_options)
             {
@@ -217,6 +218,11 @@ namespace alpha_recorder::obs
                 settings.hevc_encoder.nvenc_gpu_index = normalized_gpu_index;
             }
 
+            if (request != nullptr && obs_data_has_user_value(request, settings_diagnostic_logging_key().data()))
+            {
+                settings.diagnostic_logging = obs_data_get_bool(request, settings_diagnostic_logging_key().data());
+            }
+
             if (settings.finalization_format == FinalizationFormat::MaskHevcNvenc)
             {
                 std::string unavailable_reason;
@@ -246,6 +252,8 @@ namespace alpha_recorder::obs
                               hevc_nvenc_split_encode_config_value(settings.hevc_encoder.nvenc_split_encode).data());
             config_set_int(config, settings_section().data(), settings_hevc_nvenc_gpu_index_key().data(),
                            settings.hevc_encoder.nvenc_gpu_index);
+            config_set_bool(config, settings_section().data(), settings_diagnostic_logging_key().data(),
+                            settings.diagnostic_logging);
 
             if (config_save(config) != CONFIG_SUCCESS)
             {

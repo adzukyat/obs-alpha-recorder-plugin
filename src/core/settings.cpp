@@ -117,6 +117,15 @@ namespace alpha_recorder::obs
             }
         }
 
+        void load_diagnostic_settings(struct config_data *config, Settings &settings) noexcept
+        {
+            if (config_has_user_value(config, settings_section().data(), settings_diagnostic_logging_key().data()))
+            {
+                settings.diagnostic_logging =
+                    config_get_bool(config, settings_section().data(), settings_diagnostic_logging_key().data());
+            }
+        }
+
         void sanitize_hevc_nvenc_runtime_settings(struct config_data *config,
                                                   HevcEncoderSettings &settings) noexcept
         {
@@ -151,6 +160,7 @@ namespace alpha_recorder::obs
         }
 
         load_hevc_encoder_settings(config, settings.hevc_encoder);
+        load_diagnostic_settings(config, settings);
 
         settings.finalization_format = preferred_runtime_finalization_format();
 

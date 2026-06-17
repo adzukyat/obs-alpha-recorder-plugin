@@ -85,8 +85,9 @@ Failure behavior:
 
 - If the alpha session cannot start or finalize, log details and show the user a
   modal error when the failure is user-visible.
-- If the alpha pipeline cannot keep up, gracefully abort alpha mask movie
-  generation, log the error, and do not stop the main OBS recording.
+- If the mask writer cannot keep up, keep alpha mask movie generation running by
+  repeating the previous alpha frame for overflowed writer frames, log the repeat
+  count, and do not stop or slow the main OBS recording.
 - If finalization fails on record stop, log the error and leave any partial mask
   movie as a debugging artifact.
 - The main OBS recording must remain the highest-priority artifact.
@@ -133,6 +134,7 @@ Persisted OBS user config keys:
 | HEVC adaptive quantization | `AlphaRecorder.hevc_adaptive_quantization` |
 | HEVC NVENC Split Encode | `AlphaRecorder.hevc_nvenc_split_encode` |
 | HEVC NVENC GPU index | `AlphaRecorder.hevc_nvenc_gpu_index` |
+| Diagnostic logging | `AlphaRecorder.diagnostic_logging` |
 
 NVENC Split Encode accepts `auto`, `disabled`, `forced`, `2`, and `3`. Non-auto
 Split Encode settings are rejected when the bundled FFmpeg NVENC encoder does
@@ -506,9 +508,12 @@ The OBS app E2E target:
 - For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports
   `hevc`, and the output does not use an alpha pixel format.
 
-The plugin logs one per-segment performance summary covering capture/readback
-CPU time, GPU submission timing, alignment-worker batches, writer queue depth,
-and mask encode timing. The OBS app E2E harness copies those summaries into
+The plugin logs one per-segment OBS performance summary covering
+capture/readback CPU time, GPU submission timing, alignment-worker batches,
+writer queue depth, overflow repeat count, and mask encode timing. If diagnostic
+logging is enabled, the same summary plus segment-start encoder settings and
+dynamic writer queue limits are appended to the plugin diagnostic log file. The
+OBS app E2E harness copies OBS performance summaries into
 `alpha-recorder-performance.json`.
 
 If OBS logs `Encoding overloaded!`, severe skipped frames due to encoding lag,
@@ -601,14 +606,16 @@ Completed:
   cadence frame.
 - Startup duplicate coverage preserving raw content-origin timestamp.
 - Live alpha mask movie creation next to the OBS recording.
-- Bounded asynchronous mask movie encoding so slow fallback encoders abort the
-  alpha output instead of blocking OBS recording.
+- Bounded asynchronous mask movie encoding with dynamic resolution/FPS-aware
+  writer limits; writer backpressure repeats previous alpha frames instead of
+  aborting alpha output or blocking OBS recording.
 - Alignment resolution and mask-writer handoff outside OBS callbacks.
 - Live path queues captured alpha buffers without a second full-frame copy.
 - Texture-encoder path classification cached before packet handling so packet
   callbacks only enqueue packet PTS/CTS evidence.
 - Lightweight per-segment performance telemetry for capture/readback,
   alignment-worker batches, writer queue depth, and mask encode timing.
+- Optional diagnostic log file with a settings-dialog reveal button.
 - Alpha mask movie finalization on stop and split rotation.
 - File split handling through OBS `file_changed`.
 - obs-websocket vendor API for `alpha_recorder.GetSettings` and

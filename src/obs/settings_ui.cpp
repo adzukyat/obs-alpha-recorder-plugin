@@ -8,8 +8,10 @@
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
@@ -24,6 +26,7 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPointer>
+#include <QProcess>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -31,11 +34,13 @@
 #include <QStandardItemModel>
 #include <QStringList>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <curl/curl.h>
 
 #include <atomic>
+#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -45,6 +50,7 @@
 #include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
 #include "alpha_recorder/version.hpp"
+#include "diagnostic_log.hpp"
 
 namespace
 {
@@ -472,6 +478,9 @@ namespace
         config_set_int(config, alpha_recorder::obs::settings_section().data(),
                        alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key().data(),
                        normalized_settings.hevc_encoder.nvenc_gpu_index);
+        config_set_bool(config, alpha_recorder::obs::settings_section().data(),
+                        alpha_recorder::obs::settings_diagnostic_logging_key().data(),
+                        normalized_settings.diagnostic_logging);
 
         if (config_save(config) != CONFIG_SUCCESS)
         {
@@ -482,6 +491,38 @@ namespace
         (void)sync_runtime_hooks(warning_message);
 
         return true;
+    }
+
+    QString path_to_qstring(const std::filesystem::path &path)
+    {
+        return QString::fromStdString(path.u8string());
+    }
+
+    void show_diagnostic_log_file(QWidget *parent)
+    {
+        std::string errorMessage;
+        if (!alpha_recorder::obs::ensure_diagnostic_log_file(&errorMessage))
+        {
+            QMessageBox::warning(parent, "Alpha Recorder Settings",
+                                 QString::fromUtf8(errorMessage.data(), static_cast<int>(errorMessage.size())));
+            return;
+        }
+
+        const std::filesystem::path logPath = alpha_recorder::obs::diagnostic_log_path();
+        const QString filePath = path_to_qstring(logPath);
+        bool opened = false;
+#ifdef _WIN32
+        opened = QProcess::startDetached(QStringLiteral("explorer.exe"),
+                                         {QStringLiteral("/select,%1").arg(QDir::toNativeSeparators(filePath))});
+#elif defined(__APPLE__)
+        opened = QProcess::startDetached(QStringLiteral("open"), {QStringLiteral("-R"), filePath});
+#else
+        opened = QDesktopServices::openUrl(QUrl::fromLocalFile(path_to_qstring(logPath.parent_path())));
+#endif
+        if (!opened)
+        {
+            QMessageBox::warning(parent, "Alpha Recorder Settings", "Could not open the diagnostic log folder.");
+        }
     }
 
     class AlphaRecorderSettingsDialog : public QDialog
@@ -635,6 +676,21 @@ namespace
 
             mainLayout->addWidget(hevcGroupBox_);
 
+            auto *diagnosticsGroupBox = new QGroupBox("Diagnostics", this);
+            auto *diagnosticsLayout = new QHBoxLayout(diagnosticsGroupBox);
+            diagnosticsLayout->setContentsMargins(14, 10, 14, 10);
+            diagnosticsLayout->setSpacing(10);
+            diagnosticLogCheckBox_ = new QCheckBox("Diagnostic Log", this);
+            diagnosticLogCheckBox_->setChecked(settings.diagnostic_logging);
+            auto *showDiagnosticLogButton = new QPushButton("Show Log Folder", this);
+            diagnosticsLayout->addWidget(diagnosticLogCheckBox_);
+            diagnosticsLayout->addStretch(1);
+            diagnosticsLayout->addWidget(showDiagnosticLogButton);
+            mainLayout->addWidget(diagnosticsGroupBox);
+            connect(showDiagnosticLogButton, &QPushButton::clicked, this, [this]() {
+                show_diagnostic_log_file(this);
+            });
+
             select_hevc_profile(settings.hevc_encoder.quality_profile);
             populate_preset_combo(settings.finalization_format, settings.hevc_encoder.preset);
             select_hevc_preset(settings.hevc_encoder.preset);
@@ -719,6 +775,7 @@ namespace
             settings.hevc_encoder.adaptive_quantization = aqCombo_->currentIndex() == 1;
             settings.hevc_encoder.nvenc_split_encode = selected_split_encode_mode();
             settings.hevc_encoder.nvenc_gpu_index = nvencGpuSpinBox_->value();
+            settings.diagnostic_logging = diagnosticLogCheckBox_->isChecked();
 
             return settings;
         }
@@ -1115,6 +1172,7 @@ namespace
         QSpinBox *nvencGpuSpinBox_ = nullptr;
         QLabel *splitEncodeRowLabel_ = nullptr;
         QComboBox *splitEncodeCombo_ = nullptr;
+        QCheckBox *diagnosticLogCheckBox_ = nullptr;
         VersionCheckState versionCheckState_{};
         std::thread versionCheckThread_{};
     };

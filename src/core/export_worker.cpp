@@ -32,8 +32,10 @@ namespace alpha_recorder::obs
 {
     namespace
     {
-        constexpr std::size_t kMaxQueuedMaskFrames = 16U;
-        constexpr std::size_t kMaxQueuedMaskBytes = 192U * 1024U * 1024U;
+        constexpr std::size_t kMinimumQueuedMaskFrames = 16U;
+        constexpr std::size_t kMaximumQueuedMaskFrames = 120U;
+        constexpr std::size_t kMinimumQueuedMaskBytes = 192U * 1024U * 1024U;
+        constexpr std::size_t kMaximumQueuedMaskBytes = std::size_t{2048U} * 1024U * 1024U;
 
         bool set_error(std::string *error_message, std::string message)
         {
@@ -75,6 +77,57 @@ namespace alpha_recorder::obs
             std::error_code error;
             std::filesystem::create_directories(parent_path, error);
             return !error;
+        }
+
+        std::size_t mask_frame_bytes(std::uint32_t width, std::uint32_t height) noexcept
+        {
+            if (width == 0U || height == 0U)
+            {
+                return 0U;
+            }
+
+            const std::size_t row_bytes = static_cast<std::size_t>(width);
+            const std::size_t rows = static_cast<std::size_t>(height);
+            if (row_bytes > std::numeric_limits<std::size_t>::max() / rows)
+            {
+                return std::numeric_limits<std::size_t>::max();
+            }
+
+            return row_bytes * rows;
+        }
+
+        std::size_t queued_mask_frame_limit_for_rate(std::uint32_t fps_num, std::uint32_t fps_den) noexcept
+        {
+            if (fps_num == 0U || fps_den == 0U)
+            {
+                return kMinimumQueuedMaskFrames;
+            }
+
+            const std::uint64_t rounded_fps =
+                (static_cast<std::uint64_t>(fps_num) + static_cast<std::uint64_t>(fps_den) - 1U) /
+                static_cast<std::uint64_t>(fps_den);
+            return std::clamp(static_cast<std::size_t>(rounded_fps), kMinimumQueuedMaskFrames,
+                              kMaximumQueuedMaskFrames);
+        }
+
+        std::size_t queued_mask_byte_limit_for_dimensions(std::uint32_t width,
+                                                          std::uint32_t height,
+                                                          std::uint32_t fps_num,
+                                                          std::uint32_t fps_den) noexcept
+        {
+            const std::size_t frame_bytes = mask_frame_bytes(width, height);
+            if (frame_bytes == 0U)
+            {
+                return kMinimumQueuedMaskBytes;
+            }
+
+            const std::size_t frame_limit = queued_mask_frame_limit_for_rate(fps_num, fps_den);
+            const std::size_t target_bytes =
+                frame_bytes > std::numeric_limits<std::size_t>::max() / frame_limit
+                    ? std::numeric_limits<std::size_t>::max()
+                    : frame_bytes * frame_limit;
+
+            return std::clamp(target_bytes, kMinimumQueuedMaskBytes, kMaximumQueuedMaskBytes);
         }
 
         const AVCodec *select_output_encoder(FinalizationFormat format)
@@ -417,6 +470,7 @@ namespace alpha_recorder::obs
         {
             std::shared_ptr<const std::vector<std::uint8_t>> alpha{};
             std::uint32_t stride = 0;
+            std::uint64_t repeat_count = 0;
         };
 
         std::filesystem::path output_path{};
@@ -429,7 +483,14 @@ namespace alpha_recorder::obs
         bool accepting_frames = false;
         bool stop_requested = false;
         bool worker_failed = false;
+        std::size_t max_queued_frames = kMinimumQueuedMaskFrames;
+        std::size_t max_queued_bytes = kMinimumQueuedMaskBytes;
+        std::size_t queued_output_frames = 0;
+        std::size_t queued_actual_frames = 0;
         std::size_t queued_bytes = 0;
+        bool has_accepted_reference_frame = false;
+        std::shared_ptr<const std::vector<std::uint8_t>> repeat_reference_alpha{};
+        std::uint32_t repeat_reference_stride = 0;
         std::string worker_error{};
         std::queue<QueuedFrame> queued_frames{};
         AlphaMaskVideoWriterStats stats{};
@@ -604,18 +665,56 @@ namespace alpha_recorder::obs
 
                     queued_frame = std::move(queued_frames.front());
                     queued_frames.pop();
-                    queued_bytes -= queued_frame.alpha ? queued_frame.alpha->size() : 0U;
+                    if (queued_frame.alpha)
+                    {
+                        queued_bytes -= queued_frame.alpha->size();
+                        --queued_actual_frames;
+                        --queued_output_frames;
+                    }
+                    else
+                    {
+                        queued_output_frames -= static_cast<std::size_t>(
+                            std::min<std::uint64_t>(queued_frame.repeat_count, queued_output_frames));
+                    }
                 }
 
                 std::string error_message;
-                if (!queued_frame.alpha ||
-                    !encode_frame(queued_frame.alpha->data(), queued_frame.stride, &error_message))
+                bool encoded = true;
+                if (queued_frame.alpha)
+                {
+                    encoded = encode_frame(queued_frame.alpha->data(), queued_frame.stride, &error_message);
+                    if (encoded)
+                    {
+                        repeat_reference_alpha = queued_frame.alpha;
+                        repeat_reference_stride = queued_frame.stride;
+                    }
+                }
+                else if (queued_frame.repeat_count > 0U && repeat_reference_alpha)
+                {
+                    for (std::uint64_t index = 0; index < queued_frame.repeat_count; ++index)
+                    {
+                        if (!encode_frame(repeat_reference_alpha->data(), repeat_reference_stride, &error_message))
+                        {
+                            encoded = false;
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    encoded = false;
+                    error_message = "Alpha Recorder could not repeat a previous alpha mask frame.";
+                }
+
+                if (!encoded)
                 {
                     std::lock_guard<std::mutex> lock(mutex);
                     worker_failed = true;
                     accepting_frames = false;
                     worker_error = error_message.empty() ? "Alpha Recorder failed to encode an alpha mask frame." : std::move(error_message);
                     queued_bytes = 0;
+                    queued_output_frames = 0;
+                    queued_actual_frames = 0;
                     queued_frames = {};
                     condition.notify_all();
                     break;
@@ -643,10 +742,39 @@ namespace alpha_recorder::obs
             worker = std::thread{[this]() { run_worker(); }};
         }
 
+        void update_queue_stats_after_enqueue(std::uint64_t enqueue_ns, std::size_t alpha_bytes) noexcept
+        {
+            ++stats.enqueued_frames;
+            stats.queued_bytes_total += alpha_bytes;
+            stats.enqueue_time_ns_total += enqueue_ns;
+            stats.enqueue_time_ns_max = std::max(stats.enqueue_time_ns_max, enqueue_ns);
+            stats.max_queued_frames = std::max(stats.max_queued_frames, queued_output_frames);
+            stats.max_queued_bytes = std::max(stats.max_queued_bytes, queued_bytes);
+        }
+
+        void enqueue_repeat_frame_locked() noexcept
+        {
+            if (!queued_frames.empty() && !queued_frames.back().alpha && queued_frames.back().repeat_count > 0U)
+            {
+                ++queued_frames.back().repeat_count;
+            }
+            else
+            {
+                queued_frames.push(QueuedFrame{nullptr, 0U, 1U});
+            }
+            ++queued_output_frames;
+            ++stats.overflow_repeated_frames;
+        }
+
         bool enqueue_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha,
                            std::uint32_t stride,
-                           std::string *error_message) noexcept
+                           std::string *error_message,
+                           AlphaMaskVideoWriterFrameDisposition *disposition) noexcept
         {
+            if (disposition != nullptr)
+            {
+                *disposition = AlphaMaskVideoWriterFrameDisposition::Queued;
+            }
             if (!alpha)
             {
                 return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
@@ -663,34 +791,33 @@ namespace alpha_recorder::obs
                 return set_error(error_message, "Alpha Recorder mask video writer is closing.");
             }
 
-            if (queued_frames.size() >= kMaxQueuedMaskFrames ||
-                alpha->size() > kMaxQueuedMaskBytes ||
-                queued_bytes > kMaxQueuedMaskBytes - alpha->size())
-            {
-                accepting_frames = false;
-                stop_requested = true;
-                worker_failed = true;
-                worker_error = "Alpha Recorder alpha mask encoder could not keep up; aborting alpha mask generation to protect the main OBS recording.";
-                while (!queued_frames.empty())
-                {
-                    queued_frames.pop();
-                }
-                queued_bytes = 0;
-                condition.notify_all();
-                return set_error(error_message, worker_error);
-            }
-
             const auto enqueue_start = std::chrono::steady_clock::now();
             const std::size_t alpha_bytes = alpha->size();
+            const bool can_repeat_previous = has_accepted_reference_frame;
+            const bool full_alpha_queue_full =
+                queued_actual_frames >= max_queued_frames ||
+                alpha_bytes > max_queued_bytes ||
+                queued_bytes > max_queued_bytes - alpha_bytes;
+            if (full_alpha_queue_full && can_repeat_previous)
+            {
+                enqueue_repeat_frame_locked();
+                if (disposition != nullptr)
+                {
+                    *disposition = AlphaMaskVideoWriterFrameDisposition::RepeatedPrevious;
+                }
+                const std::uint64_t enqueue_ns = elapsed_ns(enqueue_start, std::chrono::steady_clock::now());
+                update_queue_stats_after_enqueue(enqueue_ns, 0U);
+                condition.notify_one();
+                return true;
+            }
+
             queued_bytes += alpha_bytes;
-            queued_frames.push(QueuedFrame{std::move(alpha), stride});
+            ++queued_actual_frames;
+            ++queued_output_frames;
+            has_accepted_reference_frame = true;
+            queued_frames.push(QueuedFrame{std::move(alpha), stride, 0U});
             const std::uint64_t enqueue_ns = elapsed_ns(enqueue_start, std::chrono::steady_clock::now());
-            ++stats.enqueued_frames;
-            stats.queued_bytes_total += alpha_bytes;
-            stats.enqueue_time_ns_total += enqueue_ns;
-            stats.enqueue_time_ns_max = std::max(stats.enqueue_time_ns_max, enqueue_ns);
-            stats.max_queued_frames = std::max(stats.max_queued_frames, queued_frames.size());
-            stats.max_queued_bytes = std::max(stats.max_queued_bytes, queued_bytes);
+            update_queue_stats_after_enqueue(enqueue_ns, alpha_bytes);
             condition.notify_one();
             return true;
         }
@@ -760,6 +887,11 @@ namespace alpha_recorder::obs
 
             auto *impl = new Impl{};
             impl->output_path = config.output_path;
+            impl->max_queued_frames = queued_mask_frame_limit_for_rate(config.fps_num, config.fps_den);
+            impl->max_queued_bytes =
+                queued_mask_byte_limit_for_dimensions(config.width, config.height, config.fps_num, config.fps_den);
+            impl->stats.queue_frame_limit = impl->max_queued_frames;
+            impl->stats.queue_byte_limit = impl->max_queued_bytes;
             const std::string output_path_text = path_to_utf8(config.output_path);
             int ret = avformat_alloc_output_context2(&impl->format, nullptr, nullptr, output_path_text.c_str());
             if (ret < 0 || impl->format == nullptr)
@@ -865,7 +997,10 @@ namespace alpha_recorder::obs
         }
     }
 
-    bool AlphaMaskVideoWriter::write_frame(const std::uint8_t *alpha, std::uint32_t stride, std::string *error_message) noexcept
+    bool AlphaMaskVideoWriter::write_frame(const std::uint8_t *alpha,
+                                           std::uint32_t stride,
+                                           std::string *error_message,
+                                           AlphaMaskVideoWriterFrameDisposition *disposition) noexcept
     {
         if (impl_ == nullptr || impl_->encoder == nullptr || impl_->frame == nullptr)
         {
@@ -892,10 +1027,13 @@ namespace alpha_recorder::obs
             std::copy(source, source + row_bytes, dest);
         }
 
-        return impl_->enqueue_frame(std::move(queued_alpha), static_cast<std::uint32_t>(impl_->encoder->width), error_message);
+        return impl_->enqueue_frame(std::move(queued_alpha), static_cast<std::uint32_t>(impl_->encoder->width),
+                                    error_message, disposition);
     }
 
-    bool AlphaMaskVideoWriter::write_frame(std::vector<std::uint8_t> alpha, std::string *error_message) noexcept
+    bool AlphaMaskVideoWriter::write_frame(std::vector<std::uint8_t> alpha,
+                                           std::string *error_message,
+                                           AlphaMaskVideoWriterFrameDisposition *disposition) noexcept
     {
         if (impl_ == nullptr || impl_->encoder == nullptr || impl_->frame == nullptr)
         {
@@ -915,10 +1053,12 @@ namespace alpha_recorder::obs
         }
 
         return impl_->enqueue_frame(std::make_shared<std::vector<std::uint8_t>>(std::move(alpha)),
-                                    static_cast<std::uint32_t>(impl_->encoder->width), error_message);
+                                    static_cast<std::uint32_t>(impl_->encoder->width), error_message, disposition);
     }
 
-    bool AlphaMaskVideoWriter::write_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha, std::string *error_message) noexcept
+    bool AlphaMaskVideoWriter::write_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha,
+                                           std::string *error_message,
+                                           AlphaMaskVideoWriterFrameDisposition *disposition) noexcept
     {
         if (impl_ == nullptr || impl_->encoder == nullptr || impl_->frame == nullptr)
         {
@@ -937,7 +1077,8 @@ namespace alpha_recorder::obs
             return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
         }
 
-        return impl_->enqueue_frame(std::move(alpha), static_cast<std::uint32_t>(impl_->encoder->width), error_message);
+        return impl_->enqueue_frame(std::move(alpha), static_cast<std::uint32_t>(impl_->encoder->width),
+                                    error_message, disposition);
     }
 
     bool AlphaMaskVideoWriter::close(std::string *error_message) noexcept
@@ -1182,6 +1323,19 @@ namespace alpha_recorder::obs
         }
 
         return finalization_format_default();
+    }
+
+    std::size_t alpha_mask_writer_queue_frame_limit(std::uint32_t fps_num, std::uint32_t fps_den) noexcept
+    {
+        return queued_mask_frame_limit_for_rate(fps_num, fps_den);
+    }
+
+    std::size_t alpha_mask_writer_queue_byte_limit(std::uint32_t width,
+                                                   std::uint32_t height,
+                                                   std::uint32_t fps_num,
+                                                   std::uint32_t fps_den) noexcept
+    {
+        return queued_mask_byte_limit_for_dimensions(width, height, fps_num, fps_den);
     }
 
 } // namespace alpha_recorder::obs

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -26,6 +27,7 @@ namespace alpha_recorder::obs
     {
         std::uint64_t enqueued_frames = 0;
         std::uint64_t encoded_frames = 0;
+        std::uint64_t overflow_repeated_frames = 0;
         std::uint64_t queued_bytes_total = 0;
         std::uint64_t enqueue_time_ns_total = 0;
         std::uint64_t enqueue_time_ns_max = 0;
@@ -34,6 +36,14 @@ namespace alpha_recorder::obs
         std::uint64_t finalize_time_ns = 0;
         std::size_t max_queued_frames = 0;
         std::size_t max_queued_bytes = 0;
+        std::size_t queue_frame_limit = 0;
+        std::size_t queue_byte_limit = 0;
+    };
+
+    enum class AlphaMaskVideoWriterFrameDisposition
+    {
+        Queued,
+        RepeatedPrevious,
     };
 
     class AlphaMaskVideoWriter
@@ -49,11 +59,14 @@ namespace alpha_recorder::obs
                                 std::string *error_message = nullptr) noexcept;
         [[nodiscard]] bool write_frame(const std::uint8_t *alpha,
                                        std::uint32_t stride,
-                                       std::string *error_message = nullptr) noexcept;
+                                       std::string *error_message = nullptr,
+                                       AlphaMaskVideoWriterFrameDisposition *disposition = nullptr) noexcept;
         [[nodiscard]] bool write_frame(std::vector<std::uint8_t> alpha,
-                                       std::string *error_message = nullptr) noexcept;
+                                       std::string *error_message = nullptr,
+                                       AlphaMaskVideoWriterFrameDisposition *disposition = nullptr) noexcept;
         [[nodiscard]] bool write_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha,
-                                       std::string *error_message = nullptr) noexcept;
+                                       std::string *error_message = nullptr,
+                                       AlphaMaskVideoWriterFrameDisposition *disposition = nullptr) noexcept;
         [[nodiscard]] bool close(std::string *error_message = nullptr) noexcept;
         [[nodiscard]] bool close(std::string *error_message,
                                  AlphaMaskVideoWriterStats *stats) noexcept;
@@ -74,5 +87,11 @@ namespace alpha_recorder::obs
     [[nodiscard]] bool hevc_nvenc_encoder_settings_runtime_available(const HevcEncoderSettings &settings,
                                                                      std::string *reason = nullptr) noexcept;
     [[nodiscard]] FinalizationFormat preferred_runtime_finalization_format() noexcept;
+    [[nodiscard]] std::size_t alpha_mask_writer_queue_frame_limit(std::uint32_t fps_num,
+                                                                  std::uint32_t fps_den) noexcept;
+    [[nodiscard]] std::size_t alpha_mask_writer_queue_byte_limit(std::uint32_t width,
+                                                                  std::uint32_t height,
+                                                                  std::uint32_t fps_num,
+                                                                  std::uint32_t fps_den) noexcept;
 
 } // namespace alpha_recorder::obs

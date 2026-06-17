@@ -77,6 +77,7 @@ namespace alpha_recorder::obs
         bool enabled = false;
         FinalizationFormat finalization_format = FinalizationFormat::MaskPngMov;
         HevcEncoderSettings hevc_encoder{};
+        bool diagnostic_logging = false;
     };
 
     struct FinalizationFormatOption
@@ -151,6 +152,11 @@ namespace alpha_recorder::obs
         return "hevc_nvenc_gpu_index";
     }
 
+    [[nodiscard]] inline constexpr std::string_view settings_diagnostic_logging_key() noexcept
+    {
+        return "diagnostic_logging";
+    }
+
     [[nodiscard]] inline constexpr FinalizationFormat finalization_format_default() noexcept
     {
         return FinalizationFormat::MaskPngMov;
@@ -172,7 +178,7 @@ namespace alpha_recorder::obs
 
     [[nodiscard]] inline constexpr Settings default_settings() noexcept
     {
-        return Settings{true, finalization_format_default(), HevcEncoderSettings{}};
+        return Settings{true, finalization_format_default(), HevcEncoderSettings{}, false};
     }
 
     [[nodiscard]] inline std::uint64_t frame_pts_from_elapsed_ns(std::uint64_t elapsed_ns,

@@ -157,6 +157,7 @@ endif()
 
 if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     add_library(alpha_recorder_plugin MODULE
+        src/obs/diagnostic_log.cpp
         src/obs/plugin.cpp
         src/obs/recording_session_controller.cpp
         src/obs/settings_ui.cpp
