@@ -36,6 +36,7 @@
 #include <curl/curl.h>
 
 #include <atomic>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -423,8 +424,17 @@ namespace
     {
         Settings normalized_settings = settings;
         normalized_settings.finalization_format = alpha_recorder::obs::normalize_finalization_format(normalized_settings.finalization_format);
+        normalized_settings.hevc_encoder.nvenc_gpu_index =
+            alpha_recorder::obs::normalize_hevc_nvenc_gpu_index(normalized_settings.hevc_encoder.nvenc_gpu_index);
         std::string unavailableReason;
         if (!alpha_recorder::obs::finalization_format_runtime_available(normalized_settings.finalization_format, &unavailableReason))
+        {
+            error_message = QString::fromUtf8(unavailableReason.data(), static_cast<int>(unavailableReason.size()));
+            return false;
+        }
+        if (normalized_settings.finalization_format == alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc &&
+            !alpha_recorder::obs::hevc_nvenc_encoder_settings_runtime_available(normalized_settings.hevc_encoder,
+                                                                                &unavailableReason))
         {
             error_message = QString::fromUtf8(unavailableReason.data(), static_cast<int>(unavailableReason.size()));
             return false;
@@ -456,6 +466,12 @@ namespace
         config_set_bool(config, alpha_recorder::obs::settings_section().data(),
                         alpha_recorder::obs::settings_hevc_adaptive_quantization_key().data(),
                         normalized_settings.hevc_encoder.adaptive_quantization);
+        config_set_string(config, alpha_recorder::obs::settings_section().data(),
+                          alpha_recorder::obs::settings_hevc_nvenc_split_encode_key().data(),
+                          alpha_recorder::obs::hevc_nvenc_split_encode_config_value(normalized_settings.hevc_encoder.nvenc_split_encode).data());
+        config_set_int(config, alpha_recorder::obs::settings_section().data(),
+                       alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key().data(),
+                       normalized_settings.hevc_encoder.nvenc_gpu_index);
 
         if (config_save(config) != CONFIG_SUCCESS)
         {
@@ -606,6 +622,15 @@ namespace
             bFramesSpinBox_ = add_advanced_spinbox(advancedLayout, 1, "B-frames", 0, 4, nullptr);
             lookaheadSpinBox_ = add_advanced_spinbox(advancedLayout, 2, "Lookahead", 0, 32, "Off");
             aqCombo_ = add_advanced_combo(advancedLayout, 3, "AQ");
+            nvencGpuSpinBox_ = add_advanced_spinbox(advancedLayout, 4, "NVENC GPU", -1,
+                                                    std::numeric_limits<int>::max(), "Any", &nvencGpuRowLabel_);
+            splitEncodeCombo_ = add_advanced_combo(advancedLayout, 5, "Split Encode", &splitEncodeRowLabel_);
+            splitEncodeCombo_->clear();
+            splitEncodeCombo_->addItem("Auto", static_cast<int>(alpha_recorder::obs::HevcNvencSplitEncodeMode::Auto));
+            splitEncodeCombo_->addItem("Disabled", static_cast<int>(alpha_recorder::obs::HevcNvencSplitEncodeMode::Disabled));
+            splitEncodeCombo_->addItem("Forced", static_cast<int>(alpha_recorder::obs::HevcNvencSplitEncodeMode::Forced));
+            splitEncodeCombo_->addItem("2 strips", static_cast<int>(alpha_recorder::obs::HevcNvencSplitEncodeMode::TwoWay));
+            splitEncodeCombo_->addItem("3 strips", static_cast<int>(alpha_recorder::obs::HevcNvencSplitEncodeMode::ThreeWay));
             hevcLayout->addWidget(advancedFrame_);
 
             mainLayout->addWidget(hevcGroupBox_);
@@ -621,6 +646,8 @@ namespace
             bFramesSpinBox_->setValue(static_cast<int>(alpha_recorder::obs::clamp_hevc_b_frames(settings.hevc_encoder.b_frames)));
             lookaheadSpinBox_->setValue(static_cast<int>(alpha_recorder::obs::clamp_hevc_lookahead(settings.hevc_encoder.lookahead)));
             aqCombo_->setCurrentIndex(settings.hevc_encoder.adaptive_quantization ? 1 : 0);
+            nvencGpuSpinBox_->setValue(alpha_recorder::obs::normalize_hevc_nvenc_gpu_index(settings.hevc_encoder.nvenc_gpu_index));
+            select_split_encode_mode(settings.hevc_encoder.nvenc_split_encode);
 
             connect(finalizationFormatCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
                 populate_preset_combo(selected_finalization_format(), selected_hevc_preset());
@@ -690,6 +717,8 @@ namespace
             settings.hevc_encoder.b_frames = static_cast<std::uint32_t>(bFramesSpinBox_->value());
             settings.hevc_encoder.lookahead = static_cast<std::uint32_t>(lookaheadSpinBox_->value());
             settings.hevc_encoder.adaptive_quantization = aqCombo_->currentIndex() == 1;
+            settings.hevc_encoder.nvenc_split_encode = selected_split_encode_mode();
+            settings.hevc_encoder.nvenc_gpu_index = nvencGpuSpinBox_->value();
 
             return settings;
         }
@@ -788,9 +817,19 @@ namespace
             layout->addWidget(button);
         }
 
-        QSpinBox *add_advanced_spinbox(QGridLayout *layout, int row, const char *label, int minimum, int maximum, const char *specialValueText)
+        QSpinBox *add_advanced_spinbox(QGridLayout *layout,
+                                       int row,
+                                       const char *label,
+                                       int minimum,
+                                       int maximum,
+                                       const char *specialValueText,
+                                       QLabel **rowLabel = nullptr)
         {
             auto *nameLabel = new QLabel(label, this);
+            if (rowLabel != nullptr)
+            {
+                *rowLabel = nameLabel;
+            }
             auto *spinBox = new QSpinBox(this);
             spinBox->setRange(minimum, maximum);
             spinBox->setFixedWidth(96);
@@ -803,9 +842,13 @@ namespace
             return spinBox;
         }
 
-        QComboBox *add_advanced_combo(QGridLayout *layout, int row, const char *label)
+        QComboBox *add_advanced_combo(QGridLayout *layout, int row, const char *label, QLabel **rowLabel = nullptr)
         {
             auto *nameLabel = new QLabel(label, this);
+            if (rowLabel != nullptr)
+            {
+                *rowLabel = nameLabel;
+            }
             auto *combo = new QComboBox(this);
             combo->addItem("Off");
             combo->addItem("On");
@@ -939,6 +982,32 @@ namespace
             return alpha_recorder::obs::HevcNvencTune::HighQuality;
         }
 
+        void select_split_encode_mode(alpha_recorder::obs::HevcNvencSplitEncodeMode mode)
+        {
+            const int requestedValue = static_cast<int>(mode);
+            for (int index = 0; index < splitEncodeCombo_->count(); ++index)
+            {
+                if (splitEncodeCombo_->itemData(index).toInt() == requestedValue)
+                {
+                    splitEncodeCombo_->setCurrentIndex(index);
+                    return;
+                }
+            }
+
+            splitEncodeCombo_->setCurrentIndex(0);
+        }
+
+        alpha_recorder::obs::HevcNvencSplitEncodeMode selected_split_encode_mode() const
+        {
+            const int currentIndex = splitEncodeCombo_->currentIndex();
+            if (currentIndex >= 0)
+            {
+                return static_cast<alpha_recorder::obs::HevcNvencSplitEncodeMode>(splitEncodeCombo_->itemData(currentIndex).toInt());
+            }
+
+            return alpha_recorder::obs::HevcNvencSplitEncodeMode::Auto;
+        }
+
         bool preset_available_for_format(FinalizationFormat format, alpha_recorder::obs::HevcEncoderPreset preset) const
         {
             switch (preset)
@@ -1010,6 +1079,12 @@ namespace
             tuneRowLabel_->setVisible(nvencSelected);
             tuneCombo_->setVisible(nvencSelected);
             tuneCombo_->setEnabled(qualityEnabled && nvencSelected);
+            nvencGpuRowLabel_->setVisible(nvencSelected);
+            nvencGpuSpinBox_->setVisible(nvencSelected);
+            nvencGpuSpinBox_->setEnabled(nvencSelected);
+            splitEncodeRowLabel_->setVisible(nvencSelected);
+            splitEncodeCombo_->setVisible(nvencSelected);
+            splitEncodeCombo_->setEnabled(nvencSelected);
             gopSpinBox_->setEnabled(qualityEnabled);
             bFramesSpinBox_->setEnabled(qualityEnabled);
             lookaheadSpinBox_->setEnabled(qualityEnabled);
@@ -1036,6 +1111,10 @@ namespace
         QSpinBox *bFramesSpinBox_ = nullptr;
         QSpinBox *lookaheadSpinBox_ = nullptr;
         QComboBox *aqCombo_ = nullptr;
+        QLabel *nvencGpuRowLabel_ = nullptr;
+        QSpinBox *nvencGpuSpinBox_ = nullptr;
+        QLabel *splitEncodeRowLabel_ = nullptr;
+        QComboBox *splitEncodeCombo_ = nullptr;
         VersionCheckState versionCheckState_{};
         std::thread versionCheckThread_{};
     };

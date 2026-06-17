@@ -208,6 +208,45 @@ namespace alpha_recorder::obs
             return static_cast<int>(clamp_hevc_b_frames(config.hevc_encoder.b_frames));
         }
 
+        int hevc_nvenc_split_encode_value(HevcNvencSplitEncodeMode mode) noexcept
+        {
+            switch (mode)
+            {
+            case HevcNvencSplitEncodeMode::Auto:
+                return 0;
+            case HevcNvencSplitEncodeMode::Disabled:
+                return 15;
+            case HevcNvencSplitEncodeMode::Forced:
+                return 1;
+            case HevcNvencSplitEncodeMode::TwoWay:
+                return 2;
+            case HevcNvencSplitEncodeMode::ThreeWay:
+                return 3;
+            }
+
+            return 0;
+        }
+
+        bool set_encoder_int_option(AVCodecContext &encoder,
+                                    const char *name,
+                                    std::int64_t value,
+                                    bool allow_missing,
+                                    std::string *error_message)
+        {
+            const int ret = av_opt_set_int(encoder.priv_data, name, value, 0);
+            if (ret == AVERROR_OPTION_NOT_FOUND && allow_missing)
+            {
+                return true;
+            }
+            if (ret < 0)
+            {
+                return set_error(error_message, std::string{"Alpha Recorder could not configure NVENC option '"} +
+                                                    name + "': " + av_error_message(ret));
+            }
+
+            return true;
+        }
+
         bool configure_encoder(AVCodecContext &encoder, const AVCodec &codec, const AlphaMaskVideoWriterConfig &config,
                                std::string *error_message)
         {
@@ -239,6 +278,18 @@ namespace alpha_recorder::obs
                 encoder.gop_size = configured_gop_size(config);
                 encoder.max_b_frames = configured_b_frames(config);
                 encoder.pix_fmt = AV_PIX_FMT_YUV420P;
+                if (config.hevc_encoder.nvenc_gpu_index >= 0 &&
+                    !set_encoder_int_option(encoder, "gpu", config.hevc_encoder.nvenc_gpu_index, false, error_message))
+                {
+                    return false;
+                }
+                if (config.hevc_encoder.nvenc_split_encode != HevcNvencSplitEncodeMode::Auto &&
+                    !set_encoder_int_option(encoder, "split_encode_mode",
+                                            hevc_nvenc_split_encode_value(config.hevc_encoder.nvenc_split_encode),
+                                            false, error_message))
+                {
+                    return false;
+                }
                 if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
                 {
                     (void)av_opt_set(encoder.priv_data, "preset", "lossless", 0);
@@ -990,6 +1041,132 @@ namespace alpha_recorder::obs
         catch (...)
         {
             return set_error(reason, "finalization capability check failed.");
+        }
+    }
+
+    bool hevc_nvenc_split_encode_runtime_available(HevcNvencSplitEncodeMode mode, std::string *reason) noexcept
+    {
+        try
+        {
+            if (mode == HevcNvencSplitEncodeMode::Auto)
+            {
+                if (reason != nullptr)
+                {
+                    reason->clear();
+                }
+                return true;
+            }
+
+            const AVCodec *const encoder = select_output_encoder(FinalizationFormat::MaskHevcNvenc);
+            if (encoder == nullptr)
+            {
+                return set_error(reason, "HEVC NVENC is not available in the bundled FFmpeg stack.");
+            }
+
+            AVCodecContext *context = avcodec_alloc_context3(encoder);
+            if (context == nullptr)
+            {
+                return set_error(reason, "HEVC NVENC could not allocate an FFmpeg encoder context.");
+            }
+
+            const AVOption *const splitEncodeOption =
+                context->priv_data == nullptr
+                    ? nullptr
+                    : av_opt_find(context->priv_data, "split_encode_mode", nullptr, 0, AV_OPT_SEARCH_CHILDREN);
+            if (splitEncodeOption == nullptr)
+            {
+                avcodec_free_context(&context);
+                return set_error(reason, "HEVC NVENC Split Encode is not available in the bundled FFmpeg stack.");
+            }
+
+            std::string configure_error;
+            const bool available = set_encoder_int_option(*context, "split_encode_mode",
+                                                          hevc_nvenc_split_encode_value(mode), false,
+                                                          &configure_error);
+            avcodec_free_context(&context);
+            if (!available)
+            {
+                return set_error(reason, configure_error.empty()
+                                             ? "HEVC NVENC Split Encode could not be configured."
+                                             : configure_error);
+            }
+
+            if (reason != nullptr)
+            {
+                reason->clear();
+            }
+            return true;
+        }
+        catch (const std::exception &ex)
+        {
+            return set_error(reason, std::string{"HEVC NVENC Split Encode capability check failed: "} + ex.what());
+        }
+        catch (...)
+        {
+            return set_error(reason, "HEVC NVENC Split Encode capability check failed.");
+        }
+    }
+
+    bool hevc_nvenc_encoder_settings_runtime_available(const HevcEncoderSettings &settings,
+                                                       std::string *reason) noexcept
+    {
+        try
+        {
+            if (!hevc_nvenc_split_encode_runtime_available(settings.nvenc_split_encode, reason))
+            {
+                return false;
+            }
+
+            const AVCodec *const encoder = select_output_encoder(FinalizationFormat::MaskHevcNvenc);
+            if (encoder == nullptr)
+            {
+                return set_error(reason, "HEVC NVENC is not available in the bundled FFmpeg stack.");
+            }
+
+            AVCodecContext *context = avcodec_alloc_context3(encoder);
+            if (context == nullptr)
+            {
+                return set_error(reason, "HEVC NVENC could not allocate an FFmpeg encoder context.");
+            }
+
+            AlphaMaskVideoWriterConfig probe_config = capability_probe_config(FinalizationFormat::MaskHevcNvenc);
+            probe_config.hevc_encoder = settings;
+
+            std::string configure_error;
+            bool available = configure_encoder(*context, *encoder, probe_config, &configure_error);
+            if (available)
+            {
+                const int ret = avcodec_open2(context, encoder, nullptr);
+                if (ret < 0)
+                {
+                    available = false;
+                    configure_error = "HEVC NVENC could not open with the selected settings: " +
+                                      av_error_message(ret);
+                }
+            }
+
+            avcodec_free_context(&context);
+            if (!available)
+            {
+                return set_error(reason, configure_error.empty()
+                                             ? "HEVC NVENC could not open with the selected settings."
+                                             : configure_error);
+            }
+
+            if (reason != nullptr)
+            {
+                reason->clear();
+            }
+            return true;
+        }
+        catch (const std::exception &ex)
+        {
+            return set_error(reason, std::string{"HEVC NVENC selected settings capability check failed: "} +
+                                         ex.what());
+        }
+        catch (...)
+        {
+            return set_error(reason, "HEVC NVENC selected settings capability check failed.");
         }
     }
 

@@ -24,6 +24,17 @@ namespace alpha_recorder::obs
             (void)config_save(config);
         }
 
+        void persist_hevc_nvenc_split_encode(struct config_data *config, HevcNvencSplitEncodeMode mode) noexcept
+        {
+            if (config == nullptr)
+            {
+                return;
+            }
+
+            config_set_string(config, settings_section().data(), settings_hevc_nvenc_split_encode_key().data(),
+                              hevc_nvenc_split_encode_config_value(mode).data());
+        }
+
         void load_hevc_encoder_settings(struct config_data *config, HevcEncoderSettings &settings) noexcept
         {
             if (config_has_user_value(config, settings_section().data(), settings_hevc_quality_profile_key().data()))
@@ -85,6 +96,43 @@ namespace alpha_recorder::obs
                 settings.adaptive_quantization =
                     config_get_bool(config, settings_section().data(), settings_hevc_adaptive_quantization_key().data());
             }
+
+            if (config_has_user_value(config, settings_section().data(), settings_hevc_nvenc_split_encode_key().data()))
+            {
+                const char *stored_split_encode =
+                    config_get_string(config, settings_section().data(), settings_hevc_nvenc_split_encode_key().data());
+                HevcNvencSplitEncodeMode parsed_split_encode = settings.nvenc_split_encode;
+                if (stored_split_encode != nullptr &&
+                    try_parse_hevc_nvenc_split_encode(std::string_view{stored_split_encode}, parsed_split_encode))
+                {
+                    settings.nvenc_split_encode = parsed_split_encode;
+                }
+            }
+
+            if (config_has_user_value(config, settings_section().data(), settings_hevc_nvenc_gpu_index_key().data()))
+            {
+                const std::int64_t stored_gpu_index =
+                    config_get_int(config, settings_section().data(), settings_hevc_nvenc_gpu_index_key().data());
+                settings.nvenc_gpu_index = normalize_hevc_nvenc_gpu_index_from_int64(stored_gpu_index);
+            }
+        }
+
+        void sanitize_hevc_nvenc_runtime_settings(struct config_data *config,
+                                                  HevcEncoderSettings &settings) noexcept
+        {
+            bool changed = false;
+            if (settings.nvenc_split_encode != HevcNvencSplitEncodeMode::Auto &&
+                !hevc_nvenc_split_encode_runtime_available(settings.nvenc_split_encode))
+            {
+                settings.nvenc_split_encode = HevcNvencSplitEncodeMode::Auto;
+                persist_hevc_nvenc_split_encode(config, settings.nvenc_split_encode);
+                changed = true;
+            }
+
+            if (changed && config != nullptr)
+            {
+                (void)config_save(config);
+            }
         }
 
     } // namespace
@@ -124,6 +172,11 @@ namespace alpha_recorder::obs
             {
                 persist_normalized_finalization_format(config, settings.finalization_format);
             }
+        }
+
+        if (settings.finalization_format == FinalizationFormat::MaskHevcNvenc)
+        {
+            sanitize_hevc_nvenc_runtime_settings(config, settings.hevc_encoder);
         }
 
         return settings;

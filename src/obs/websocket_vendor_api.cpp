@@ -7,6 +7,7 @@
 
 #include <util/config-file.h>
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -49,6 +50,9 @@ namespace alpha_recorder::obs
             obs_data_set_int(response, settings_hevc_lookahead_key().data(), settings.hevc_encoder.lookahead);
             obs_data_set_bool(response, settings_hevc_adaptive_quantization_key().data(),
                               settings.hevc_encoder.adaptive_quantization);
+            obs_data_set_string(response, settings_hevc_nvenc_split_encode_key().data(),
+                                hevc_nvenc_split_encode_config_value(settings.hevc_encoder.nvenc_split_encode).data());
+            obs_data_set_int(response, settings_hevc_nvenc_gpu_index_key().data(), settings.hevc_encoder.nvenc_gpu_index);
             obs_data_t *formats = obs_data_create();
             for (const FinalizationFormatOption &option : finalization_format_options)
             {
@@ -187,6 +191,42 @@ namespace alpha_recorder::obs
                     obs_data_get_bool(request, settings_hevc_adaptive_quantization_key().data());
             }
 
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_nvenc_split_encode_key().data()))
+            {
+                const char *split_encode_text = obs_data_get_string(request, settings_hevc_nvenc_split_encode_key().data());
+                HevcNvencSplitEncodeMode parsed_split_encode = settings.hevc_encoder.nvenc_split_encode;
+                if (split_encode_text == nullptr ||
+                    !try_parse_hevc_nvenc_split_encode(split_encode_text, parsed_split_encode))
+                {
+                    write_error(response, "Unsupported hevc_nvenc_split_encode.");
+                    return;
+                }
+
+                settings.hevc_encoder.nvenc_split_encode = parsed_split_encode;
+            }
+
+            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_nvenc_gpu_index_key().data()))
+            {
+                const long long requested_gpu_index = obs_data_get_int(request, settings_hevc_nvenc_gpu_index_key().data());
+                std::int32_t normalized_gpu_index = -1;
+                if (!try_normalize_hevc_nvenc_gpu_index(requested_gpu_index, normalized_gpu_index))
+                {
+                    write_error(response, "hevc_nvenc_gpu_index must be -1 or a non-negative 32-bit integer.");
+                    return;
+                }
+                settings.hevc_encoder.nvenc_gpu_index = normalized_gpu_index;
+            }
+
+            if (settings.finalization_format == FinalizationFormat::MaskHevcNvenc)
+            {
+                std::string unavailable_reason;
+                if (!hevc_nvenc_encoder_settings_runtime_available(settings.hevc_encoder, &unavailable_reason))
+                {
+                    write_error(response, std::string{"Unsupported HEVC NVENC settings: "} + unavailable_reason);
+                    return;
+                }
+            }
+
             config_set_bool(config, settings_section().data(), settings_enabled_key().data(), settings.enabled);
             config_set_string(config, settings_section().data(), settings_finalization_format_key().data(),
                               finalization_format_config_value(settings.finalization_format).data());
@@ -202,6 +242,10 @@ namespace alpha_recorder::obs
             config_set_int(config, settings_section().data(), settings_hevc_lookahead_key().data(), settings.hevc_encoder.lookahead);
             config_set_bool(config, settings_section().data(), settings_hevc_adaptive_quantization_key().data(),
                             settings.hevc_encoder.adaptive_quantization);
+            config_set_string(config, settings_section().data(), settings_hevc_nvenc_split_encode_key().data(),
+                              hevc_nvenc_split_encode_config_value(settings.hevc_encoder.nvenc_split_encode).data());
+            config_set_int(config, settings_section().data(), settings_hevc_nvenc_gpu_index_key().data(),
+                           settings.hevc_encoder.nvenc_gpu_index);
 
             if (config_save(config) != CONFIG_SUCCESS)
             {

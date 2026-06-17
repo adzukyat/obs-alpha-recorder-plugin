@@ -105,8 +105,10 @@ Settings include:
   - CQ.
   - Encoder-specific Preset.
   - Tune for NVENC.
-  - Advanced GOP, B-frames, Lookahead, and AQ controls.
-- NVENC exposes P1 through P7 preset values and Tune.
+  - Advanced GOP, B-frames, Lookahead, AQ, NVENC GPU, and NVENC Split Encode
+    controls.
+- NVENC exposes P1 through P7 preset values, Tune, GPU index, and Split Encode
+  mode.
 - AMF exposes Speed, Balanced, and Quality presets without Tune.
 - Quality Profile buttons apply full encoder presets, not CQ-only shortcuts.
 - HEVC profile buttons have complete tuning semantics:
@@ -129,6 +131,17 @@ Persisted OBS user config keys:
 | HEVC B-frames | `AlphaRecorder.hevc_b_frames` |
 | HEVC lookahead | `AlphaRecorder.hevc_lookahead` |
 | HEVC adaptive quantization | `AlphaRecorder.hevc_adaptive_quantization` |
+| HEVC NVENC Split Encode | `AlphaRecorder.hevc_nvenc_split_encode` |
+| HEVC NVENC GPU index | `AlphaRecorder.hevc_nvenc_gpu_index` |
+
+NVENC Split Encode accepts `auto`, `disabled`, `forced`, `2`, and `3`. Non-auto
+Split Encode settings are rejected when the bundled FFmpeg NVENC encoder does
+not expose `split_encode_mode`. Persisted non-auto Split Encode values are reset
+to `auto` during settings load when the current FFmpeg NVENC encoder no longer
+exposes that option. NVENC GPU index uses `-1` for FFmpeg/NVIDIA default device
+selection and `0+` for an explicit NVENC-capable GPU index. When NVENC output is
+selected, save paths probe the selected Split Encode and GPU index against the
+current runtime before persisting them.
 
 Supported finalization formats:
 
@@ -601,7 +614,8 @@ Completed:
 - obs-websocket vendor API for `alpha_recorder.GetSettings` and
   `alpha_recorder.SetSettings`.
 - obs-websocket settings coverage for HEVC quality profile, CQ, preset, NVENC
-  tune, GOP, B-frames, lookahead, and adaptive quantization.
+  tune, GOP, B-frames, lookahead, adaptive quantization, NVENC Split Encode,
+  and NVENC GPU index.
 - CMake-native OBS bootstrap, staging, deterministic E2E, and OBS app E2E
   scripts:
   - `cmake/scripts/BootstrapObs.cmake`

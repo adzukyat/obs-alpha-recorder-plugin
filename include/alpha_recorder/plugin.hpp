@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <string_view>
 
 struct config_data;
@@ -48,6 +49,15 @@ namespace alpha_recorder::obs
         UltraLowLatency,
     };
 
+    enum class HevcNvencSplitEncodeMode
+    {
+        Auto,
+        Disabled,
+        Forced,
+        TwoWay,
+        ThreeWay,
+    };
+
     struct HevcEncoderSettings
     {
         HevcQualityProfile quality_profile = HevcQualityProfile::HighQuality;
@@ -58,6 +68,8 @@ namespace alpha_recorder::obs
         std::uint32_t b_frames = 0;
         std::uint32_t lookahead = 0;
         bool adaptive_quantization = false;
+        HevcNvencSplitEncodeMode nvenc_split_encode = HevcNvencSplitEncodeMode::Auto;
+        std::int32_t nvenc_gpu_index = -1;
     };
 
     struct Settings
@@ -127,6 +139,16 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline constexpr std::string_view settings_hevc_adaptive_quantization_key() noexcept
     {
         return "hevc_adaptive_quantization";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_nvenc_split_encode_key() noexcept
+    {
+        return "hevc_nvenc_split_encode";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view settings_hevc_nvenc_gpu_index_key() noexcept
+    {
+        return "hevc_nvenc_gpu_index";
     }
 
     [[nodiscard]] inline constexpr FinalizationFormat finalization_format_default() noexcept
@@ -419,6 +441,76 @@ namespace alpha_recorder::obs
         return false;
     }
 
+    [[nodiscard]] inline constexpr std::string_view hevc_nvenc_split_encode_config_value(HevcNvencSplitEncodeMode mode) noexcept
+    {
+        switch (mode)
+        {
+        case HevcNvencSplitEncodeMode::Auto:
+            return "auto";
+        case HevcNvencSplitEncodeMode::Disabled:
+            return "disabled";
+        case HevcNvencSplitEncodeMode::Forced:
+            return "forced";
+        case HevcNvencSplitEncodeMode::TwoWay:
+            return "2";
+        case HevcNvencSplitEncodeMode::ThreeWay:
+            return "3";
+        }
+
+        return "auto";
+    }
+
+    [[nodiscard]] inline constexpr std::string_view hevc_nvenc_split_encode_display_name(HevcNvencSplitEncodeMode mode) noexcept
+    {
+        switch (mode)
+        {
+        case HevcNvencSplitEncodeMode::Auto:
+            return "Auto";
+        case HevcNvencSplitEncodeMode::Disabled:
+            return "Disabled";
+        case HevcNvencSplitEncodeMode::Forced:
+            return "Forced";
+        case HevcNvencSplitEncodeMode::TwoWay:
+            return "2 strips";
+        case HevcNvencSplitEncodeMode::ThreeWay:
+            return "3 strips";
+        }
+
+        return "Auto";
+    }
+
+    [[nodiscard]] inline bool try_parse_hevc_nvenc_split_encode(std::string_view value,
+                                                                HevcNvencSplitEncodeMode &mode) noexcept
+    {
+        if (value == "auto" || value == "0")
+        {
+            mode = HevcNvencSplitEncodeMode::Auto;
+            return true;
+        }
+        if (value == "disabled" || value == "disable" || value == "15")
+        {
+            mode = HevcNvencSplitEncodeMode::Disabled;
+            return true;
+        }
+        if (value == "forced" || value == "force" || value == "1")
+        {
+            mode = HevcNvencSplitEncodeMode::Forced;
+            return true;
+        }
+        if (value == "2" || value == "two" || value == "two_way" || value == "2_strips")
+        {
+            mode = HevcNvencSplitEncodeMode::TwoWay;
+            return true;
+        }
+        if (value == "3" || value == "three" || value == "three_way" || value == "3_strips")
+        {
+            mode = HevcNvencSplitEncodeMode::ThreeWay;
+            return true;
+        }
+
+        return false;
+    }
+
     [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_quality_cq(std::uint32_t cq) noexcept
     {
         return cq > 51U ? 51U : cq;
@@ -437,6 +529,30 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_lookahead(std::uint32_t lookahead) noexcept
     {
         return lookahead > 32U ? 32U : lookahead;
+    }
+
+    [[nodiscard]] inline constexpr bool try_normalize_hevc_nvenc_gpu_index(std::int64_t gpu_index,
+                                                                            std::int32_t &normalized) noexcept
+    {
+        if (gpu_index < -1 || gpu_index > static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()))
+        {
+            return false;
+        }
+
+        normalized = static_cast<std::int32_t>(gpu_index);
+        return true;
+    }
+
+    [[nodiscard]] inline constexpr std::int32_t normalize_hevc_nvenc_gpu_index_from_int64(std::int64_t gpu_index) noexcept
+    {
+        std::int32_t normalized = -1;
+        (void)try_normalize_hevc_nvenc_gpu_index(gpu_index, normalized);
+        return normalized;
+    }
+
+    [[nodiscard]] inline constexpr std::int32_t normalize_hevc_nvenc_gpu_index(std::int32_t gpu_index) noexcept
+    {
+        return normalize_hevc_nvenc_gpu_index_from_int64(gpu_index);
     }
 
     [[nodiscard]] inline constexpr std::string_view finalization_format_export_unsupported_reason(FinalizationFormat format) noexcept

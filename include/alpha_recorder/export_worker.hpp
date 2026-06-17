@@ -69,6 +69,10 @@ namespace alpha_recorder::obs
 
     [[nodiscard]] bool finalization_format_runtime_available(FinalizationFormat format,
                                                               std::string *reason = nullptr) noexcept;
+    [[nodiscard]] bool hevc_nvenc_split_encode_runtime_available(HevcNvencSplitEncodeMode mode,
+                                                                 std::string *reason = nullptr) noexcept;
+    [[nodiscard]] bool hevc_nvenc_encoder_settings_runtime_available(const HevcEncoderSettings &settings,
+                                                                     std::string *reason = nullptr) noexcept;
     [[nodiscard]] FinalizationFormat preferred_runtime_finalization_format() noexcept;
 
 } // namespace alpha_recorder::obs
