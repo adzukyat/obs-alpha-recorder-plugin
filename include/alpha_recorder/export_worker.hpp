@@ -33,11 +33,26 @@ namespace alpha_recorder::obs
         std::uint64_t enqueue_time_ns_max = 0;
         std::uint64_t encode_time_ns_total = 0;
         std::uint64_t encode_time_ns_max = 0;
+        std::uint64_t encode_make_writable_time_ns_total = 0;
+        std::uint64_t encode_make_writable_time_ns_max = 0;
+        std::uint64_t encode_copy_time_ns_total = 0;
+        std::uint64_t encode_copy_time_ns_max = 0;
+        std::uint64_t encode_send_time_ns_total = 0;
+        std::uint64_t encode_send_time_ns_max = 0;
+        std::uint64_t encode_receive_time_ns_total = 0;
+        std::uint64_t encode_receive_time_ns_max = 0;
+        std::uint64_t encode_packet_write_time_ns_total = 0;
+        std::uint64_t encode_packet_write_time_ns_max = 0;
+        std::uint64_t emitted_packets = 0;
         std::uint64_t finalize_time_ns = 0;
         std::size_t max_queued_frames = 0;
         std::size_t max_queued_bytes = 0;
         std::size_t queue_frame_limit = 0;
         std::size_t queue_byte_limit = 0;
+        bool nvenc_split_encode_option_available = false;
+        std::int64_t nvenc_split_encode_option_value = 0;
+        bool nvenc_gpu_option_available = false;
+        std::int64_t nvenc_gpu_option_value = 0;
     };
 
     enum class AlphaMaskVideoWriterFrameDisposition

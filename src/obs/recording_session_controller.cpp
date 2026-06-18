@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -271,6 +272,46 @@ technique Draw
         return value ? "true" : "false";
     }
 
+    [[nodiscard]] std::size_t rounded_fps(std::uint32_t fps_num, std::uint32_t fps_den) noexcept
+    {
+        if (fps_num == 0U || fps_den == 0U)
+        {
+            return 60U;
+        }
+
+        return static_cast<std::size_t>((static_cast<std::uint64_t>(fps_num) +
+                                         static_cast<std::uint64_t>(fps_den) - 1U) /
+                                        static_cast<std::uint64_t>(fps_den));
+    }
+
+    [[nodiscard]] std::size_t alignment_alpha_queue_frame_limit(std::uint32_t fps_num,
+                                                                std::uint32_t fps_den) noexcept
+    {
+        return std::clamp(rounded_fps(fps_num, fps_den) * 4U, static_cast<std::size_t>(120U),
+                          static_cast<std::size_t>(240U));
+    }
+
+    [[nodiscard]] std::size_t alignment_output_queue_frame_limit(std::uint32_t fps_num,
+                                                                 std::uint32_t fps_den) noexcept
+    {
+        return std::clamp(rounded_fps(fps_num, fps_den) * 20U, static_cast<std::size_t>(240U),
+                          static_cast<std::size_t>(3600U));
+    }
+
+    [[nodiscard]] std::uint64_t plausible_alignment_delta_ns(std::uint32_t fps_num,
+                                                             std::uint32_t fps_den) noexcept
+    {
+        if (fps_num == 0U)
+        {
+            return 50000000ULL;
+        }
+
+        const std::uint64_t frame_ns =
+            (1000000000ULL * static_cast<std::uint64_t>(fps_den == 0U ? 1U : fps_den)) /
+            static_cast<std::uint64_t>(fps_num);
+        return std::max<std::uint64_t>(frame_ns * 3ULL, 1ULL);
+    }
+
     struct LivePipelineTelemetry
     {
         TimingSummary capture_total{};
@@ -284,6 +325,12 @@ technique Draw
         std::uint64_t raw_video_frames = 0;
         std::uint64_t packet_frames = 0;
         std::uint64_t aligned_frames = 0;
+        std::uint64_t alignment_repeated_frames = 0;
+        std::uint64_t alignment_missing_output_repeats = 0;
+        std::uint64_t alignment_missing_alpha_repeats = 0;
+        std::uint64_t alignment_black_repeats = 0;
+        std::uint64_t alignment_alpha_dropped_frames = 0;
+        std::uint64_t alignment_output_dropped_frames = 0;
         std::size_t max_pending_alpha_frames = 0;
         std::size_t max_pending_output_frames = 0;
         std::size_t max_pending_encoded_frames = 0;
@@ -516,6 +563,12 @@ technique Draw
         std::int64_t pts = 0;
         std::uint64_t cts = 0U;
         bool texture_encoded = false;
+    };
+
+    enum class AlignmentRepeatReason
+    {
+        MissingOutput,
+        MissingAlpha,
     };
 
     class RecordingSessionController
@@ -831,6 +884,10 @@ technique Draw
             config.fps_num = video_info.fps_num;
             config.fps_den = video_info.fps_den;
             config.hevc_encoder = settings_.hevc_encoder;
+            max_pending_alpha_frames_ =
+                alignment_alpha_queue_frame_limit(config.fps_num, config.fps_den);
+            max_pending_output_frames_ =
+                alignment_output_queue_frame_limit(config.fps_num, config.fps_den);
 
             std::string writer_error;
             if (!writer_.open(config, &writer_error))
@@ -910,10 +967,13 @@ technique Draw
                                                                         config.fps_den);
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u b_frames=%u lookahead=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
+                "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} alignment_queue={alpha_limit_frames=%zu output_limit_frames=%zu encoded_reorder_frames=%zu plausible_delta_ns=%llu} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u b_frames=%u lookahead=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
                 mask_path.generic_string().c_str(),
                 std::string{alpha_recorder::obs::finalization_format_config_value(config.finalization_format)}.c_str(),
-                config.width, config.height, config.fps_num, config.fps_den, queue_frame_limit,
+                config.width, config.height, config.fps_num, config.fps_den,
+                max_pending_alpha_frames_, max_pending_output_frames_, kMaxEncoderReorderFrames,
+                static_cast<unsigned long long>(plausible_alignment_delta_ns(config.fps_num, config.fps_den)),
+                queue_frame_limit,
                 format_bytes(static_cast<std::uint64_t>(queue_byte_limit)).c_str(),
                 std::string{alpha_recorder::obs::hevc_quality_profile_config_value(config.hevc_encoder.quality_profile)}.c_str(),
                 config.hevc_encoder.quality_cq,
@@ -937,11 +997,17 @@ technique Draw
             const std::string writer_max_bytes = format_bytes(static_cast<std::uint64_t>(writer_stats.max_queued_bytes));
             const std::string writer_limit_bytes = format_bytes(static_cast<std::uint64_t>(writer_stats.queue_byte_limit));
             const std::string writer_queued_bytes = format_bytes(writer_stats.queued_bytes_total);
+            const auto writer_frame_avg_ms = [encoded_frames = writer_stats.encoded_frames](std::uint64_t ns_total) {
+                return encoded_frames == 0U ? 0.0 : ns_to_ms(ns_total / encoded_frames);
+            };
+            const auto writer_packet_avg_ms = [packets = writer_stats.emitted_packets](std::uint64_t ns_total) {
+                return packets == 0U ? 0.0 : ns_to_ms(ns_total / packets);
+            };
 
-            char buffer[2048];
+            char buffer[4096];
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} queues={alpha_max=%zu output_max=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s writer_limit_frames=%zu writer_limit_bytes=%s writer_overflow_repeats=%llu} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s}",
+                "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} queues={alpha_max=%zu alpha_limit=%zu output_max=%zu output_limit=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s writer_limit_frames=%zu writer_limit_bytes=%s writer_overflow_repeats=%llu} alignment_recovery={repeated=%llu missing_output=%llu missing_alpha=%llu black=%llu alpha_dropped=%llu output_dropped=%llu} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s} encode_breakdown={make_writable_avg_ms=%.3f make_writable_max_ms=%.3f copy_avg_ms=%.3f copy_max_ms=%.3f send_avg_ms=%.3f send_max_ms=%.3f receive_avg_ms=%.3f receive_max_ms=%.3f packet_write_avg_ms=%.3f packet_write_max_ms=%.3f emitted_packets=%llu} nvenc_options={split_available=%s split_value=%lld gpu_available=%s gpu_value=%lld}",
                 mask_path.generic_string().c_str(), capture_total.c_str(),
                 static_cast<unsigned long long>(live_telemetry_.rendered_callbacks),
                 static_cast<unsigned long long>(live_telemetry_.captured_frames), capture_map.c_str(),
@@ -949,17 +1015,39 @@ technique Draw
                 static_cast<unsigned long long>(live_telemetry_.aligned_frames),
                 static_cast<unsigned long long>(live_telemetry_.raw_video_frames),
                 static_cast<unsigned long long>(live_telemetry_.packet_frames),
-                live_telemetry_.max_pending_alpha_frames, live_telemetry_.max_pending_output_frames,
+                live_telemetry_.max_pending_alpha_frames, max_pending_alpha_frames_,
+                live_telemetry_.max_pending_output_frames, max_pending_output_frames_,
                 live_telemetry_.max_pending_encoded_frames, writer_stats.max_queued_frames,
                 writer_max_bytes.c_str(), writer_stats.queue_frame_limit, writer_limit_bytes.c_str(),
                 static_cast<unsigned long long>(writer_stats.overflow_repeated_frames),
+                static_cast<unsigned long long>(live_telemetry_.alignment_repeated_frames),
+                static_cast<unsigned long long>(live_telemetry_.alignment_missing_output_repeats),
+                static_cast<unsigned long long>(live_telemetry_.alignment_missing_alpha_repeats),
+                static_cast<unsigned long long>(live_telemetry_.alignment_black_repeats),
+                static_cast<unsigned long long>(live_telemetry_.alignment_alpha_dropped_frames),
+                static_cast<unsigned long long>(live_telemetry_.alignment_output_dropped_frames),
                 static_cast<unsigned long long>(writer_stats.enqueued_frames),
                 writer_stats.enqueued_frames == 0U ? 0.0 : ns_to_ms(writer_stats.enqueue_time_ns_total / writer_stats.enqueued_frames),
                 ns_to_ms(writer_stats.enqueue_time_ns_max),
                 static_cast<unsigned long long>(writer_stats.encoded_frames),
                 writer_stats.encoded_frames == 0U ? 0.0 : ns_to_ms(writer_stats.encode_time_ns_total / writer_stats.encoded_frames),
                 ns_to_ms(writer_stats.encode_time_ns_max), ns_to_ms(writer_stats.finalize_time_ns),
-                writer_queued_bytes.c_str());
+                writer_queued_bytes.c_str(),
+                writer_frame_avg_ms(writer_stats.encode_make_writable_time_ns_total),
+                ns_to_ms(writer_stats.encode_make_writable_time_ns_max),
+                writer_frame_avg_ms(writer_stats.encode_copy_time_ns_total),
+                ns_to_ms(writer_stats.encode_copy_time_ns_max),
+                writer_frame_avg_ms(writer_stats.encode_send_time_ns_total),
+                ns_to_ms(writer_stats.encode_send_time_ns_max),
+                writer_frame_avg_ms(writer_stats.encode_receive_time_ns_total),
+                ns_to_ms(writer_stats.encode_receive_time_ns_max),
+                writer_packet_avg_ms(writer_stats.encode_packet_write_time_ns_total),
+                ns_to_ms(writer_stats.encode_packet_write_time_ns_max),
+                static_cast<unsigned long long>(writer_stats.emitted_packets),
+                bool_text(writer_stats.nvenc_split_encode_option_available),
+                static_cast<long long>(writer_stats.nvenc_split_encode_option_value),
+                bool_text(writer_stats.nvenc_gpu_option_available),
+                static_cast<long long>(writer_stats.nvenc_gpu_option_value));
             return std::string{buffer};
         }
 
@@ -1020,20 +1108,111 @@ technique Draw
             }
         }
 
+        void trim_pending_alpha_frames_locked() noexcept
+        {
+            while (pending_alpha_frames_.size() > max_pending_alpha_frames_)
+            {
+                pending_alpha_frames_.pop_front();
+                ++live_telemetry_.alignment_alpha_dropped_frames;
+            }
+        }
+
+        void trim_pending_output_frames_locked() noexcept
+        {
+            while (pending_output_frames_.size() > max_pending_output_frames_)
+            {
+                pending_output_frames_.pop_front();
+                ++live_telemetry_.alignment_output_dropped_frames;
+            }
+        }
+
+        void discard_alpha_frames_through_timestamp_locked(std::uint64_t timestamp) noexcept
+        {
+            while (!pending_alpha_frames_.empty() && pending_alpha_frames_.front().timestamp <= timestamp)
+            {
+                pending_alpha_frames_.pop_front();
+                ++live_telemetry_.alignment_alpha_dropped_frames;
+            }
+        }
+
+        bool make_alignment_repeat_frame_locked(alpha_recorder::obs::AlphaFrame &frame) noexcept
+        {
+            if (!last_alpha_frame_.empty())
+            {
+                frame = last_alpha_frame_;
+                return true;
+            }
+
+            if (!last_captured_alpha_frame_.empty())
+            {
+                frame = last_captured_alpha_frame_;
+                return true;
+            }
+
+            if (video_info_.output_width == 0U || video_info_.output_height == 0U)
+            {
+                return false;
+            }
+
+            const std::size_t width = static_cast<std::size_t>(video_info_.output_width);
+            const std::size_t height = static_cast<std::size_t>(video_info_.output_height);
+            if (width > std::numeric_limits<std::size_t>::max() / height)
+            {
+                return false;
+            }
+
+            const std::size_t bytes = width * height;
+            if (!fallback_black_alpha_ || fallback_black_alpha_->size() != bytes)
+            {
+                try
+                {
+                    fallback_black_alpha_ = std::make_shared<std::vector<std::uint8_t>>(bytes, 0U);
+                }
+                catch (...)
+                {
+                    fallback_black_alpha_.reset();
+                    return false;
+                }
+            }
+
+            frame = alpha_recorder::obs::AlphaFrame{0U, fallback_black_alpha_};
+            ++live_telemetry_.alignment_black_repeats;
+            return true;
+        }
+
+        bool repeat_alignment_frame_locked(AlignmentRepeatReason reason,
+                                           alpha_recorder::obs::AlphaFrame &frame,
+                                           std::string &error_message)
+        {
+            if (!make_alignment_repeat_frame_locked(frame))
+            {
+                session_aborted_ = true;
+                error_message = reason == AlignmentRepeatReason::MissingOutput
+                                    ? "Alpha Recorder could not recover alignment because no previous alpha frame is available for a missing output cadence frame."
+                                    : "Alpha Recorder could not recover alignment because no previous alpha frame is available for a missing alpha frame.";
+                return false;
+            }
+
+            ++live_telemetry_.alignment_repeated_frames;
+            if (reason == AlignmentRepeatReason::MissingOutput)
+            {
+                ++live_telemetry_.alignment_missing_output_repeats;
+            }
+            else
+            {
+                ++live_telemetry_.alignment_missing_alpha_repeats;
+            }
+            return true;
+        }
+
         bool remember_pending_alpha_frame_locked(alpha_recorder::obs::AlphaFrame frame, std::string &error_message)
         {
-            constexpr std::size_t kMaxPendingFrames = 240U;
+            (void)error_message;
             pending_alpha_frames_.push_back(std::move(frame));
             ++live_telemetry_.queued_alpha_frames;
             live_telemetry_.max_pending_alpha_frames =
                 std::max(live_telemetry_.max_pending_alpha_frames, pending_alpha_frames_.size());
-            if (pending_alpha_frames_.size() > kMaxPendingFrames)
-            {
-                session_aborted_ = true;
-                clear_pending_alignment_locked();
-                error_message = "Alpha Recorder alpha frame queue overflowed before OBS output cadence could consume it.";
-                return false;
-            }
+            trim_pending_alpha_frames_locked();
 
             notify_alignment_worker_locked();
             return true;
@@ -1085,14 +1264,14 @@ technique Draw
 
             if (output_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::NoPlausibleFrame)
             {
-                session_aborted_ = true;
-                error_message =
-                    std::string{"Alpha Recorder could not find the raw-video cadence frame admitted by the RGB encoder; nearest cadence timestamp delta "} +
-                    std::to_string(output_selection.timestamp_delta) + " ns for packet composition timestamp " +
-                    std::to_string(encoded_frame.cts) +
-                    (encoded_frame.texture_encoded ? " while waiting for the texture-encoder successor cadence frame."
-                                                   : " while waiting for the exact software-encoder cadence frame.");
-                return false;
+                return repeat_alignment_frame_locked(AlignmentRepeatReason::MissingOutput, frame, error_message);
+            }
+
+            if (encoded_frame.texture_encoded &&
+                output_selection.timestamp_delta >
+                    plausible_alignment_delta_ns(video_info_.fps_num, video_info_.fps_den))
+            {
+                return repeat_alignment_frame_locked(AlignmentRepeatReason::MissingOutput, frame, error_message);
             }
 
             const alpha_recorder::obs::OutputFrameCadence output_frame =
@@ -1115,12 +1294,11 @@ technique Draw
 
             if (alpha_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::NoPlausibleFrame)
             {
-                session_aborted_ = true;
-                error_message =
-                    "Alpha Recorder could not find an alpha frame for the admitted RGB content timestamp; nearest alpha timestamp delta " +
-                    std::to_string(alpha_selection.timestamp_delta) + " ns for content timestamp " +
-                    std::to_string(output_frame.content_timestamp) + ".";
-                return false;
+                discard_alpha_frames_through_timestamp_locked(output_frame.content_timestamp);
+                pending_output_frames_.erase(
+                    pending_output_frames_.begin(),
+                    pending_output_frames_.begin() + static_cast<std::ptrdiff_t>(output_selection.selected_index + 1U));
+                return repeat_alignment_frame_locked(AlignmentRepeatReason::MissingAlpha, frame, error_message);
             }
 
             frame = std::move(pending_alpha_frames_[alpha_selection.selected_index]);
@@ -1148,14 +1326,34 @@ technique Draw
                    (drain_all || pending_encoded_alpha_frames_.size() > kMaxEncoderReorderFrames) &&
                    drained_frames < max_frames)
             {
-                if (pending_output_frames_.empty())
-                {
-                    return;
-                }
-
                 auto selected = std::min_element(
                     pending_encoded_alpha_frames_.begin(), pending_encoded_alpha_frames_.end(),
                     [](const EncodedAlphaFrame &left, const EncodedAlphaFrame &right) { return left.pts < right.pts; });
+                if (pending_output_frames_.empty())
+                {
+                    if (!drain_all)
+                    {
+                        return;
+                    }
+
+                    if (!repeat_alignment_frame_locked(AlignmentRepeatReason::MissingOutput, alpha_frame, error_message))
+                    {
+                        clear_pending_alignment_locked();
+                        log_and_show_error(error_message, false);
+                        return;
+                    }
+                    pending_encoded_alpha_frames_.erase(selected);
+                    if (!write_alpha_frame_locked(alpha_frame, error_message))
+                    {
+                        clear_pending_alignment_locked();
+                        log_and_show_error(error_message, false);
+                        return;
+                    }
+                    ++drained_frames;
+                    ++live_telemetry_.aligned_frames;
+                    continue;
+                }
+
                 if (!resolve_output_alpha_frame_locked(*selected, drain_all, alpha_frame, error_message))
                 {
                     if (!error_message.empty())
@@ -1198,18 +1396,12 @@ technique Draw
 
         bool remember_output_frame_locked(alpha_recorder::obs::OutputFrameCadence frame, std::string &error_message)
         {
-            constexpr std::size_t kMaxPendingOutputFrames = 240U;
+            (void)error_message;
             pending_output_frames_.push_back(frame);
             ++live_telemetry_.raw_video_frames;
             live_telemetry_.max_pending_output_frames =
                 std::max(live_telemetry_.max_pending_output_frames, pending_output_frames_.size());
-            if (pending_output_frames_.size() > kMaxPendingOutputFrames)
-            {
-                session_aborted_ = true;
-                clear_pending_alignment_locked();
-                error_message = "Alpha Recorder output cadence queue overflowed before encoded packet order could catch up.";
-                return false;
-            }
+            trim_pending_output_frames_locked();
 
             notify_alignment_worker_locked();
             return true;
@@ -1341,6 +1533,7 @@ technique Draw
                 last_alpha_frame_.timestamp = 0U;
                 last_captured_alpha_frame_.alpha.reset();
                 last_captured_alpha_frame_.timestamp = 0U;
+                fallback_black_alpha_.reset();
                 clear_pending_alignment_locked();
                 raw_video_cadence_.reset();
                 recording_texture_encoded_ = false;
@@ -1409,6 +1602,7 @@ technique Draw
                     last_alpha_frame_.timestamp = 0U;
                     last_captured_alpha_frame_.alpha.reset();
                     last_captured_alpha_frame_.timestamp = 0U;
+                    fallback_black_alpha_.reset();
                     clear_pending_alignment_locked();
                     raw_video_cadence_.reset();
 
@@ -1572,6 +1766,7 @@ technique Draw
         std::uint64_t next_sequence_ = 0;
         alpha_recorder::obs::AlphaFrame last_alpha_frame_{};
         alpha_recorder::obs::AlphaFrame last_captured_alpha_frame_{};
+        std::shared_ptr<std::vector<std::uint8_t>> fallback_black_alpha_{};
         std::deque<alpha_recorder::obs::AlphaFrame> pending_alpha_frames_{};
         std::deque<EncodedAlphaFrame> pending_encoded_alpha_frames_{};
         std::deque<alpha_recorder::obs::OutputFrameCadence> pending_output_frames_{};
@@ -1585,6 +1780,8 @@ technique Draw
         alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::MaskPngMov;
         alpha_recorder::obs::Settings settings_{};
         static constexpr std::size_t kMaxEncoderReorderFrames = 16U;
+        std::size_t max_pending_alpha_frames_ = 240U;
+        std::size_t max_pending_output_frames_ = 240U;
         std::condition_variable alignment_condition_{};
         std::thread alignment_worker_{};
         bool alignment_worker_stop_ = false;

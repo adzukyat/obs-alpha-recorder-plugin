@@ -516,20 +516,32 @@ namespace alpha_recorder::obs
         bool encode_frame(const std::uint8_t *alpha, std::uint32_t stride, std::string *error_message) noexcept
         {
             const auto encode_start = std::chrono::steady_clock::now();
+            std::uint64_t make_writable_ns = 0;
+            std::uint64_t copy_ns = 0;
+            std::uint64_t send_ns = 0;
+            std::uint64_t receive_ns_total = 0;
+            std::uint64_t receive_ns_max = 0;
+            std::uint64_t packet_write_ns_total = 0;
+            std::uint64_t packet_write_ns_max = 0;
+            std::uint64_t emitted_packets = 0;
             if (encoder == nullptr || frame == nullptr)
             {
                 return set_error(error_message, "Alpha Recorder mask video writer is not open.");
             }
 
+            const auto make_writable_start = std::chrono::steady_clock::now();
             if (av_frame_make_writable(frame) < 0)
             {
                 return set_error(error_message, "Alpha Recorder could not make the mask video frame writable.");
             }
+            make_writable_ns = elapsed_ns(make_writable_start, std::chrono::steady_clock::now());
 
+            const auto copy_start = std::chrono::steady_clock::now();
             if (!copy_alpha_to_frame(*frame, alpha, stride, error_message))
             {
                 return false;
             }
+            copy_ns = elapsed_ns(copy_start, std::chrono::steady_clock::now());
 
             if (frame_count > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
             {
@@ -537,7 +549,9 @@ namespace alpha_recorder::obs
             }
 
             frame->pts = static_cast<std::int64_t>(frame_count);
+            const auto send_start = std::chrono::steady_clock::now();
             int ret = avcodec_send_frame(encoder, frame);
+            send_ns = elapsed_ns(send_start, std::chrono::steady_clock::now());
             if (ret < 0)
             {
                 return set_error(error_message, std::string{"Alpha Recorder failed to encode a mask video frame: "} +
@@ -552,7 +566,11 @@ namespace alpha_recorder::obs
 
             while (true)
             {
+                const auto receive_start = std::chrono::steady_clock::now();
                 ret = avcodec_receive_packet(encoder, packet);
+                const std::uint64_t receive_ns = elapsed_ns(receive_start, std::chrono::steady_clock::now());
+                receive_ns_total += receive_ns;
+                receive_ns_max = std::max(receive_ns_max, receive_ns);
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
                 {
                     av_packet_free(&packet);
@@ -562,6 +580,19 @@ namespace alpha_recorder::obs
                     ++stats.encoded_frames;
                     stats.encode_time_ns_total += encode_ns;
                     stats.encode_time_ns_max = std::max(stats.encode_time_ns_max, encode_ns);
+                    stats.encode_make_writable_time_ns_total += make_writable_ns;
+                    stats.encode_make_writable_time_ns_max =
+                        std::max(stats.encode_make_writable_time_ns_max, make_writable_ns);
+                    stats.encode_copy_time_ns_total += copy_ns;
+                    stats.encode_copy_time_ns_max = std::max(stats.encode_copy_time_ns_max, copy_ns);
+                    stats.encode_send_time_ns_total += send_ns;
+                    stats.encode_send_time_ns_max = std::max(stats.encode_send_time_ns_max, send_ns);
+                    stats.encode_receive_time_ns_total += receive_ns_total;
+                    stats.encode_receive_time_ns_max = std::max(stats.encode_receive_time_ns_max, receive_ns_max);
+                    stats.encode_packet_write_time_ns_total += packet_write_ns_total;
+                    stats.encode_packet_write_time_ns_max =
+                        std::max(stats.encode_packet_write_time_ns_max, packet_write_ns_max);
+                    stats.emitted_packets += emitted_packets;
                     return true;
                 }
 
@@ -575,7 +606,12 @@ namespace alpha_recorder::obs
                 packet->stream_index = video_stream->index;
                 packet->pos = -1;
                 av_packet_rescale_ts(packet, encoder->time_base, video_stream->time_base);
+                const auto packet_write_start = std::chrono::steady_clock::now();
                 ret = av_interleaved_write_frame(format, packet);
+                const std::uint64_t packet_write_ns = elapsed_ns(packet_write_start, std::chrono::steady_clock::now());
+                packet_write_ns_total += packet_write_ns;
+                packet_write_ns_max = std::max(packet_write_ns_max, packet_write_ns);
+                ++emitted_packets;
                 av_packet_unref(packet);
                 if (ret < 0)
                 {
@@ -925,6 +961,21 @@ namespace alpha_recorder::obs
                 delete impl;
                 return set_error(error_message, std::string{"Alpha Recorder could not open the mask video encoder: "} +
                                                     av_error_message(ret));
+            }
+
+            if (config.finalization_format == FinalizationFormat::MaskHevcNvenc && impl->encoder->priv_data != nullptr)
+            {
+                std::int64_t option_value = 0;
+                if (av_opt_get_int(impl->encoder->priv_data, "split_encode_mode", 0, &option_value) >= 0)
+                {
+                    impl->stats.nvenc_split_encode_option_available = true;
+                    impl->stats.nvenc_split_encode_option_value = option_value;
+                }
+                if (av_opt_get_int(impl->encoder->priv_data, "gpu", 0, &option_value) >= 0)
+                {
+                    impl->stats.nvenc_gpu_option_available = true;
+                    impl->stats.nvenc_gpu_option_value = option_value;
+                }
             }
 
             impl->video_stream = avformat_new_stream(impl->format, encoder);

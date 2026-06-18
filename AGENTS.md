@@ -29,9 +29,9 @@ own transparency channel.
 - The plugin operates silently when enabled.
 - There is no separate "Start Alpha Recording" button.
 - Capture target is Program output, not Preview.
-- If the mask writer cannot keep up, keep alpha output time-aligned by repeating
-  the previous alpha frame rather than aborting, and do not stop or slow the main
-  OBS recording.
+- If alignment or mask writing cannot keep up, keep alpha output time-aligned by
+  repeating the previous alpha frame rather than aborting, and do not stop or
+  slow the main OBS recording.
 - Alpha output is written beside the OBS recording. For example:
   - `.alpha.mov` for PNG MOV.
   - `.alpha.mp4` for HEVC NVENC/AMF.

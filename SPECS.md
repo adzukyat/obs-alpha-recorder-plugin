@@ -85,9 +85,9 @@ Failure behavior:
 
 - If the alpha session cannot start or finalize, log details and show the user a
   modal error when the failure is user-visible.
-- If the mask writer cannot keep up, keep alpha mask movie generation running by
-  repeating the previous alpha frame for overflowed writer frames, log the repeat
-  count, and do not stop or slow the main OBS recording.
+- If alignment or mask writing cannot keep up, keep alpha mask movie generation
+  running by repeating the previous alpha frame for recoverable gaps, log the
+  repeat/drop counts, and do not stop or slow the main OBS recording.
 - If finalization fails on record stop, log the error and leave any partial mask
   movie as a debugging artifact.
 - The main OBS recording must remain the highest-priority artifact.
@@ -510,10 +510,11 @@ The OBS app E2E target:
 
 The plugin logs one per-segment OBS performance summary covering
 capture/readback CPU time, GPU submission timing, alignment-worker batches,
-writer queue depth, overflow repeat count, and mask encode timing. If diagnostic
-logging is enabled, the same summary plus segment-start encoder settings and
-dynamic writer queue limits are appended to the plugin diagnostic log file. The
-OBS app E2E harness copies OBS performance summaries into
+alignment recovery counts, queue depths, writer overflow repeat count, and
+mask encode timing. If diagnostic logging is enabled, the same summary plus
+segment-start encoder settings, dynamic alignment/writer queue limits, NVENC
+option readback, and encode-stage timing breakdowns are appended to the plugin
+diagnostic log file. The OBS app E2E harness copies OBS performance summaries into
 `alpha-recorder-performance.json`.
 
 If OBS logs `Encoding overloaded!`, severe skipped frames due to encoding lag,
@@ -607,14 +608,16 @@ Completed:
 - Startup duplicate coverage preserving raw content-origin timestamp.
 - Live alpha mask movie creation next to the OBS recording.
 - Bounded asynchronous mask movie encoding with dynamic resolution/FPS-aware
-  writer limits; writer backpressure repeats previous alpha frames instead of
-  aborting alpha output or blocking OBS recording.
+  alignment and writer limits; recoverable alignment gaps and writer
+  backpressure repeat previous alpha frames instead of aborting alpha output or
+  blocking OBS recording.
 - Alignment resolution and mask-writer handoff outside OBS callbacks.
 - Live path queues captured alpha buffers without a second full-frame copy.
 - Texture-encoder path classification cached before packet handling so packet
   callbacks only enqueue packet PTS/CTS evidence.
 - Lightweight per-segment performance telemetry for capture/readback,
-  alignment-worker batches, writer queue depth, and mask encode timing.
+  alignment-worker batches/recovery, queue depths, split-encode option readback,
+  and mask encode-stage timing.
 - Optional diagnostic log file with a settings-dialog reveal button.
 - Alpha mask movie finalization on stop and split rotation.
 - File split handling through OBS `file_changed`.
