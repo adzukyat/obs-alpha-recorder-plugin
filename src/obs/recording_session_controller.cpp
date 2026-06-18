@@ -414,6 +414,34 @@ technique Draw
         return std::max<std::uint64_t>(frame_ns * 3ULL, 1ULL);
     }
 
+    [[nodiscard]] std::uint64_t texture_encoder_alignment_delta_ns(std::uint32_t fps_num,
+                                                                    std::uint32_t fps_den) noexcept
+    {
+        if (fps_num == 0U)
+        {
+            return 133333333ULL;
+        }
+
+        const std::uint64_t frame_ns =
+            (1000000000ULL * static_cast<std::uint64_t>(fps_den == 0U ? 1U : fps_den)) /
+            static_cast<std::uint64_t>(fps_num);
+        return std::max<std::uint64_t>(frame_ns * 8ULL, 1ULL);
+    }
+
+    [[nodiscard]] std::uint64_t texture_successor_delta_ns(std::uint32_t fps_num,
+                                                           std::uint32_t fps_den) noexcept
+    {
+        if (fps_num == 0U)
+        {
+            return 25000000ULL;
+        }
+
+        const std::uint64_t frame_ns =
+            (1000000000ULL * static_cast<std::uint64_t>(fps_den == 0U ? 1U : fps_den)) /
+            static_cast<std::uint64_t>(fps_num);
+        return std::max<std::uint64_t>(frame_ns + frame_ns / 2ULL, 1ULL);
+    }
+
     struct LivePipelineTelemetry
     {
         TimingSummary capture_total{};
@@ -423,6 +451,10 @@ technique Draw
         TimingSummary alignment_batch{};
         SignedDeltaSummary alignment_output_cts_delta{};
         SignedDeltaSummary alignment_alpha_content_delta{};
+        SignedDeltaSummary packet_fer_cts_delta{};
+        SignedDeltaSummary packet_cts_delta{};
+        SignedDeltaSummary packet_fer_delta{};
+        std::uint64_t texture_stall_corrections = 0;
         std::uint64_t rendered_callbacks = 0;
         std::uint64_t captured_frames = 0;
         std::uint64_t queued_alpha_frames = 0;
@@ -432,11 +464,14 @@ technique Draw
         std::uint64_t alignment_repeated_frames = 0;
         std::uint64_t alignment_missing_output_repeats = 0;
         std::uint64_t alignment_missing_alpha_repeats = 0;
+        std::uint64_t alignment_texture_stall_repeats = 0;
         std::uint64_t alignment_black_repeats = 0;
         std::uint64_t alignment_alpha_dropped_frames = 0;
         std::uint64_t alignment_output_dropped_frames = 0;
         std::uint64_t first_packet_cts = 0;
         std::uint64_t last_packet_cts = 0;
+        std::uint64_t last_packet_cts_for_delta = 0;
+        std::uint64_t last_packet_fer_for_delta = 0;
         std::uint64_t first_raw_output_timestamp = 0;
         std::uint64_t last_raw_output_timestamp = 0;
         std::uint64_t first_alpha_timestamp = 0;
@@ -672,13 +707,26 @@ technique Draw
     {
         std::int64_t pts = 0;
         std::uint64_t cts = 0U;
+        std::uint64_t fer = 0U;
+        std::uint64_t ferc = 0U;
         bool texture_encoded = false;
+    };
+
+    struct AlignmentTraceSelection
+    {
+        std::size_t output_index = 0U;
+        std::size_t alpha_index = 0U;
+        std::uint64_t output_delta = 0U;
+        std::uint64_t alpha_delta = 0U;
+        bool alpha_index_valid = false;
+        bool repeated = false;
     };
 
     enum class AlignmentRepeatReason
     {
         MissingOutput,
         MissingAlpha,
+        TextureStall,
     };
 
     class RecordingSessionController
@@ -1048,6 +1096,8 @@ technique Draw
             pending_alpha_frames_.clear();
             pending_encoded_alpha_frames_.clear();
             pending_output_frames_.clear();
+            consecutive_output_duplicate_frames_ = 0U;
+            last_aligned_packet_cts_ = 0U;
         }
 
         void log_performance_summary_locked(const std::filesystem::path &mask_path,
@@ -1108,6 +1158,12 @@ technique Draw
                 format_signed_delta_summary(live_telemetry_.alignment_output_cts_delta);
             const std::string alpha_content_delta =
                 format_signed_delta_summary(live_telemetry_.alignment_alpha_content_delta);
+            const std::string packet_fer_cts_delta =
+                format_signed_delta_summary(live_telemetry_.packet_fer_cts_delta);
+            const std::string packet_cts_delta =
+                format_signed_delta_summary(live_telemetry_.packet_cts_delta);
+            const std::string packet_fer_delta =
+                format_signed_delta_summary(live_telemetry_.packet_fer_delta);
             const std::string writer_max_bytes = format_bytes(static_cast<std::uint64_t>(writer_stats.max_queued_bytes));
             const std::string writer_limit_bytes = format_bytes(static_cast<std::uint64_t>(writer_stats.queue_byte_limit));
             const std::string writer_queued_bytes = format_bytes(writer_stats.queued_bytes_total);
@@ -1118,10 +1174,10 @@ technique Draw
                 return packets == 0U ? 0.0 : ns_to_ms(ns_total / packets);
             };
 
-            char buffer[8192];
+            char buffer[12288];
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} timestamp_spans={packet_cts_ms=%.3f raw_output_ms=%.3f alpha_capture_ms=%.3f first_packet_cts=%llu last_packet_cts=%llu first_raw=%llu last_raw=%llu first_alpha=%llu last_alpha=%llu} alignment_delta={output_minus_packet_cts={%s} alpha_minus_output_content={%s}} queues={alpha_max=%zu alpha_limit=%zu output_max=%zu output_limit=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s writer_limit_frames=%zu writer_limit_bytes=%s writer_overflow_repeats=%llu} alignment_recovery={repeated=%llu missing_output=%llu missing_alpha=%llu black=%llu alpha_dropped=%llu output_dropped=%llu} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s} encode_breakdown={make_writable_avg_ms=%.3f make_writable_max_ms=%.3f copy_avg_ms=%.3f copy_max_ms=%.3f send_avg_ms=%.3f send_max_ms=%.3f receive_avg_ms=%.3f receive_max_ms=%.3f packet_write_avg_ms=%.3f packet_write_max_ms=%.3f emitted_packets=%llu} nvenc_options={split_available=%s split_value=%lld gpu_available=%s gpu_value=%lld}",
+                "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} timestamp_spans={packet_cts_ms=%.3f raw_output_ms=%.3f alpha_capture_ms=%.3f first_packet_cts=%llu last_packet_cts=%llu first_raw=%llu last_raw=%llu first_alpha=%llu last_alpha=%llu} alignment_delta={output_minus_packet_cts={%s} alpha_minus_output_content={%s}} packet_timing={fer_minus_cts={%s} cts_delta={%s} fer_delta={%s} texture_stall_corrections=%llu} queues={alpha_max=%zu alpha_limit=%zu output_max=%zu output_limit=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s writer_limit_frames=%zu writer_limit_bytes=%s writer_overflow_repeats=%llu} alignment_recovery={repeated=%llu missing_output=%llu missing_alpha=%llu texture_stall=%llu black=%llu alpha_dropped=%llu output_dropped=%llu} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s} encode_breakdown={make_writable_avg_ms=%.3f make_writable_max_ms=%.3f copy_avg_ms=%.3f copy_max_ms=%.3f send_avg_ms=%.3f send_max_ms=%.3f receive_avg_ms=%.3f receive_max_ms=%.3f packet_write_avg_ms=%.3f packet_write_max_ms=%.3f emitted_packets=%llu} nvenc_options={split_available=%s split_value=%lld gpu_available=%s gpu_value=%lld}",
                 mask_path.generic_string().c_str(), capture_total.c_str(),
                 static_cast<unsigned long long>(live_telemetry_.rendered_callbacks),
                 static_cast<unsigned long long>(live_telemetry_.captured_frames), capture_map.c_str(),
@@ -1140,6 +1196,8 @@ technique Draw
                 static_cast<unsigned long long>(live_telemetry_.first_alpha_timestamp),
                 static_cast<unsigned long long>(live_telemetry_.last_alpha_timestamp),
                 output_cts_delta.c_str(), alpha_content_delta.c_str(),
+                packet_fer_cts_delta.c_str(), packet_cts_delta.c_str(), packet_fer_delta.c_str(),
+                static_cast<unsigned long long>(live_telemetry_.texture_stall_corrections),
                 live_telemetry_.max_pending_alpha_frames, max_pending_alpha_frames_,
                 live_telemetry_.max_pending_output_frames, max_pending_output_frames_,
                 live_telemetry_.max_pending_encoded_frames, writer_stats.max_queued_frames,
@@ -1148,6 +1206,7 @@ technique Draw
                 static_cast<unsigned long long>(live_telemetry_.alignment_repeated_frames),
                 static_cast<unsigned long long>(live_telemetry_.alignment_missing_output_repeats),
                 static_cast<unsigned long long>(live_telemetry_.alignment_missing_alpha_repeats),
+                static_cast<unsigned long long>(live_telemetry_.alignment_texture_stall_repeats),
                 static_cast<unsigned long long>(live_telemetry_.alignment_black_repeats),
                 static_cast<unsigned long long>(live_telemetry_.alignment_alpha_dropped_frames),
                 static_cast<unsigned long long>(live_telemetry_.alignment_output_dropped_frames),
@@ -1180,6 +1239,45 @@ technique Draw
         {
             return writer_.is_open() && pending_encoded_alpha_frames_.size() > kMaxEncoderReorderFrames &&
                    !pending_output_frames_.empty();
+        }
+
+        void append_alignment_trace_locked(const char *reason,
+                                           const EncodedAlphaFrame &encoded_frame,
+                                           const alpha_recorder::obs::OutputFrameCadence &output_frame,
+                                           const alpha_recorder::obs::AlphaFrame &alpha_frame,
+                                           const AlignmentTraceSelection &selection) const
+        {
+            if (!settings_.diagnostic_logging || live_telemetry_.aligned_frames >= kMaxDiagnosticAlignmentTraceFrames)
+            {
+                return;
+            }
+
+            char buffer[1536];
+            (void)std::snprintf(
+                buffer, sizeof(buffer),
+                "Alpha Recorder alignment trace: seq=%llu reason=%s packet={pts=%lld cts=%llu fer=%llu ferc=%llu texture=%s} output={index=%zu timestamp=%llu content=%llu duplicate=%s delta_ns=%llu} alpha={index=%zu index_valid=%s timestamp=%llu delta_ns=%llu repeated=%s} queues={alpha=%zu output=%zu encoded=%zu duplicate_run=%u}",
+                static_cast<unsigned long long>(live_telemetry_.aligned_frames),
+                reason,
+                static_cast<long long>(encoded_frame.pts),
+                static_cast<unsigned long long>(encoded_frame.cts),
+                static_cast<unsigned long long>(encoded_frame.fer),
+                static_cast<unsigned long long>(encoded_frame.ferc),
+                bool_text(encoded_frame.texture_encoded),
+                selection.output_index,
+                static_cast<unsigned long long>(output_frame.timestamp),
+                static_cast<unsigned long long>(output_frame.content_timestamp),
+                bool_text(output_frame.duplicate_previous),
+                static_cast<unsigned long long>(selection.output_delta),
+                selection.alpha_index,
+                bool_text(selection.alpha_index_valid),
+                static_cast<unsigned long long>(alpha_frame.timestamp),
+                static_cast<unsigned long long>(selection.alpha_delta),
+                bool_text(selection.repeated),
+                pending_alpha_frames_.size(),
+                pending_output_frames_.size(),
+                pending_encoded_alpha_frames_.size(),
+                consecutive_output_duplicate_frames_);
+            alpha_recorder::obs::append_diagnostic_log_line(buffer);
         }
 
         void notify_alignment_worker_locked() noexcept
@@ -1312,9 +1410,21 @@ technique Draw
             if (!make_alignment_repeat_frame_locked(frame))
             {
                 session_aborted_ = true;
-                error_message = reason == AlignmentRepeatReason::MissingOutput
-                                    ? "Alpha Recorder could not recover alignment because no previous alpha frame is available for a missing output cadence frame."
-                                    : "Alpha Recorder could not recover alignment because no previous alpha frame is available for a missing alpha frame.";
+                if (reason == AlignmentRepeatReason::MissingOutput)
+                {
+                    error_message =
+                        "Alpha Recorder could not recover alignment because no previous alpha frame is available for a missing output cadence frame.";
+                }
+                else if (reason == AlignmentRepeatReason::TextureStall)
+                {
+                    error_message =
+                        "Alpha Recorder could not recover alignment because no previous alpha frame is available for texture-encoder stall recovery.";
+                }
+                else
+                {
+                    error_message =
+                        "Alpha Recorder could not recover alignment because no previous alpha frame is available for a missing alpha frame.";
+                }
                 return false;
             }
 
@@ -1323,9 +1433,13 @@ technique Draw
             {
                 ++live_telemetry_.alignment_missing_output_repeats;
             }
-            else
+            else if (reason == AlignmentRepeatReason::MissingAlpha)
             {
                 ++live_telemetry_.alignment_missing_alpha_repeats;
+            }
+            else
+            {
+                ++live_telemetry_.alignment_texture_stall_repeats;
             }
             return true;
         }
@@ -1391,13 +1505,15 @@ technique Draw
 
             if (output_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::NoPlausibleFrame)
             {
+                consecutive_output_duplicate_frames_ = 0U;
                 return repeat_alignment_frame_locked(AlignmentRepeatReason::MissingOutput, frame, error_message);
             }
 
             if (encoded_frame.texture_encoded &&
                 output_selection.timestamp_delta >
-                    plausible_alignment_delta_ns(video_info_.fps_num, video_info_.fps_den))
+                    texture_encoder_alignment_delta_ns(video_info_.fps_num, video_info_.fps_den))
             {
+                consecutive_output_duplicate_frames_ = 0U;
                 return repeat_alignment_frame_locked(AlignmentRepeatReason::MissingOutput, frame, error_message);
             }
 
@@ -1410,12 +1526,54 @@ technique Draw
             {
                 live_telemetry_.alignment_alpha_content_delta.add(
                     signed_timestamp_delta_ns(frame.timestamp, output_frame.content_timestamp));
+                append_alignment_trace_locked(
+                    "output_duplicate", encoded_frame, output_frame, frame,
+                    AlignmentTraceSelection{output_selection.selected_index, 0U, output_selection.timestamp_delta,
+                                            alpha_recorder::obs::timestamp_delta(frame.timestamp,
+                                                                                output_frame.content_timestamp),
+                                            false, true});
+                ++consecutive_output_duplicate_frames_;
                 pending_output_frames_.erase(
                     pending_output_frames_.begin(),
                     pending_output_frames_.begin() + static_cast<std::ptrdiff_t>(output_selection.selected_index + 1U));
                 return true;
             }
 
+            const std::uint64_t texture_successor_delta =
+                texture_successor_delta_ns(video_info_.fps_num, video_info_.fps_den);
+            const bool cts_advances_like_successor =
+                last_aligned_packet_cts_ != 0U && encoded_frame.cts > last_aligned_packet_cts_ &&
+                encoded_frame.cts - last_aligned_packet_cts_ <= texture_successor_delta;
+            const bool recover_texture_stall =
+                encoded_frame.texture_encoded && cts_advances_like_successor &&
+                ((consecutive_output_duplicate_frames_ >= 1U &&
+                  output_selection.timestamp_delta <= texture_successor_delta) ||
+                 (consecutive_output_duplicate_frames_ >= 2U &&
+                  output_selection.timestamp_delta <= plausible_alignment_delta_ns(video_info_.fps_num, video_info_.fps_den)));
+            if (recover_texture_stall)
+            {
+                ++live_telemetry_.texture_stall_corrections;
+                if (!repeat_alignment_frame_locked(AlignmentRepeatReason::TextureStall, frame, error_message))
+                {
+                    return false;
+                }
+                live_telemetry_.alignment_alpha_content_delta.add(
+                    signed_timestamp_delta_ns(frame.timestamp, output_frame.content_timestamp));
+                append_alignment_trace_locked(
+                    "texture_stall", encoded_frame, output_frame, frame,
+                    AlignmentTraceSelection{output_selection.selected_index, 0U, output_selection.timestamp_delta,
+                                            alpha_recorder::obs::timestamp_delta(frame.timestamp,
+                                                                                output_frame.content_timestamp),
+                                            false, true});
+                consecutive_output_duplicate_frames_ = 0U;
+                discard_alpha_frames_through_timestamp_locked(output_frame.content_timestamp);
+                pending_output_frames_.erase(
+                    pending_output_frames_.begin(),
+                    pending_output_frames_.begin() + static_cast<std::ptrdiff_t>(output_selection.selected_index + 1U));
+                return true;
+            }
+
+            consecutive_output_duplicate_frames_ = 0U;
             const alpha_recorder::obs::TimestampFrameSelection alpha_selection =
                 alpha_recorder::obs::select_frame_by_timestamp(pending_alpha_frames_, output_frame.content_timestamp, drain_all);
             if (alpha_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::WaitingForMoreFrames)
@@ -1425,16 +1583,32 @@ technique Draw
 
             if (alpha_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::NoPlausibleFrame)
             {
+                consecutive_output_duplicate_frames_ = 0U;
                 discard_alpha_frames_through_timestamp_locked(output_frame.content_timestamp);
                 pending_output_frames_.erase(
                     pending_output_frames_.begin(),
                     pending_output_frames_.begin() + static_cast<std::ptrdiff_t>(output_selection.selected_index + 1U));
-                return repeat_alignment_frame_locked(AlignmentRepeatReason::MissingAlpha, frame, error_message);
+                if (!repeat_alignment_frame_locked(AlignmentRepeatReason::MissingAlpha, frame, error_message))
+                {
+                    return false;
+                }
+                append_alignment_trace_locked(
+                    "missing_alpha", encoded_frame, output_frame, frame,
+                    AlignmentTraceSelection{output_selection.selected_index, 0U, output_selection.timestamp_delta,
+                                            alpha_recorder::obs::timestamp_delta(frame.timestamp,
+                                                                                output_frame.content_timestamp),
+                                            false, true});
+                return true;
             }
 
             frame = std::move(pending_alpha_frames_[alpha_selection.selected_index]);
             live_telemetry_.alignment_alpha_content_delta.add(
                 signed_timestamp_delta_ns(frame.timestamp, output_frame.content_timestamp));
+            append_alignment_trace_locked(
+                "selected", encoded_frame, output_frame, frame,
+                AlignmentTraceSelection{output_selection.selected_index, alpha_selection.selected_index,
+                                        output_selection.timestamp_delta, alpha_selection.timestamp_delta,
+                                        true, false});
             pending_alpha_frames_.erase(
                 pending_alpha_frames_.begin(),
                 pending_alpha_frames_.begin() + static_cast<std::ptrdiff_t>(alpha_selection.selected_index + 1U));
@@ -1487,6 +1661,7 @@ technique Draw
                     continue;
                 }
 
+                const std::uint64_t aligned_packet_cts = selected->cts;
                 if (!resolve_output_alpha_frame_locked(*selected, drain_all, alpha_frame, error_message))
                 {
                     if (!error_message.empty())
@@ -1497,6 +1672,7 @@ technique Draw
                     return;
                 }
 
+                last_aligned_packet_cts_ = aligned_packet_cts;
                 pending_encoded_alpha_frames_.erase(selected);
 
                 if (!write_alpha_frame_locked(alpha_frame, error_message))
@@ -1514,12 +1690,37 @@ technique Draw
             }
         }
 
-        void queue_alpha_for_packet_locked(std::int64_t pts, std::uint64_t cts, bool texture_encoded)
+        void queue_alpha_for_packet_locked(std::int64_t pts,
+                                           std::uint64_t cts,
+                                           std::uint64_t fer,
+                                           std::uint64_t ferc,
+                                           bool texture_encoded)
         {
             remember_timestamp_span(cts, live_telemetry_.first_packet_cts, live_telemetry_.last_packet_cts);
+            if (fer != 0U)
+            {
+                live_telemetry_.packet_fer_cts_delta.add(signed_timestamp_delta_ns(fer, cts));
+            }
+            if (live_telemetry_.last_packet_cts_for_delta != 0U)
+            {
+                live_telemetry_.packet_cts_delta.add(
+                    signed_timestamp_delta_ns(cts, live_telemetry_.last_packet_cts_for_delta));
+            }
+            if (fer != 0U && live_telemetry_.last_packet_fer_for_delta != 0U)
+            {
+                live_telemetry_.packet_fer_delta.add(
+                    signed_timestamp_delta_ns(fer, live_telemetry_.last_packet_fer_for_delta));
+            }
+            live_telemetry_.last_packet_cts_for_delta = cts;
+            if (fer != 0U)
+            {
+                live_telemetry_.last_packet_fer_for_delta = fer;
+            }
             EncodedAlphaFrame encoded_frame{};
             encoded_frame.pts = pts;
             encoded_frame.cts = cts;
+            encoded_frame.fer = fer;
+            encoded_frame.ferc = ferc;
             encoded_frame.texture_encoded = texture_encoded;
             pending_encoded_alpha_frames_.push_back(std::move(encoded_frame));
             ++live_telemetry_.packet_frames;
@@ -1880,7 +2081,8 @@ technique Draw
                 }
                 else
                 {
-                    queue_alpha_for_packet_locked(packet->pts, packet_time->cts, recording_texture_encoded_);
+                    queue_alpha_for_packet_locked(packet->pts, packet_time->cts, packet_time->fer,
+                                                  packet_time->ferc, recording_texture_encoded_);
                 }
             }
 
@@ -1900,6 +2102,8 @@ technique Draw
         bool recording_paused_ = false;
         bool recording_texture_encoded_ = false;
         std::uint64_t next_sequence_ = 0;
+        std::uint32_t consecutive_output_duplicate_frames_ = 0U;
+        std::uint64_t last_aligned_packet_cts_ = 0U;
         alpha_recorder::obs::AlphaFrame last_alpha_frame_{};
         alpha_recorder::obs::AlphaFrame last_captured_alpha_frame_{};
         std::shared_ptr<std::vector<std::uint8_t>> fallback_black_alpha_{};
@@ -1916,6 +2120,7 @@ technique Draw
         alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::MaskPngMov;
         alpha_recorder::obs::Settings settings_{};
         static constexpr std::size_t kMaxEncoderReorderFrames = 16U;
+        static constexpr std::uint64_t kMaxDiagnosticAlignmentTraceFrames = 720U;
         std::size_t max_pending_alpha_frames_ = 240U;
         std::size_t max_pending_output_frames_ = 240U;
         std::condition_variable alignment_condition_{};

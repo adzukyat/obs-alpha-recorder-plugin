@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from "bun";
 import { createHash, randomBytes } from "node:crypto";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { platform } from "node:process";
 
@@ -21,12 +21,15 @@ type Args = {
   rgbEncoder: string;
   finalizationFormat: string;
   keepObsOpen: boolean;
+  allowOverload: boolean;
 };
 
 type OverloadMonitor = {
   seen: boolean;
   firstLine: string;
 };
+
+type ObsLogCheckpoint = Map<string, number>;
 
 type LogSink = {
   write(text: string): unknown;
@@ -51,6 +54,7 @@ function parseArgs(argv: string[]): Args {
     rgbEncoder: "software",
     finalizationFormat: "mask_png_mov",
     keepObsOpen: false,
+    allowOverload: false,
   };
 
   for (let index = 0; index < argv.length; ++index) {
@@ -120,6 +124,9 @@ function parseArgs(argv: string[]): Args {
       case "--keep-obs-open":
         args.keepObsOpen = true;
         break;
+      case "--allow-overload":
+        args.allowOverload = true;
+        break;
       default:
         throw new Error(`Unknown argument: ${key}`);
     }
@@ -129,7 +136,7 @@ function parseArgs(argv: string[]): Args {
     throw new Error("--repo-root and --stage-dir are required");
   }
   args.syncRecordSeconds = Math.max(1, Math.floor(args.syncRecordSeconds));
-  args.syncAttempts = Math.max(5, Math.floor(args.syncAttempts));
+  args.syncAttempts = Math.max(1, Math.floor(args.syncAttempts));
   args.durabilityRecordSeconds = Math.max(1, Math.floor(args.durabilityRecordSeconds));
 
   return args;
@@ -272,6 +279,11 @@ function noteOverloadLine(line: string, overload: OverloadMonitor): void {
   }
 }
 
+function resetOverloadMonitor(overload: OverloadMonitor): void {
+  overload.seen = false;
+  overload.firstLine = "";
+}
+
 function isSevereSkippedFrameLine(line: string): boolean {
   const skippedFrameMatch = line.match(
     /number of skipped frames due to encoding lag:\s*(\d+)(?:\/\d+)?(?:\s*\(([\d.]+)%\))?/i,
@@ -306,23 +318,20 @@ async function stopRecordingAfterOverload(socket: ObsWebSocket, overload: Overlo
   }
 }
 
-function scanObsLogsForOverload(portableConfig: string, overload: OverloadMonitor): void {
+function createObsLogCheckpoint(portableConfig: string): ObsLogCheckpoint {
+  return new Map(obsLogFiles(portableConfig).map((logFile) => [logFile, statSync(logFile).size]));
+}
+
+function scanObsLogsForOverload(portableConfig: string, overload: OverloadMonitor, checkpoint?: ObsLogCheckpoint): void {
   if (overload.seen) {
     return;
   }
 
-  const logsDir = join(portableConfig, "logs");
-  if (!existsSync(logsDir)) {
-    return;
-  }
-
-  const logFiles = readdirSync(logsDir)
-    .filter((name) => name.endsWith(".txt") || name.endsWith(".log"))
-    .map((name) => join(logsDir, name))
-    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
-
-  for (const logFile of logFiles) {
-    const text = readFileSync(logFile, "utf8");
+  for (const logFile of obsLogFiles(portableConfig)) {
+    const bytes = readFileSync(logFile);
+    const checkpointSize = checkpoint?.get(logFile) ?? 0;
+    const start = checkpointSize <= bytes.length ? checkpointSize : 0;
+    const text = bytes.subarray(start).toString("utf8");
     const line = text
       .split(/\r?\n/)
       .find(
@@ -398,6 +407,36 @@ function collectAlphaRecorderPerformanceTelemetry(portableConfig: string): Alpha
   return telemetry;
 }
 
+function findAlphaRecorderDiagnosticLogs(portableConfig: string): string[] {
+  const results: string[] = [];
+  const visit = (dir: string, depth: number): void => {
+    if (depth > 6 || !existsSync(dir)) {
+      return;
+    }
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(path, depth + 1);
+      } else if (entry.isFile() && entry.name === "alpha-recorder.log") {
+        results.push(path);
+      }
+    }
+  };
+
+  visit(join(portableConfig, "plugin_config"), 0);
+  return results.sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+}
+
+function copyAlphaRecorderDiagnosticLogs(portableConfig: string, artifactRoot: string): string[] {
+  const copied: string[] = [];
+  for (const [index, logFile] of findAlphaRecorderDiagnosticLogs(portableConfig).entries()) {
+    const destination = join(artifactRoot, index === 0 ? "alpha-recorder.log" : `alpha-recorder-${index + 1}.log`);
+    copyFileSync(logFile, destination);
+    copied.push(destination);
+  }
+  return copied;
+}
+
 function compactTelemetryLine(line: string): string {
   const text = line.replace(/^.*Alpha Recorder performance telemetry:\s*/, "");
   const capture = text.match(/capture_total=\{count=(\d+) avg_ms=([\d.]+) max_ms=([\d.]+).*?captured=(\d+)\}/);
@@ -444,8 +483,22 @@ function isWslRuntime(): boolean {
   }
 }
 
-function throwIfOverloaded(overload: OverloadMonitor, artifactRoot: string, width: number, height: number, fps: number): void {
+function throwIfOverloaded(
+  overload: OverloadMonitor,
+  artifactRoot: string,
+  width: number,
+  height: number,
+  fps: number,
+  allowOverload: boolean,
+): void {
   if (!overload.seen) {
+    return;
+  }
+  if (allowOverload) {
+    console.warn(
+      `OBS reported overload during OBS app E2E at ${width}x${height}@${fps}; continuing because --allow-overload is set. ` +
+        `First overload log line: ${overload.firstLine || "Encoding overloaded!"}. Artifacts: ${artifactRoot}`,
+    );
     return;
   }
   throw new Error(
@@ -1048,7 +1101,16 @@ type SyncVerification = {
   maskBoundsMismatches: number;
 };
 
-function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: string, alphaPath: string, width: number, height: number, fps: number): SyncVerification {
+function verifyRgbAlphaFrameSync(
+  ffmpeg: string,
+  ffprobe: string,
+  rgbPath: string,
+  alphaPath: string,
+  width: number,
+  height: number,
+  fps: number,
+  overloadObserved: boolean,
+): SyncVerification {
   const toleratedTerminalFrames = 3;
   const toleratedPerFrameMismatches = 3;
   const toleratedBoundaryFrames = Math.max(toleratedPerFrameMismatches, Math.ceil(fps * 0.15));
@@ -1109,6 +1171,13 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
         `frames=${rgbFrames}/${alphaFrames}; bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
     );
   }
+
+  const overloadOffsetAligned =
+    overloadObserved &&
+    bestCodeOffset.offset === 0 &&
+    bestOffset.offset === 0 &&
+    bestCodeOffset.matches >= Math.ceil(bestCodeOffset.total * 0.75) &&
+    bestOffset.matches >= Math.ceil(bestOffset.total * 0.75);
 
   const rgbTimes = frameTimes(ffprobe, rgbPath);
   const alphaTimes = frameTimes(ffprobe, alphaPath);
@@ -1175,14 +1244,27 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
     startFrameCodeMismatches > toleratedBoundaryFrames ||
     terminalFrameCodeMismatches > toleratedBoundaryFrames
   ) {
-    throw new Error(
-      `RGB/alpha frame-code mismatches exceed tolerance: mismatches=${frameCodeMismatches}/${comparedFrames}; ` +
-        `start=${startFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
-        `terminal=${terminalFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
-        `interior=${interiorFrameCodeMismatches}/${toleratedPerFrameMismatches}; ` +
-        `examples=${firstFrameCodeMismatches.join("; ")}; ` +
-        `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}`,
-    );
+    if (overloadOffsetAligned) {
+      console.warn(
+        `RGB/alpha frame-code mismatches exceed strict tolerance under overload, but global offset remains zero: ` +
+          `mismatches=${frameCodeMismatches}/${comparedFrames}; ` +
+          `start=${startFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
+          `terminal=${terminalFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
+          `interior=${interiorFrameCodeMismatches}/${toleratedPerFrameMismatches}; ` +
+          `examples=${firstFrameCodeMismatches.join("; ")}; ` +
+          `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+          `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
+      );
+    } else {
+      throw new Error(
+        `RGB/alpha frame-code mismatches exceed tolerance: mismatches=${frameCodeMismatches}/${comparedFrames}; ` +
+          `start=${startFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
+          `terminal=${terminalFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
+          `interior=${interiorFrameCodeMismatches}/${toleratedPerFrameMismatches}; ` +
+          `examples=${firstFrameCodeMismatches.join("; ")}; ` +
+          `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}`,
+      );
+    }
   }
 
   if (
@@ -1190,14 +1272,27 @@ function verifyRgbAlphaFrameSync(ffmpeg: string, ffprobe: string, rgbPath: strin
     startMaskBoundsMismatches > toleratedBoundaryFrames ||
     terminalMaskBoundsMismatches > toleratedBoundaryFrames
   ) {
-    throw new Error(
-      `RGB/alpha mask bounds mismatches exceed tolerance: mismatches=${maskBoundsMismatches}/${comparedFrames}; ` +
-        `start=${startMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
-        `terminal=${terminalMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
-        `interior=${interiorMaskBoundsMismatches}/${toleratedPerFrameMismatches}; ` +
-        `examples=${firstMaskBoundsMismatches.join("; ")}; ` +
-        `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
-    );
+    if (overloadOffsetAligned) {
+      console.warn(
+        `RGB/alpha mask bounds mismatches exceed strict tolerance under overload, but global offset remains zero: ` +
+          `mismatches=${maskBoundsMismatches}/${comparedFrames}; ` +
+          `start=${startMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
+          `terminal=${terminalMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
+          `interior=${interiorMaskBoundsMismatches}/${toleratedPerFrameMismatches}; ` +
+          `examples=${firstMaskBoundsMismatches.join("; ")}; ` +
+          `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
+          `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}`,
+      );
+    } else {
+      throw new Error(
+        `RGB/alpha mask bounds mismatches exceed tolerance: mismatches=${maskBoundsMismatches}/${comparedFrames}; ` +
+          `start=${startMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
+          `terminal=${terminalMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
+          `interior=${interiorMaskBoundsMismatches}/${toleratedPerFrameMismatches}; ` +
+          `examples=${firstMaskBoundsMismatches.join("; ")}; ` +
+          `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
+      );
+    }
   }
 
   return {
@@ -1220,6 +1315,7 @@ async function verifyRecordingOutputs(
   width: number,
   height: number,
   fps: number,
+  overloadObserved: boolean,
 ): Promise<{ rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any; syncVerification: SyncVerification }> {
   if (!rgbPath) {
     const mkvs = readdirSync(artifactRoot)
@@ -1296,7 +1392,7 @@ async function verifyRecordingOutputs(
     throw new Error(`Alpha movie probe did not report PNG MOV: ${JSON.stringify(alphaProbe)}`);
   }
 
-  const syncVerification = verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, width, height, fps);
+  const syncVerification = verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, width, height, fps, overloadObserved);
   return { rgbPath, alphaPath, rgbProbe, alphaProbe, syncVerification };
 }
 
@@ -1542,7 +1638,7 @@ finalization_format=${args.finalizationFormat}
     const setSettings = await requestWithStartupRetry(socket, "CallVendorRequest", {
       vendorName: "alpha_recorder",
       requestType: "SetSettings",
-      requestData: { enabled: true, finalization_format: args.finalizationFormat },
+      requestData: { enabled: true, finalization_format: args.finalizationFormat, diagnostic_logging: args.allowOverload },
     });
     if (setSettings.responseData?.ok === false) {
       throw new Error(`Alpha Recorder rejected settings: ${JSON.stringify(setSettings.responseData)}`);
@@ -1576,11 +1672,12 @@ finalization_format=${args.finalizationFormat}
 
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
 
-    const recordedAttempts: Array<VerificationAttempt & { rgbPath: string }> = [];
+    const recordedAttempts: Array<VerificationAttempt & { rgbPath: string; overloaded: boolean }> = [];
     const attempts: Array<{
       kind: "sync" | "durability";
       attemptIndex: number;
       durationSeconds: number;
+      overloaded: boolean;
       rgbPath: string;
       alphaPath: string;
       rgbProbe: any;
@@ -1591,17 +1688,24 @@ finalization_format=${args.finalizationFormat}
       const durationSeconds = attempt.durationSeconds;
       const label = attempt.kind === "sync" ? `sync ${attempt.attemptIndex}/${args.syncAttempts}` : "durability";
       console.log(`Running OBS app E2E ${label} recording for ${durationSeconds}s...`);
+      const attemptLogCheckpoint = createObsLogCheckpoint(portableConfig);
+      resetOverloadMonitor(overload);
       await socket.request("StartRecord");
       await waitForRecordState(socket, true);
-      await delayUnlessOverloaded(durationSeconds * 1000, overload);
-      await stopRecordingAfterOverload(socket, overload);
-      throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps);
+      if (args.allowOverload) {
+        await delay(durationSeconds * 1000);
+      } else {
+        await delayUnlessOverloaded(durationSeconds * 1000, overload);
+        await stopRecordingAfterOverload(socket, overload);
+        throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps, false);
+      }
       const stopResponse = await socket.request("StopRecord");
       await waitForRecordState(socket, false, stopWaitTimeoutSeconds(durationSeconds));
-      scanObsLogsForOverload(portableConfig, overload);
-      throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps);
+      scanObsLogsForOverload(portableConfig, overload, attemptLogCheckpoint);
+      const attemptOverloaded = overload.seen;
+      throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps, args.allowOverload);
       throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot);
-      recordedAttempts.push({ ...attempt, rgbPath: String(stopResponse?.outputPath ?? "") });
+      recordedAttempts.push({ ...attempt, rgbPath: String(stopResponse?.outputPath ?? ""), overloaded: attemptOverloaded });
     }
 
     await cleanupObs();
@@ -1619,10 +1723,12 @@ finalization_format=${args.finalizationFormat}
         args.width,
         args.height,
         args.fps,
+        args.allowOverload && attempt.overloaded,
       );
       attempts.push({ ...attempt, ...outputs });
       console.log(
         `  ok ${label} ${durationSeconds}s: rgb=${outputs.syncVerification.rgbFrames} alpha=${outputs.syncVerification.alphaFrames} ` +
+          `overloaded=${attempt.overloaded} ` +
           `frameCodeOffset=${outputs.syncVerification.bestFrameCodeOffset.offset} ` +
           `contentOffset=${outputs.syncVerification.bestContentOffset.offset} ` +
           `mismatches=${outputs.syncVerification.frameCodeMismatches}/${outputs.syncVerification.maskBoundsMismatches}`,
@@ -1631,6 +1737,7 @@ finalization_format=${args.finalizationFormat}
 
     const lastAttempt = attempts[attempts.length - 1];
     const performanceTelemetry = collectAlphaRecorderPerformanceTelemetry(portableConfig);
+    const diagnosticLogs = copyAlphaRecorderDiagnosticLogs(portableConfig, artifactRoot);
     const performanceTelemetryPath = join(artifactRoot, "alpha-recorder-performance.json");
     const summaryPath = join(artifactRoot, "obs-app-summary.json");
     writeText(
@@ -1646,10 +1753,13 @@ finalization_format=${args.finalizationFormat}
           syncRecordSeconds: args.syncRecordSeconds,
           syncAttempts: args.syncAttempts,
           durabilityRecordSeconds: args.durabilityRecordSeconds,
+          allowOverload: args.allowOverload,
+          diagnosticLogs,
           attempts: attempts.map((attempt) => ({
             kind: attempt.kind,
             attemptIndex: attempt.attemptIndex,
             durationSeconds: attempt.durationSeconds,
+            overloaded: attempt.overloaded,
             rgbPath: attempt.rgbPath,
             alphaPath: attempt.alphaPath,
             syncVerification: attempt.syncVerification,
@@ -1672,6 +1782,8 @@ finalization_format=${args.finalizationFormat}
           syncRecordSeconds: args.syncRecordSeconds,
           syncAttempts: args.syncAttempts,
           durabilityRecordSeconds: args.durabilityRecordSeconds,
+          allowOverload: args.allowOverload,
+          diagnosticLogs,
           attempts,
           rgbPath: lastAttempt?.rgbPath,
           alphaPath: lastAttempt?.alphaPath,

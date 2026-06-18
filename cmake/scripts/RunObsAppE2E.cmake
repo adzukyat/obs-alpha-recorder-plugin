@@ -20,6 +20,7 @@ set(FINALIZATION_FORMAT "mask_png_mov" CACHE STRING "Alpha Recorder finalization
 set(SKIP_BUILD OFF CACHE BOOL "Skip plugin build before OBS app E2E")
 set(SKIP_STAGE OFF CACHE BOOL "Skip staging before OBS app E2E")
 set(KEEP_OBS_OPEN OFF CACHE BOOL "Keep OBS open after the E2E run")
+set(ALLOW_OVERLOAD OFF CACHE BOOL "Continue OBS app E2E after OBS reports overload")
 
 alpha_recorder_abs_path(REPO_ROOT "${REPO_ROOT}" "${CMAKE_CURRENT_LIST_DIR}")
 alpha_recorder_abs_path(BUILD_DIR "${BUILD_DIR}" "${REPO_ROOT}")
@@ -97,6 +98,9 @@ set(args
 )
 if(KEEP_OBS_OPEN)
     list(APPEND args "--keep-obs-open")
+endif()
+if(ALLOW_OVERLOAD)
+    list(APPEND args "--allow-overload")
 endif()
 
 if(APPLE)
