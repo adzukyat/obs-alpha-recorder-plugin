@@ -28,8 +28,9 @@ E2E path that can run without desktop automation.
 - There is no separate "Start Alpha Recording" button.
 - Capture target is Program output, not Preview.
 - Missing settings default to Enabled ON.
-- When no finalization format has been saved, the plugin prefers an available
-  hardware HEVC encoder before falling back to PNG MOV.
+- When no finalization format has been saved, the plugin uses the safe PNG MOV
+  fallback. Hardware HEVC formats are preserved when explicitly selected and are
+  exposed only when the matching runtime backend is available.
 - Scenario files are retained only for synthetic/non-UI E2E paths.
 - External capture apps are not part of the product path.
 - The shipping OBS runtime writes the playable alpha mask movie directly.
@@ -79,7 +80,8 @@ The plugin follows OBS's recording path and naming rules. If OBS records
 `C:\Recordings\MyRec.mkv`, Alpha Recorder writes:
 
 - `C:\Recordings\MyRec.alpha.mov` for PNG MOV.
-- `C:\Recordings\MyRec.alpha.mp4` for HEVC NVENC or HEVC AMF.
+- `C:\Recordings\MyRec.alpha.mp4` for HEVC NVENC, HEVC AMF, HEVC QSV, or HEVC
+  VAAPI.
 
 Failure behavior:
 
@@ -101,7 +103,7 @@ Settings include:
 - Installed version status. The dialog checks GitHub asynchronously for the
   latest published release and verified signed `v*` tags, then links to GitHub
   Releases when the installed version is older.
-- HEVC encoder controls when NVENC/AMF mask output is selected:
+- HEVC encoder controls when HEVC mask output is selected:
   - Quality Profile.
   - CQ.
   - Encoder-specific Preset.
@@ -111,6 +113,10 @@ Settings include:
 - NVENC exposes P1 through P7 preset values, Tune, GPU index, and Split Encode
   mode.
 - AMF exposes Speed, Balanced, and Quality presets without Tune.
+- QSV exposes TU7 through TU1 preset values without NVENC Tune, GPU index, or
+  Split Encode controls.
+- VAAPI exposes a conservative default preset and common CQ/GOP/B-frame
+  controls only.
 - Quality Profile buttons apply full encoder presets, not CQ-only shortcuts.
 - HEVC profile buttons have complete tuning semantics:
   - Lossless disables the lossy tuning path.
@@ -137,24 +143,27 @@ Persisted OBS user config keys:
 | Diagnostic logging | `AlphaRecorder.diagnostic_logging` |
 
 NVENC Split Encode accepts `auto`, `disabled`, `forced`, `2`, and `3`. Non-auto
-Split Encode settings are rejected when the bundled FFmpeg NVENC encoder does
-not expose `split_encode_mode`. Persisted non-auto Split Encode values are reset
-to `auto` during settings load when the current FFmpeg NVENC encoder no longer
-exposes that option. NVENC GPU index uses `-1` for FFmpeg/NVIDIA default device
-selection and `0+` for an explicit NVENC-capable GPU index. When NVENC output is
-selected, save paths probe the selected Split Encode and GPU index against the
-current runtime before persisting them.
+Split Encode settings are passed to OBS's NVENC texture encoder as
+encoder-specific settings. Persisted values are preserved across machines; if the
+current OBS/NVIDIA runtime rejects the selected Split Encode or GPU index, alpha
+output startup fails with the OBS encoder error instead of silently changing the
+user's setting. NVENC GPU index uses `-1` for OBS/NVIDIA default device selection
+and `0+` for an explicit NVENC-capable GPU index.
 
 Supported finalization formats:
 
 | Format id | Output | Notes |
 | --- | --- | --- |
 | `mask_png_mov` | Lossless grayscale PNG MOV `.mov` | CPU-heavy fallback, disk-light relative to raw masks |
-| `mask_hevc_nvenc` | HEVC NVENC `.mp4` | Requires the NVENC HEVC encoder to open |
-| `mask_hevc_amf` | HEVC AMF `.mp4` | Requires the AMF HEVC encoder to open |
+| `mask_hevc_nvenc` | HEVC NVENC `.mp4` | Uses OBS texture encoder `obs_nvenc_hevc_tex` |
+| `mask_hevc_amf` | HEVC AMF `.mp4` | Uses OBS texture encoder `h265_texture_amf` |
+| `mask_hevc_qsv` | HEVC QSV `.mp4` | Uses OBS texture encoder `obs_qsv11_hevc` |
+| `mask_hevc_vaapi` | HEVC VAAPI `.mp4` | Uses OBS texture encoder `hevc_ffmpeg_vaapi_tex` |
 
-HEVC options are exposed only when the matching runtime encoder can actually
-open on the current machine. Encoder-name presence alone is not enough.
+HEVC GPU texture options are exposed only when OBS registers the matching HEVC
+video encoder and that encoder advertises `OBS_ENCODER_CAP_PASS_TEXTURE`.
+Encoder-name presence alone is not enough. CPU fallback HEVC writer paths retain
+their own FFmpeg openability probes where applicable.
 
 Settings can also be driven by obs-websocket vendor API for automated E2E:
 
@@ -489,8 +498,10 @@ The OBS app E2E target:
   profile while Alpha Recorder extracts alpha through its own GPU-side path.
 - Can run the RGB recording profile with software encoding, explicit NVENC
   HEVC, or explicit AMF HEVC.
-- Pairs hardware RGB matrix targets with PNG MOV or the same vendor's HEVC
-  alpha output.
+- Pairs standard hardware RGB matrix targets with PNG MOV or the same vendor's
+  HEVC alpha output; QSV/VAAPI alpha paths are available through the manual
+  `RunObsAppE2E.cmake` finalization-format switch when matching hardware is
+  present.
 - Waits for RGB recording and alpha mask movie outputs.
 - Writes `alpha-recorder-performance.json` under the OBS app E2E artifact root.
 - Keeps CMake stdout compact by writing detailed OBS stdout/stderr to
@@ -562,7 +573,8 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 Runtime matrix rules:
 
 - Configure probes `hevc_nvenc` and `hevc_amf` on the target machine with a
-  realistic 1080p FFmpeg encode.
+  realistic 1080p FFmpeg encode for the legacy CPU HEVC writer and standard
+  hardware matrix targets.
 - Configure registers only matching alpha HEVC targets whose encoder opens.
 - RGB NVENC targets additionally require the staged OBS NVENC plugin.
 - The target matrix is runtime-aware rather than OS-only.
@@ -576,8 +588,8 @@ Runtime matrix rules:
   matrix.
 - RGB NVENC plus alpha AMF, or RGB AMF plus alpha NVENC, require a test machine
   with both NVIDIA and AMD hardware encoders.
-- NVIDIA/AMD-specific alpha HEVC targets may appear on any platform where the
-  matching encoder opens through the runtime probe.
+- NVENC/AMF/QSV/VAAPI alpha HEVC formats appear in the plugin UI/API only where
+  OBS registers the matching texture encoder.
 - RGB hardware targets are skipped if the staged OBS runtime lacks the matching
   OBS encoder plugin.
 

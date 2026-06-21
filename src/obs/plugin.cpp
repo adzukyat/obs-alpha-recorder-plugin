@@ -5,6 +5,7 @@
 
 #include "alpha_recorder/plugin.hpp"
 #include "alpha_recorder/version.hpp"
+#include "gpu_texture_recording_output.hpp"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("alpha_recorder", "en-US")
@@ -31,7 +32,7 @@ namespace alpha_recorder::obs
 #if defined(ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
         return register_output_module() && register_e2e_sources();
 #else
-        return register_runtime_hooks();
+        return register_gpu_texture_recording_output() && register_runtime_hooks();
 #endif
     }
 
@@ -71,6 +72,9 @@ extern "C" void obs_module_unload(void)
     obs_frontend_remove_event_callback(alpha_recorder_recording_frontend_event, nullptr);
     alpha_recorder::obs::unregister_websocket_vendor_api();
     alpha_recorder::obs::unregister_runtime_hooks();
+    alpha_recorder::obs::unregister_gpu_texture_recording_output();
+#else
+    alpha_recorder::obs::unregister_output_module();
 #endif
 }
 

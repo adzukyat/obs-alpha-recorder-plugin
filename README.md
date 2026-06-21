@@ -22,7 +22,8 @@ Use OBS the way you already do:
 
 ## :sparkles: Features
 
-- Alpha-mask output using HEVC hardware encoders (NVENC / AMF).
+- Alpha-mask output using OBS texture HEVC encoders (NVENC / AMF / QSV / VAAPI
+  when the matching OBS encoder is available).
 - Lossless alpha-mask output in PNG MOV format.
 - Simple switching between encoder settings.
 - Fully synchronized start position and frames between alpha and the main video.
@@ -64,7 +65,7 @@ current machine.
 
 | Symptom                         | Likely reason                                                                |
 | ------------------------------- | ---------------------------------------------------------------------------- |
-| HEVC option is missing          | The matching NVENC or AMF encoder cannot open on this machine                |
+| HEVC option is missing          | The matching OBS texture HEVC encoder is not available on this machine       |
 | No alpha file appears           | "Enabled" is turned off in Alpha Recorder settings                           |
 | Alpha becomes black with Spout2 | Change "Composite Mode" from Opaque to Default in the Spout2 source settings |
 
@@ -171,5 +172,6 @@ full flow from recording to frame sync verification through WebSocket.
 Runtime-specific targets that cannot run on the current machine are skipped.
 
 > [!WARNING]
-> AMF targets have not been tested since I do not own a Radeon GPU. Feel free to
-> submit patches if you find any bugs.
+> NVENC is the only hardware HEVC path currently verified by the maintainer's
+> Windows machine. AMF, QSV, and VAAPI use OBS's texture encoder backends and are
+> gated at runtime, but still need backend-specific hardware validation.

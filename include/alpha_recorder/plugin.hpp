@@ -16,6 +16,8 @@ namespace alpha_recorder::obs
         MaskPngMov,
         MaskHevcNvenc,
         MaskHevcAmf,
+        MaskHevcQsv,
+        MaskHevcVaapi,
     };
 
     enum class HevcQualityProfile
@@ -198,10 +200,12 @@ namespace alpha_recorder::obs
                ((remainder * static_cast<std::uint64_t>(fps_num)) / denominator);
     }
 
-    inline constexpr std::array<FinalizationFormatOption, 3> finalization_format_options{{
+    inline constexpr std::array<FinalizationFormatOption, 5> finalization_format_options{{
         {FinalizationFormat::MaskPngMov, "mask_png_mov", "Lossless PNG MOV Mask"},
         {FinalizationFormat::MaskHevcNvenc, "mask_hevc_nvenc", "HEVC NVENC Mask"},
         {FinalizationFormat::MaskHevcAmf, "mask_hevc_amf", "HEVC AMF Mask"},
+        {FinalizationFormat::MaskHevcQsv, "mask_hevc_qsv", "HEVC QSV Mask"},
+        {FinalizationFormat::MaskHevcVaapi, "mask_hevc_vaapi", "HEVC VAAPI Mask"},
     }};
 
     [[nodiscard]] inline constexpr std::string_view hevc_quality_profile_config_value(HevcQualityProfile profile) noexcept
@@ -568,6 +572,8 @@ namespace alpha_recorder::obs
         case FinalizationFormat::MaskPngMov:
         case FinalizationFormat::MaskHevcNvenc:
         case FinalizationFormat::MaskHevcAmf:
+        case FinalizationFormat::MaskHevcQsv:
+        case FinalizationFormat::MaskHevcVaapi:
             return {};
         }
 
@@ -593,6 +599,8 @@ namespace alpha_recorder::obs
 
         case FinalizationFormat::MaskHevcNvenc:
         case FinalizationFormat::MaskHevcAmf:
+        case FinalizationFormat::MaskHevcQsv:
+        case FinalizationFormat::MaskHevcVaapi:
             return ".mp4";
         }
 
@@ -665,6 +673,7 @@ namespace alpha_recorder::obs
     void register_settings_ui() noexcept;
     void unregister_settings_ui() noexcept;
     bool register_output_module() noexcept;
+    void unregister_output_module() noexcept;
     bool register_e2e_sources() noexcept;
     bool initialize_module() noexcept;
 

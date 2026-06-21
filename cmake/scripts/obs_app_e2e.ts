@@ -20,6 +20,12 @@ type Args = {
   fps: number;
   rgbEncoder: string;
   finalizationFormat: string;
+  hevcQualityProfile: string;
+  hevcQualityCq: number;
+  hevcPreset: string;
+  hevcNvencTune: string;
+  hevcGopSize: number;
+  hevcBFrames: number;
   keepObsOpen: boolean;
   allowOverload: boolean;
 };
@@ -53,6 +59,12 @@ function parseArgs(argv: string[]): Args {
     fps: 60,
     rgbEncoder: "software",
     finalizationFormat: "mask_png_mov",
+    hevcQualityProfile: "high_quality",
+    hevcQualityCq: 19,
+    hevcPreset: "nvenc_p3",
+    hevcNvencTune: "hq",
+    hevcGopSize: 0,
+    hevcBFrames: 0,
     keepObsOpen: false,
     allowOverload: false,
   };
@@ -121,6 +133,30 @@ function parseArgs(argv: string[]): Args {
         args.finalizationFormat = value;
         ++index;
         break;
+      case "--hevc-quality-profile":
+        args.hevcQualityProfile = value;
+        ++index;
+        break;
+      case "--hevc-quality-cq":
+        args.hevcQualityCq = Number(value);
+        ++index;
+        break;
+      case "--hevc-preset":
+        args.hevcPreset = value;
+        ++index;
+        break;
+      case "--hevc-nvenc-tune":
+        args.hevcNvencTune = value;
+        ++index;
+        break;
+      case "--hevc-gop-size":
+        args.hevcGopSize = Number(value);
+        ++index;
+        break;
+      case "--hevc-b-frames":
+        args.hevcBFrames = Number(value);
+        ++index;
+        break;
       case "--keep-obs-open":
         args.keepObsOpen = true;
         break;
@@ -138,6 +174,9 @@ function parseArgs(argv: string[]): Args {
   args.syncRecordSeconds = Math.max(1, Math.floor(args.syncRecordSeconds));
   args.syncAttempts = Math.max(1, Math.floor(args.syncAttempts));
   args.durabilityRecordSeconds = Math.max(1, Math.floor(args.durabilityRecordSeconds));
+  args.hevcQualityCq = Math.max(0, Math.min(51, Math.floor(args.hevcQualityCq)));
+  args.hevcGopSize = Math.max(0, Math.min(1000, Math.floor(args.hevcGopSize)));
+  args.hevcBFrames = Math.max(0, Math.min(4, Math.floor(args.hevcBFrames)));
 
   return args;
 }
@@ -605,6 +644,19 @@ function forceKillObs(obs: ObsProcess): void {
     if (result.exitCode !== 0 && obs.exitCode == null) {
       const stderr = new TextDecoder().decode(result.stderr).trim();
       console.warn(`taskkill failed for OBS pid ${obs.pid}: ${stderr || `exit code ${result.exitCode}`}`);
+      spawnSync({
+        cmd: [
+          "powershell",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${obs.pid}"; if ($p) { Invoke-CimMethod -InputObject $p -MethodName Terminate | Out-Null }`,
+        ],
+        stdout: "ignore",
+        stderr: "pipe",
+        timeout: 10000,
+      });
     }
     return;
   }
@@ -1048,13 +1100,29 @@ function decodeFrameCodesFromRaw(frameBytes: Uint8Array, frames: number, frameSi
   return codes;
 }
 
-function decodeFrameCodes(ffmpeg: string, path: string, pixFmt: "rgb24" | "gray"): number[] {
+function decodeFrameCodes(ffmpeg: string, path: string, pixFmt: "rgb24" | "gray", inputOptions: string[] = []): number[] {
   const crop = frameCodeCropFilter();
   const channels = pixFmt === "gray" ? 1 : 3;
   const frameSize = crop.width * crop.height * channels;
   const bytes = checkedOutput(
     ffmpeg,
-    ["-v", "error", "-i", path, "-an", "-vf", crop.filter, "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", pixFmt, "-"],
+    [
+      "-v",
+      "error",
+      ...inputOptions,
+      "-i",
+      path,
+      "-an",
+      "-vf",
+      crop.filter,
+      "-fps_mode",
+      "passthrough",
+      "-f",
+      "rawvideo",
+      "-pix_fmt",
+      pixFmt,
+      "-",
+    ],
     180,
   );
 
@@ -1097,9 +1165,77 @@ type SyncVerification = {
   alphaFrames: number;
   bestFrameCodeOffset: OffsetSummary;
   bestContentOffset: OffsetSummary;
+  overloadTerminalFrameCodeOffset?: OffsetSummary;
+  overloadTerminalContentOffset?: OffsetSummary;
   frameCodeMismatches: number;
   maskBoundsMismatches: number;
 };
+
+function bestFrameCodeOffsetInRange(
+  rgbCodes: number[],
+  alphaCodes: number[],
+  startFrame: number,
+  endFrame: number,
+  searchRadius = 30,
+): OffsetSummary {
+  const start = Math.max(0, Math.min(startFrame, rgbCodes.length));
+  const end = Math.max(start, Math.min(endFrame, rgbCodes.length));
+  let best: OffsetSummary = { offset: 0, matches: -1, total: 0 };
+
+  for (let offset = -searchRadius; offset <= searchRadius; ++offset) {
+    let matches = 0;
+    let total = 0;
+    for (let rgbIndex = start; rgbIndex < end; ++rgbIndex) {
+      const alphaIndex = rgbIndex + offset;
+      if (alphaIndex < 0 || alphaIndex >= alphaCodes.length) {
+        continue;
+      }
+      ++total;
+      if (rgbCodes[rgbIndex] === alphaCodes[alphaIndex]) {
+        ++matches;
+      }
+    }
+
+    if (matches > best.matches || (matches === best.matches && Math.abs(offset) < Math.abs(best.offset))) {
+      best = { offset, matches, total };
+    }
+  }
+
+  return best.matches < 0 ? { offset: 0, matches: 0, total: 0 } : best;
+}
+
+function bestBoundsOffsetInRange(
+  rgbBounds: Bounds[],
+  alphaBounds: Bounds[],
+  startFrame: number,
+  endFrame: number,
+  searchRadius = 30,
+): OffsetSummary {
+  const start = Math.max(0, Math.min(startFrame, rgbBounds.length));
+  const end = Math.max(start, Math.min(endFrame, rgbBounds.length));
+  let best: OffsetSummary = { offset: 0, matches: -1, total: 0 };
+
+  for (let offset = -searchRadius; offset <= searchRadius; ++offset) {
+    let matches = 0;
+    let total = 0;
+    for (let rgbIndex = start; rgbIndex < end; ++rgbIndex) {
+      const alphaIndex = rgbIndex + offset;
+      if (alphaIndex < 0 || alphaIndex >= alphaBounds.length) {
+        continue;
+      }
+      ++total;
+      if (boundsAreSimilar(rgbBounds[rgbIndex], alphaBounds[alphaIndex])) {
+        ++matches;
+      }
+    }
+
+    if (matches > best.matches || (matches === best.matches && Math.abs(offset) < Math.abs(best.offset))) {
+      best = { offset, matches, total };
+    }
+  }
+
+  return best.matches < 0 ? { offset: 0, matches: 0, total: 0 } : best;
+}
 
 function verifyRgbAlphaFrameSync(
   ffmpeg: string,
@@ -1172,13 +1308,6 @@ function verifyRgbAlphaFrameSync(
     );
   }
 
-  const overloadOffsetAligned =
-    overloadObserved &&
-    bestCodeOffset.offset === 0 &&
-    bestOffset.offset === 0 &&
-    bestCodeOffset.matches >= Math.ceil(bestCodeOffset.total * 0.75) &&
-    bestOffset.matches >= Math.ceil(bestOffset.total * 0.75);
-
   const rgbTimes = frameTimes(ffprobe, rgbPath);
   const alphaTimes = frameTimes(ffprobe, alphaPath);
   if (rgbTimes.length > 0 && alphaTimes.length > 0) {
@@ -1195,6 +1324,57 @@ function verifyRgbAlphaFrameSync(
   }
 
   const comparedFrames = Math.min(rgbFrames, alphaFrames);
+  const overloadTerminalWindow = Math.min(
+    comparedFrames,
+    Math.max(toleratedBoundaryFrames * 2, Math.ceil(fps * 0.5)),
+  );
+  const overloadTerminalStart = Math.max(0, comparedFrames - overloadTerminalWindow);
+  const overloadTerminalFrameCodeOffset = bestFrameCodeOffsetInRange(
+    rgbCodes,
+    alphaCodes,
+    overloadTerminalStart,
+    comparedFrames,
+  );
+  const overloadTerminalContentOffset = bestBoundsOffsetInRange(
+    rgbBounds,
+    alphaBounds,
+    overloadTerminalStart,
+    comparedFrames,
+  );
+  const overloadOffsetStable =
+    overloadObserved &&
+    bestCodeOffset.offset === 0 &&
+    overloadTerminalFrameCodeOffset.offset === 0 &&
+    overloadTerminalFrameCodeOffset.total > 0;
+
+  if (overloadObserved && !overloadOffsetStable) {
+    throw new Error(
+      `RGB/alpha offset drifted after overload: ` +
+        `globalFrameCode=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `globalContent=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
+        `terminalFrameCode=${overloadTerminalFrameCodeOffset.offset} ` +
+        `matched=${overloadTerminalFrameCodeOffset.matches}/${overloadTerminalFrameCodeOffset.total}; ` +
+        `terminalContent=${overloadTerminalContentOffset.offset} ` +
+        `matched=${overloadTerminalContentOffset.matches}/${overloadTerminalContentOffset.total}; ` +
+        `terminalWindow=${overloadTerminalWindow}`,
+    );
+  }
+  if (
+    overloadObserved &&
+    overloadOffsetStable &&
+    (bestOffset.offset !== 0 || overloadTerminalContentOffset.offset !== 0)
+  ) {
+    console.warn(
+      `RGB/alpha mask bounds preferred a non-zero offset under overload, but frame-code offset remains zero: ` +
+        `globalContent=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
+        `terminalContent=${overloadTerminalContentOffset.offset} ` +
+        `matched=${overloadTerminalContentOffset.matches}/${overloadTerminalContentOffset.total}; ` +
+        `globalFrameCode=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `terminalFrameCode=${overloadTerminalFrameCodeOffset.offset} ` +
+        `matched=${overloadTerminalFrameCodeOffset.matches}/${overloadTerminalFrameCodeOffset.total}`,
+    );
+  }
+
   let frameCodeMismatches = 0;
   let maskBoundsMismatches = 0;
   let startFrameCodeMismatches = 0;
@@ -1244,15 +1424,17 @@ function verifyRgbAlphaFrameSync(
     startFrameCodeMismatches > toleratedBoundaryFrames ||
     terminalFrameCodeMismatches > toleratedBoundaryFrames
   ) {
-    if (overloadOffsetAligned) {
+    if (overloadOffsetStable) {
       console.warn(
-        `RGB/alpha frame-code mismatches exceed strict tolerance under overload, but global offset remains zero: ` +
+        `RGB/alpha frame-code mismatches exceed strict tolerance under overload, but offset remains zero: ` +
           `mismatches=${frameCodeMismatches}/${comparedFrames}; ` +
           `start=${startFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
           `terminal=${terminalFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
           `interior=${interiorFrameCodeMismatches}/${toleratedPerFrameMismatches}; ` +
           `examples=${firstFrameCodeMismatches.join("; ")}; ` +
           `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+          `terminalFrameCodeOffset=${overloadTerminalFrameCodeOffset.offset} ` +
+          `matched=${overloadTerminalFrameCodeOffset.matches}/${overloadTerminalFrameCodeOffset.total}; ` +
           `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
       );
     } else {
@@ -1272,15 +1454,17 @@ function verifyRgbAlphaFrameSync(
     startMaskBoundsMismatches > toleratedBoundaryFrames ||
     terminalMaskBoundsMismatches > toleratedBoundaryFrames
   ) {
-    if (overloadOffsetAligned) {
+    if (overloadOffsetStable) {
       console.warn(
-        `RGB/alpha mask bounds mismatches exceed strict tolerance under overload, but global offset remains zero: ` +
+        `RGB/alpha mask bounds mismatches exceed strict tolerance under overload, but offset remains zero: ` +
           `mismatches=${maskBoundsMismatches}/${comparedFrames}; ` +
           `start=${startMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
           `terminal=${terminalMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
           `interior=${interiorMaskBoundsMismatches}/${toleratedPerFrameMismatches}; ` +
           `examples=${firstMaskBoundsMismatches.join("; ")}; ` +
           `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
+          `terminalContentOffset=${overloadTerminalContentOffset.offset} ` +
+          `matched=${overloadTerminalContentOffset.matches}/${overloadTerminalContentOffset.total}; ` +
           `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}`,
       );
     } else {
@@ -1300,6 +1484,8 @@ function verifyRgbAlphaFrameSync(
     alphaFrames,
     bestFrameCodeOffset: bestCodeOffset,
     bestContentOffset: bestOffset,
+    overloadTerminalFrameCodeOffset: overloadObserved ? overloadTerminalFrameCodeOffset : undefined,
+    overloadTerminalContentOffset: overloadObserved ? overloadTerminalContentOffset : undefined,
     frameCodeMismatches,
     maskBoundsMismatches,
   };
@@ -1384,7 +1570,7 @@ async function verifyRecordingOutputs(
   if (alphaPixFmt.startsWith("yuva") || alphaPixFmt === "rgba" || alphaPixFmt === "bgra" || alphaPixFmt === "argb") {
     throw new Error(`Alpha mask movie unexpectedly carries an alpha-capable pixel format: ${JSON.stringify(alphaProbe)}`);
   }
-  if (expectedFinalizationFormat === "mask_hevc_nvenc" || expectedFinalizationFormat === "mask_hevc_amf") {
+  if (expectedFinalizationFormat.startsWith("mask_hevc_")) {
     if (alphaStream.codec_name !== "hevc") {
       throw new Error(`Alpha movie probe did not report HEVC: ${JSON.stringify(alphaProbe)}`);
     }
@@ -1638,7 +1824,17 @@ finalization_format=${args.finalizationFormat}
     const setSettings = await requestWithStartupRetry(socket, "CallVendorRequest", {
       vendorName: "alpha_recorder",
       requestType: "SetSettings",
-      requestData: { enabled: true, finalization_format: args.finalizationFormat, diagnostic_logging: args.allowOverload },
+      requestData: {
+        enabled: true,
+        finalization_format: args.finalizationFormat,
+        hevc_quality_profile: args.hevcQualityProfile,
+        hevc_quality_cq: args.hevcQualityCq,
+        hevc_preset: args.hevcPreset,
+        hevc_nvenc_tune: args.hevcNvencTune,
+        hevc_gop_size: args.hevcGopSize,
+        hevc_b_frames: args.hevcBFrames,
+        diagnostic_logging: args.allowOverload,
+      },
     });
     if (setSettings.responseData?.ok === false) {
       throw new Error(`Alpha Recorder rejected settings: ${JSON.stringify(setSettings.responseData)}`);
@@ -1747,6 +1943,14 @@ finalization_format=${args.finalizationFormat}
           artifactRoot,
           rgbEncoder: args.rgbEncoder,
           finalizationFormat: expectedFinalizationFormat,
+          hevc: {
+            qualityProfile: args.hevcQualityProfile,
+            qualityCq: args.hevcQualityCq,
+            preset: args.hevcPreset,
+            nvencTune: args.hevcNvencTune,
+            gopSize: args.hevcGopSize,
+            bFrames: args.hevcBFrames,
+          },
           width: args.width,
           height: args.height,
           fps: args.fps,

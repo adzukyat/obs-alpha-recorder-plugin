@@ -51,6 +51,7 @@
 #include "alpha_recorder/plugin.hpp"
 #include "alpha_recorder/version.hpp"
 #include "diagnostic_log.hpp"
+#include "gpu_texture_recording_output.hpp"
 
 namespace
 {
@@ -66,6 +67,17 @@ namespace
     {
         std::atomic_bool cancelled{false};
     };
+
+    bool finalization_format_runtime_available_for_ui(FinalizationFormat format,
+                                                      std::string *reason)
+    {
+        if (alpha_recorder::obs::finalization_format_uses_gpu_texture_path(format))
+        {
+            return alpha_recorder::obs::gpu_texture_hevc_encoder_runtime_available(format, reason);
+        }
+
+        return alpha_recorder::obs::finalization_format_runtime_available(format, reason);
+    }
 
     struct VersionTriple
     {
@@ -433,19 +445,11 @@ namespace
         normalized_settings.hevc_encoder.nvenc_gpu_index =
             alpha_recorder::obs::normalize_hevc_nvenc_gpu_index(normalized_settings.hevc_encoder.nvenc_gpu_index);
         std::string unavailableReason;
-        if (!alpha_recorder::obs::finalization_format_runtime_available(normalized_settings.finalization_format, &unavailableReason))
+        if (!finalization_format_runtime_available_for_ui(normalized_settings.finalization_format, &unavailableReason))
         {
             error_message = QString::fromUtf8(unavailableReason.data(), static_cast<int>(unavailableReason.size()));
             return false;
         }
-        if (normalized_settings.finalization_format == alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc &&
-            !alpha_recorder::obs::hevc_nvenc_encoder_settings_runtime_available(normalized_settings.hevc_encoder,
-                                                                                &unavailableReason))
-        {
-            error_message = QString::fromUtf8(unavailableReason.data(), static_cast<int>(unavailableReason.size()));
-            return false;
-        }
-
         config_t *config = obs_frontend_get_user_config();
         if (config == nullptr)
         {
@@ -571,7 +575,7 @@ namespace
             {
                 QString itemText = QString::fromUtf8(option.display_name.data(), static_cast<int>(option.display_name.size()));
                 std::string unsupportedReason;
-                const bool supported = alpha_recorder::obs::finalization_format_runtime_available(option.value, &unsupportedReason);
+                const bool supported = finalization_format_runtime_available_for_ui(option.value, &unsupportedReason);
                 if (!supported)
                 {
                     itemText += " (unsupported)";
@@ -978,7 +982,19 @@ namespace
         {
             const HevcProfileDefaults defaults = defaults_for_profile(profile);
             qualitySpinBox_->setValue(static_cast<int>(defaults.quality_cq));
-            select_hevc_preset(selected_finalization_format() == FinalizationFormat::MaskHevcAmf ? defaults.amf_preset : defaults.nvenc_preset);
+            const FinalizationFormat format = selected_finalization_format();
+            if (format == FinalizationFormat::MaskHevcAmf)
+            {
+                select_hevc_preset(defaults.amf_preset);
+            }
+            else if (format == FinalizationFormat::MaskHevcVaapi)
+            {
+                select_hevc_preset(alpha_recorder::obs::HevcEncoderPreset::NvencP3);
+            }
+            else
+            {
+                select_hevc_preset(defaults.nvenc_preset);
+            }
             select_nvenc_tune(defaults.nvenc_tune);
             gopSpinBox_->setValue(static_cast<int>(defaults.gop_size));
             bFramesSpinBox_->setValue(static_cast<int>(defaults.b_frames));
@@ -998,7 +1014,7 @@ namespace
                 }
             }
 
-            presetCombo_->setCurrentIndex(1);
+            presetCombo_->setCurrentIndex(presetCombo_->count() > 1 ? 1 : 0);
         }
 
         void select_nvenc_tune(alpha_recorder::obs::HevcNvencTune tune)
@@ -1077,7 +1093,12 @@ namespace
             case alpha_recorder::obs::HevcEncoderPreset::NvencP5:
             case alpha_recorder::obs::HevcEncoderPreset::NvencP6:
             case alpha_recorder::obs::HevcEncoderPreset::NvencP7:
-                return format == FinalizationFormat::MaskHevcNvenc;
+                if (format == FinalizationFormat::MaskHevcVaapi)
+                {
+                    return preset == alpha_recorder::obs::HevcEncoderPreset::NvencP3;
+                }
+                return format == FinalizationFormat::MaskHevcNvenc ||
+                       format == FinalizationFormat::MaskHevcQsv;
             case alpha_recorder::obs::HevcEncoderPreset::AmfSpeed:
             case alpha_recorder::obs::HevcEncoderPreset::AmfBalanced:
             case alpha_recorder::obs::HevcEncoderPreset::AmfQuality:
@@ -1096,6 +1117,20 @@ namespace
                 presetCombo_->addItem("Speed", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::AmfSpeed));
                 presetCombo_->addItem("Balanced", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::AmfBalanced));
                 presetCombo_->addItem("Quality", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::AmfQuality));
+            }
+            else if (format == FinalizationFormat::MaskHevcQsv)
+            {
+                presetCombo_->addItem("TU7 - Fastest", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP1));
+                presetCombo_->addItem("TU6 - Faster", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP2));
+                presetCombo_->addItem("TU5 - Fast", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP3));
+                presetCombo_->addItem("TU4 - Balanced", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP4));
+                presetCombo_->addItem("TU3 - Quality", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP5));
+                presetCombo_->addItem("TU2 - Higher Quality", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP6));
+                presetCombo_->addItem("TU1 - Best Quality", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP7));
+            }
+            else if (format == FinalizationFormat::MaskHevcVaapi)
+            {
+                presetCombo_->addItem("Default", static_cast<int>(alpha_recorder::obs::HevcEncoderPreset::NvencP3));
             }
             else
             {
@@ -1116,7 +1151,11 @@ namespace
             }
 
             select_hevc_preset(defaults_for_profile(selected_hevc_profile()).amf_preset);
-            if (format != FinalizationFormat::MaskHevcAmf)
+            if (format == FinalizationFormat::MaskHevcVaapi)
+            {
+                select_hevc_preset(alpha_recorder::obs::HevcEncoderPreset::NvencP3);
+            }
+            else if (format != FinalizationFormat::MaskHevcAmf)
             {
                 select_hevc_preset(defaults_for_profile(selected_hevc_profile()).nvenc_preset);
             }

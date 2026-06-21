@@ -1,5 +1,6 @@
 #include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
+#include "gpu_texture_recording_output.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
@@ -30,6 +31,17 @@ namespace alpha_recorder::obs
             }
         }
 
+        bool finalization_format_runtime_available_for_api(FinalizationFormat format,
+                                                           std::string *reason)
+        {
+            if (finalization_format_uses_gpu_texture_path(format))
+            {
+                return gpu_texture_hevc_encoder_runtime_available(format, reason);
+            }
+
+            return finalization_format_runtime_available(format, reason);
+        }
+
         void write_settings(obs_data_t *response, const Settings &settings)
         {
             obs_data_set_bool(response, "ok", true);
@@ -58,7 +70,7 @@ namespace alpha_recorder::obs
             for (const FinalizationFormatOption &option : finalization_format_options)
             {
                 std::string reason;
-                const bool available = finalization_format_runtime_available(option.value, &reason);
+                const bool available = finalization_format_runtime_available_for_api(option.value, &reason);
                 obs_data_t *format = obs_data_create();
                 obs_data_set_string(format, "display_name", std::string{option.display_name}.c_str());
                 obs_data_set_bool(format, "available", available);
@@ -111,7 +123,7 @@ namespace alpha_recorder::obs
                 }
 
                 std::string unavailable_reason;
-                if (!finalization_format_runtime_available(parsed_format, &unavailable_reason))
+                if (!finalization_format_runtime_available_for_api(parsed_format, &unavailable_reason))
                 {
                     write_error(response, std::string{"Unsupported finalization_format: "} + unavailable_reason);
                     return;
@@ -221,16 +233,6 @@ namespace alpha_recorder::obs
             if (request != nullptr && obs_data_has_user_value(request, settings_diagnostic_logging_key().data()))
             {
                 settings.diagnostic_logging = obs_data_get_bool(request, settings_diagnostic_logging_key().data());
-            }
-
-            if (settings.finalization_format == FinalizationFormat::MaskHevcNvenc)
-            {
-                std::string unavailable_reason;
-                if (!hevc_nvenc_encoder_settings_runtime_available(settings.hevc_encoder, &unavailable_reason))
-                {
-                    write_error(response, std::string{"Unsupported HEVC NVENC settings: "} + unavailable_reason);
-                    return;
-                }
             }
 
             config_set_bool(config, settings_section().data(), settings_enabled_key().data(), settings.enabled);

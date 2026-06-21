@@ -1,30 +1,31 @@
-#include "alpha_recorder/export_worker.hpp"
 #include "alpha_recorder/plugin.hpp"
+#include "alpha_alignment_engine.hpp"
+#include "alpha_plane_extractor.hpp"
+#include "alpha_output_sink.hpp"
 #include "diagnostic_log.hpp"
+#include "gpu_texture_recording_output.hpp"
 #include "recording_session_controller_cadence.hpp"
 #include "recording_session_controller_gate.hpp"
+#include "recording_telemetry.hpp"
 
-#include <algorithm>
-#include <array>
-#include <chrono>
 #include <condition_variable>
+#include <chrono>
 #include <cstdio>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
-#include <graphics/vec4.h>
 #include <util/bmem.h>
 
 #ifdef _WIN32
@@ -37,46 +38,23 @@
 namespace
 {
 
-    using alpha_recorder::obs::AlphaMaskVideoWriter;
-
-    constexpr std::string_view kAlphaExtractEffect = R"(
-uniform float4x4 ViewProj;
-uniform texture2d image;
-
-sampler_state def_sampler {
-    Filter   = Point;
-    AddressU = Clamp;
-    AddressV = Clamp;
-};
-
-struct VertInOut {
-    float4 pos : POSITION;
-    float2 uv  : TEXCOORD0;
-};
-
-VertInOut VSDefault(VertInOut vert_in)
-{
-    VertInOut vert_out;
-    vert_out.pos = mul(float4(vert_in.pos.xyz, 1.0), ViewProj);
-    vert_out.uv  = vert_in.uv;
-    return vert_out;
-}
-
-float4 PSAlpha(VertInOut vert_in) : TARGET
-{
-    float alpha = image.Sample(def_sampler, vert_in.uv).a;
-    return float4(alpha, alpha, alpha, 1.0);
-}
-
-technique Draw
-{
-    pass
-    {
-        vertex_shader = VSDefault(vert_in);
-        pixel_shader  = PSAlpha(vert_in);
-    }
-}
-)";
+    using alpha_recorder::obs::AlphaOutputSinkStats;
+    using alpha_recorder::obs::AlphaAlignmentEngine;
+    using alpha_recorder::obs::AlphaAlignmentEngineConfig;
+    using alpha_recorder::obs::AlphaAlignmentDrainResult;
+    using alpha_recorder::obs::AlignmentTraceEvent;
+    using alpha_recorder::obs::AlphaPlaneExtractor;
+    using alpha_recorder::obs::CaptureTiming;
+    using alpha_recorder::obs::LivePipelineTelemetry;
+    using alpha_recorder::obs::bool_text;
+    using alpha_recorder::obs::format_bytes;
+    using alpha_recorder::obs::format_signed_delta_summary;
+    using alpha_recorder::obs::format_timing_summary;
+    using alpha_recorder::obs::ns_to_ms;
+    using alpha_recorder::obs::alignment_alpha_queue_frame_limit;
+    using alpha_recorder::obs::alignment_output_queue_frame_limit;
+    using alpha_recorder::obs::plausible_alignment_delta_ns;
+    using alpha_recorder::obs::timestamp_span_ms;
 
     std::filesystem::path path_from_utf8(const char *text)
     {
@@ -120,6 +98,195 @@ technique Draw
 
         obs_data_release(settings);
         return path_is_directory(recording_path) ? std::filesystem::path{} : recording_path;
+    }
+
+    std::filesystem::path current_recording_file_path(obs_output_t *recording_output)
+    {
+        std::filesystem::path recording_path = recording_file_path_from_output(recording_output);
+
+        char *recording_path_text = obs_frontend_get_current_record_output_path();
+        if (recording_path.empty() && recording_path_text != nullptr && *recording_path_text != '\0')
+        {
+            recording_path = path_from_utf8(recording_path_text);
+        }
+        if (recording_path_text != nullptr)
+        {
+            bfree(recording_path_text);
+        }
+
+        return path_is_directory(recording_path) ? std::filesystem::path{} : recording_path;
+    }
+
+    std::filesystem::path recording_output_directory(obs_output_t *recording_output)
+    {
+        std::filesystem::path directory{};
+        if (recording_output != nullptr)
+        {
+            obs_data_t *settings = obs_output_get_settings(recording_output);
+            if (settings != nullptr)
+            {
+                std::filesystem::path configured_path = path_from_utf8(obs_data_get_string(settings, "url"));
+                if (configured_path.empty())
+                {
+                    configured_path = path_from_utf8(obs_data_get_string(settings, "path"));
+                }
+                obs_data_release(settings);
+
+                if (!configured_path.empty())
+                {
+                    directory = path_is_directory(configured_path) ? configured_path : configured_path.parent_path();
+                }
+            }
+        }
+
+        if (directory.empty())
+        {
+            const std::filesystem::path current_path = current_recording_file_path(recording_output);
+            directory = current_path.parent_path();
+        }
+        if (directory.empty())
+        {
+            std::error_code error;
+            directory = std::filesystem::temp_directory_path(error);
+            if (error)
+            {
+                directory.clear();
+            }
+        }
+
+        return directory;
+    }
+
+    std::filesystem::path temporary_gpu_texture_output_path(obs_output_t *recording_output)
+    {
+        const std::filesystem::path directory = recording_output_directory(recording_output);
+        if (directory.empty())
+        {
+            return {};
+        }
+
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+        return directory / (std::string{".alpha-recorder-"} + std::to_string(ticks) + ".alpha.tmp.mp4");
+    }
+
+    bool move_completed_gpu_texture_output(const std::filesystem::path &temporary_path,
+                                           const std::filesystem::path &final_path,
+                                           std::string *error_message)
+    {
+        if (temporary_path.empty() || final_path.empty() || temporary_path == final_path)
+        {
+            return true;
+        }
+
+        std::error_code error;
+        const std::filesystem::path parent = final_path.parent_path();
+        if (!parent.empty())
+        {
+            std::filesystem::create_directories(parent, error);
+            if (error)
+            {
+                if (error_message != nullptr)
+                {
+                    *error_message = "Alpha Recorder could not create the final GPU texture alpha output directory.";
+                }
+                return false;
+            }
+        }
+
+        if (std::filesystem::exists(final_path, error) && !error)
+        {
+            std::filesystem::remove(final_path, error);
+            if (error)
+            {
+                if (error_message != nullptr)
+                {
+                    *error_message = "Alpha Recorder could not replace the final GPU texture alpha output.";
+                }
+                return false;
+            }
+        }
+
+        std::filesystem::rename(temporary_path, final_path, error);
+        if (error)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message =
+                    "Alpha Recorder could not rename the temporary GPU texture alpha MP4 to the final output path.";
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    bool settings_use_gpu_texture_path(const alpha_recorder::obs::Settings &settings) noexcept
+    {
+        return alpha_recorder::obs::finalization_format_uses_gpu_texture_path(settings.finalization_format);
+    }
+
+    std::int64_t frame_delta_from_video_time(std::uint64_t start_ns,
+                                             std::uint64_t end_ns,
+                                             std::uint32_t fps_num,
+                                             std::uint32_t fps_den) noexcept
+    {
+        if (end_ns <= start_ns || fps_num == 0U || fps_den == 0U)
+        {
+            return 0;
+        }
+
+        const std::uint64_t elapsed_ns = end_ns - start_ns;
+        const std::uint64_t denominator = 1000000000ULL * static_cast<std::uint64_t>(fps_den);
+        const std::uint64_t numerator = elapsed_ns * static_cast<std::uint64_t>(fps_num);
+        const std::uint64_t rounded = (numerator + (denominator / 2U)) / denominator;
+        return rounded > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
+                   ? std::numeric_limits<std::int64_t>::max()
+                   : static_cast<std::int64_t>(rounded);
+    }
+
+    obs_data_t *make_gpu_texture_output_settings(const std::filesystem::path &mask_path,
+                                                 const obs_video_info &video_info,
+                                                 const alpha_recorder::obs::Settings &settings)
+    {
+        obs_data_t *data = obs_data_create();
+        obs_data_set_string(data, "path", mask_path.string().c_str());
+        const char *encoder_id =
+            alpha_recorder::obs::gpu_texture_hevc_encoder_id_for_format(settings.finalization_format);
+        obs_data_set_string(data, "encoder_id", encoder_id != nullptr ? encoder_id : "");
+        obs_data_set_int(data, "width", static_cast<long long>(video_info.output_width));
+        obs_data_set_int(data, "height", static_cast<long long>(video_info.output_height));
+        obs_data_set_int(data, "fps_num", static_cast<long long>(video_info.fps_num));
+        obs_data_set_int(data, "fps_den", static_cast<long long>(video_info.fps_den));
+        obs_data_set_string(data, alpha_recorder::obs::settings_hevc_quality_profile_key().data(),
+                            alpha_recorder::obs::hevc_quality_profile_config_value(
+                                settings.hevc_encoder.quality_profile)
+                                .data());
+        obs_data_set_int(data, alpha_recorder::obs::settings_hevc_quality_cq_key().data(),
+                         settings.hevc_encoder.quality_cq);
+        obs_data_set_string(data, alpha_recorder::obs::settings_hevc_preset_key().data(),
+                            alpha_recorder::obs::hevc_encoder_preset_config_value(
+                                settings.hevc_encoder.preset)
+                                .data());
+        obs_data_set_string(data, alpha_recorder::obs::settings_hevc_nvenc_tune_key().data(),
+                            alpha_recorder::obs::hevc_nvenc_tune_config_value(
+                                settings.hevc_encoder.nvenc_tune)
+                                .data());
+        obs_data_set_int(data, alpha_recorder::obs::settings_hevc_gop_size_key().data(),
+                         settings.hevc_encoder.gop_size);
+        obs_data_set_int(data, alpha_recorder::obs::settings_hevc_b_frames_key().data(),
+                         settings.hevc_encoder.b_frames);
+        obs_data_set_int(data, alpha_recorder::obs::settings_hevc_lookahead_key().data(),
+                         settings.hevc_encoder.lookahead);
+        obs_data_set_bool(data, alpha_recorder::obs::settings_hevc_adaptive_quantization_key().data(),
+                          settings.hevc_encoder.adaptive_quantization);
+        obs_data_set_string(data, alpha_recorder::obs::settings_hevc_nvenc_split_encode_key().data(),
+                            alpha_recorder::obs::hevc_nvenc_split_encode_config_value(
+                                settings.hevc_encoder.nvenc_split_encode)
+                                .data());
+        obs_data_set_int(data, alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key().data(),
+                         settings.hevc_encoder.nvenc_gpu_index);
+        return data;
     }
 
     bool recording_output_uses_texture_encoder(obs_output_t *recording_output, enum video_format output_format)
@@ -195,539 +362,6 @@ technique Draw
         (void)show_popup;
 #endif
     }
-
-    void copy_alpha_plane(std::vector<std::uint8_t> &alpha,
-                          const std::uint8_t *source,
-                          std::uint32_t source_linesize,
-                          std::uint32_t width,
-                          std::uint32_t height)
-    {
-        const std::size_t alpha_bytes = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-        alpha.resize(alpha_bytes);
-
-        for (std::uint32_t row = 0; row < height; ++row)
-        {
-            const std::uint8_t *source_row = source + (static_cast<std::size_t>(row) * static_cast<std::size_t>(source_linesize));
-            std::uint8_t *dest_row = alpha.data() + (static_cast<std::size_t>(row) * static_cast<std::size_t>(width));
-            std::copy(source_row, source_row + width, dest_row);
-        }
-    }
-
-    [[nodiscard]] std::uint64_t elapsed_ns(std::chrono::steady_clock::time_point start,
-                                           std::chrono::steady_clock::time_point end) noexcept
-    {
-        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
-    }
-
-    struct TimingSummary
-    {
-        std::uint64_t count = 0;
-        std::uint64_t total_ns = 0;
-        std::uint64_t max_ns = 0;
-
-        void add(std::uint64_t ns) noexcept
-        {
-            ++count;
-            total_ns += ns;
-            max_ns = std::max(max_ns, ns);
-        }
-    };
-
-    [[nodiscard]] std::uint64_t abs_i64_to_u64(std::int64_t value) noexcept
-    {
-        if (value >= 0)
-        {
-            return static_cast<std::uint64_t>(value);
-        }
-        if (value == std::numeric_limits<std::int64_t>::min())
-        {
-            return static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1ULL;
-        }
-        return static_cast<std::uint64_t>(-value);
-    }
-
-    struct SignedDeltaSummary
-    {
-        std::uint64_t count = 0;
-        std::uint64_t abs_total_ns = 0;
-        std::uint64_t abs_max_ns = 0;
-        double signed_total_ns = 0.0;
-        std::int64_t signed_min_ns = 0;
-        std::int64_t signed_max_ns = 0;
-
-        void add(std::int64_t ns) noexcept
-        {
-            const std::uint64_t abs_ns = abs_i64_to_u64(ns);
-            if (count == 0U)
-            {
-                signed_min_ns = ns;
-                signed_max_ns = ns;
-            }
-            else
-            {
-                signed_min_ns = std::min(signed_min_ns, ns);
-                signed_max_ns = std::max(signed_max_ns, ns);
-            }
-
-            ++count;
-            abs_total_ns += abs_ns;
-            abs_max_ns = std::max(abs_max_ns, abs_ns);
-            signed_total_ns += static_cast<double>(ns);
-        }
-    };
-
-    struct CaptureTiming
-    {
-        bool mapped = false;
-        std::uint64_t map_ns = 0;
-        std::uint64_t render_ns = 0;
-        std::uint64_t stage_ns = 0;
-        std::uint64_t total_ns = 0;
-    };
-
-    [[nodiscard]] double ns_to_ms(std::uint64_t ns) noexcept
-    {
-        return static_cast<double>(ns) / 1000000.0;
-    }
-
-    [[nodiscard]] double average_ms(const TimingSummary &summary) noexcept
-    {
-        return summary.count == 0U ? 0.0 : ns_to_ms(summary.total_ns / summary.count);
-    }
-
-    [[nodiscard]] double signed_ns_to_ms(std::int64_t ns) noexcept
-    {
-        return static_cast<double>(ns) / 1000000.0;
-    }
-
-    [[nodiscard]] std::string format_timing_summary(const TimingSummary &summary)
-    {
-        char buffer[128];
-        (void)std::snprintf(buffer, sizeof(buffer), "count=%llu avg_ms=%.3f max_ms=%.3f",
-                            static_cast<unsigned long long>(summary.count), average_ms(summary), ns_to_ms(summary.max_ns));
-        return std::string{buffer};
-    }
-
-    [[nodiscard]] std::string format_signed_delta_summary(const SignedDeltaSummary &summary)
-    {
-        char buffer[192];
-        (void)std::snprintf(
-            buffer, sizeof(buffer), "count=%llu avg_abs_ms=%.3f max_abs_ms=%.3f avg_signed_ms=%.3f min_signed_ms=%.3f max_signed_ms=%.3f",
-            static_cast<unsigned long long>(summary.count),
-            summary.count == 0U ? 0.0 : ns_to_ms(summary.abs_total_ns / summary.count),
-            ns_to_ms(summary.abs_max_ns),
-            summary.count == 0U ? 0.0 : (summary.signed_total_ns / static_cast<double>(summary.count)) / 1000000.0,
-            signed_ns_to_ms(summary.signed_min_ns), signed_ns_to_ms(summary.signed_max_ns));
-        return std::string{buffer};
-    }
-
-    [[nodiscard]] std::string format_bytes(std::uint64_t bytes)
-    {
-        char buffer[64];
-        (void)std::snprintf(buffer, sizeof(buffer), "%.2fMiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
-        return std::string{buffer};
-    }
-
-    [[nodiscard]] const char *bool_text(bool value) noexcept
-    {
-        return value ? "true" : "false";
-    }
-
-    [[nodiscard]] std::int64_t signed_timestamp_delta_ns(std::uint64_t selected,
-                                                         std::uint64_t reference) noexcept
-    {
-        constexpr auto max_i64 = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-        if (selected >= reference)
-        {
-            const std::uint64_t delta = selected - reference;
-            return delta > max_i64 ? std::numeric_limits<std::int64_t>::max()
-                                   : static_cast<std::int64_t>(delta);
-        }
-
-        const std::uint64_t delta = reference - selected;
-        return delta > max_i64 ? std::numeric_limits<std::int64_t>::min() + 1
-                               : -static_cast<std::int64_t>(delta);
-    }
-
-    void remember_timestamp_span(std::uint64_t timestamp,
-                                 std::uint64_t &first_timestamp,
-                                 std::uint64_t &last_timestamp) noexcept
-    {
-        if (timestamp == 0U)
-        {
-            return;
-        }
-        if (first_timestamp == 0U)
-        {
-            first_timestamp = timestamp;
-        }
-        last_timestamp = timestamp;
-    }
-
-    [[nodiscard]] double timestamp_span_ms(std::uint64_t first_timestamp,
-                                           std::uint64_t last_timestamp) noexcept
-    {
-        if (first_timestamp == 0U || last_timestamp == 0U)
-        {
-            return 0.0;
-        }
-        return signed_ns_to_ms(signed_timestamp_delta_ns(last_timestamp, first_timestamp));
-    }
-
-    [[nodiscard]] std::size_t rounded_fps(std::uint32_t fps_num, std::uint32_t fps_den) noexcept
-    {
-        if (fps_num == 0U || fps_den == 0U)
-        {
-            return 60U;
-        }
-
-        return static_cast<std::size_t>((static_cast<std::uint64_t>(fps_num) +
-                                         static_cast<std::uint64_t>(fps_den) - 1U) /
-                                        static_cast<std::uint64_t>(fps_den));
-    }
-
-    [[nodiscard]] std::size_t alignment_alpha_queue_frame_limit(std::uint32_t fps_num,
-                                                                std::uint32_t fps_den) noexcept
-    {
-        return std::clamp(rounded_fps(fps_num, fps_den) * 4U, static_cast<std::size_t>(120U),
-                          static_cast<std::size_t>(240U));
-    }
-
-    [[nodiscard]] std::size_t alignment_output_queue_frame_limit(std::uint32_t fps_num,
-                                                                 std::uint32_t fps_den) noexcept
-    {
-        return std::clamp(rounded_fps(fps_num, fps_den) * 20U, static_cast<std::size_t>(240U),
-                          static_cast<std::size_t>(3600U));
-    }
-
-    [[nodiscard]] std::uint64_t plausible_alignment_delta_ns(std::uint32_t fps_num,
-                                                             std::uint32_t fps_den) noexcept
-    {
-        if (fps_num == 0U)
-        {
-            return 50000000ULL;
-        }
-
-        const std::uint64_t frame_ns =
-            (1000000000ULL * static_cast<std::uint64_t>(fps_den == 0U ? 1U : fps_den)) /
-            static_cast<std::uint64_t>(fps_num);
-        return std::max<std::uint64_t>(frame_ns * 3ULL, 1ULL);
-    }
-
-    [[nodiscard]] std::uint64_t texture_encoder_alignment_delta_ns(std::uint32_t fps_num,
-                                                                    std::uint32_t fps_den) noexcept
-    {
-        if (fps_num == 0U)
-        {
-            return 133333333ULL;
-        }
-
-        const std::uint64_t frame_ns =
-            (1000000000ULL * static_cast<std::uint64_t>(fps_den == 0U ? 1U : fps_den)) /
-            static_cast<std::uint64_t>(fps_num);
-        return std::max<std::uint64_t>(frame_ns * 8ULL, 1ULL);
-    }
-
-    [[nodiscard]] std::uint64_t texture_successor_delta_ns(std::uint32_t fps_num,
-                                                           std::uint32_t fps_den) noexcept
-    {
-        if (fps_num == 0U)
-        {
-            return 25000000ULL;
-        }
-
-        const std::uint64_t frame_ns =
-            (1000000000ULL * static_cast<std::uint64_t>(fps_den == 0U ? 1U : fps_den)) /
-            static_cast<std::uint64_t>(fps_num);
-        return std::max<std::uint64_t>(frame_ns + frame_ns / 2ULL, 1ULL);
-    }
-
-    struct LivePipelineTelemetry
-    {
-        TimingSummary capture_total{};
-        TimingSummary capture_map{};
-        TimingSummary capture_render{};
-        TimingSummary capture_stage{};
-        TimingSummary alignment_batch{};
-        SignedDeltaSummary alignment_output_cts_delta{};
-        SignedDeltaSummary alignment_alpha_content_delta{};
-        SignedDeltaSummary packet_fer_cts_delta{};
-        SignedDeltaSummary packet_cts_delta{};
-        SignedDeltaSummary packet_fer_delta{};
-        std::uint64_t texture_stall_corrections = 0;
-        std::uint64_t rendered_callbacks = 0;
-        std::uint64_t captured_frames = 0;
-        std::uint64_t queued_alpha_frames = 0;
-        std::uint64_t raw_video_frames = 0;
-        std::uint64_t packet_frames = 0;
-        std::uint64_t aligned_frames = 0;
-        std::uint64_t alignment_repeated_frames = 0;
-        std::uint64_t alignment_missing_output_repeats = 0;
-        std::uint64_t alignment_missing_alpha_repeats = 0;
-        std::uint64_t alignment_texture_stall_repeats = 0;
-        std::uint64_t alignment_black_repeats = 0;
-        std::uint64_t alignment_alpha_dropped_frames = 0;
-        std::uint64_t alignment_output_dropped_frames = 0;
-        std::uint64_t first_packet_cts = 0;
-        std::uint64_t last_packet_cts = 0;
-        std::uint64_t last_packet_cts_for_delta = 0;
-        std::uint64_t last_packet_fer_for_delta = 0;
-        std::uint64_t first_raw_output_timestamp = 0;
-        std::uint64_t last_raw_output_timestamp = 0;
-        std::uint64_t first_alpha_timestamp = 0;
-        std::uint64_t last_alpha_timestamp = 0;
-        std::size_t max_pending_alpha_frames = 0;
-        std::size_t max_pending_output_frames = 0;
-        std::size_t max_pending_encoded_frames = 0;
-
-        void reset() noexcept
-        {
-            *this = {};
-        }
-    };
-
-    class AlphaPlaneExtractor
-    {
-    public:
-        bool ensure(std::uint32_t width, std::uint32_t height, std::string &error_message)
-        {
-            if (width == 0U || height == 0U)
-            {
-                error_message = "Alpha Recorder cannot capture a zero-sized OBS frame.";
-                return false;
-            }
-
-            if (effect_ != nullptr && mask_texture_ != nullptr && stage_surfaces_ready() && width_ == width &&
-                height_ == height)
-            {
-                return true;
-            }
-
-            destroy();
-
-            char *effect_error = nullptr;
-            effect_ = gs_effect_create(std::string{kAlphaExtractEffect}.c_str(), "alpha-recorder-alpha-extract.effect", &effect_error);
-            if (effect_ == nullptr)
-            {
-                error_message = effect_error != nullptr ? std::string{effect_error}
-                                                        : std::string{"Alpha Recorder could not create the alpha extraction shader."};
-                if (effect_error != nullptr)
-                {
-                    bfree(effect_error);
-                }
-                return false;
-            }
-
-            image_param_ = gs_effect_get_param_by_name(effect_, "image");
-            mask_texture_ = gs_texture_create(width, height, GS_R8, 1, nullptr, GS_RENDER_TARGET);
-            for (gs_stagesurf_t *&stage_surface : stage_surfaces_)
-            {
-                stage_surface = gs_stagesurface_create(width, height, GS_R8);
-            }
-
-            if (image_param_ == nullptr || mask_texture_ == nullptr || !stage_surfaces_ready())
-            {
-                error_message = "Alpha Recorder could not allocate GPU resources for alpha extraction.";
-                destroy();
-                return false;
-            }
-
-            width_ = width;
-            height_ = height;
-            return true;
-        }
-
-        bool capture_latest(std::vector<std::uint8_t> &alpha,
-                            std::uint64_t &timestamp,
-                            std::string &error_message,
-                            CaptureTiming *timing = nullptr)
-        {
-            const auto total_start = std::chrono::steady_clock::now();
-            CaptureTiming local_timing{};
-            alpha.clear();
-            timestamp = 0U;
-
-            gs_texture_t *program_texture = obs_get_main_texture();
-            if (program_texture == nullptr)
-            {
-                if (timing != nullptr)
-                {
-                    local_timing.total_ns = elapsed_ns(total_start, std::chrono::steady_clock::now());
-                    *timing = local_timing;
-                }
-                return true;
-            }
-
-            if (staged_surface_count_ == stage_surfaces_.size())
-            {
-                const auto map_start = std::chrono::steady_clock::now();
-                map_staged_surface(next_map_surface_, alpha, error_message);
-                local_timing.mapped = true;
-                local_timing.map_ns = elapsed_ns(map_start, std::chrono::steady_clock::now());
-                if (!error_message.empty())
-                {
-                    if (timing != nullptr)
-                    {
-                        local_timing.total_ns = elapsed_ns(total_start, std::chrono::steady_clock::now());
-                        *timing = local_timing;
-                    }
-                    return false;
-                }
-                timestamp = staged_timestamps_[next_map_surface_];
-                next_map_surface_ = (next_map_surface_ + 1U) % stage_surfaces_.size();
-                --staged_surface_count_;
-            }
-
-            const auto render_start = std::chrono::steady_clock::now();
-            if (!render_alpha_mask(program_texture))
-            {
-                if (timing != nullptr)
-                {
-                    local_timing.render_ns = elapsed_ns(render_start, std::chrono::steady_clock::now());
-                    local_timing.total_ns = elapsed_ns(total_start, std::chrono::steady_clock::now());
-                    *timing = local_timing;
-                }
-                return false;
-            }
-            local_timing.render_ns = elapsed_ns(render_start, std::chrono::steady_clock::now());
-
-            const auto stage_start = std::chrono::steady_clock::now();
-            gs_stage_texture(stage_surfaces_[next_stage_surface_], mask_texture_);
-            staged_timestamps_[next_stage_surface_] = obs_get_video_frame_time();
-            next_stage_surface_ = (next_stage_surface_ + 1U) % stage_surfaces_.size();
-            ++staged_surface_count_;
-            local_timing.stage_ns = elapsed_ns(stage_start, std::chrono::steady_clock::now());
-            local_timing.total_ns = elapsed_ns(total_start, std::chrono::steady_clock::now());
-            if (timing != nullptr)
-            {
-                *timing = local_timing;
-            }
-
-            return true;
-        }
-
-        void destroy() noexcept
-        {
-            for (gs_stagesurf_t *&stage_surface : stage_surfaces_)
-            {
-                if (stage_surface != nullptr)
-                {
-                    gs_stagesurface_destroy(stage_surface);
-                    stage_surface = nullptr;
-                }
-            }
-
-            if (mask_texture_ != nullptr)
-            {
-                gs_texture_destroy(mask_texture_);
-                mask_texture_ = nullptr;
-            }
-
-            if (effect_ != nullptr)
-            {
-                gs_effect_destroy(effect_);
-                effect_ = nullptr;
-            }
-
-            image_param_ = nullptr;
-            width_ = 0U;
-            height_ = 0U;
-            staged_timestamps_ = {};
-            next_stage_surface_ = 0U;
-            next_map_surface_ = 0U;
-            staged_surface_count_ = 0U;
-        }
-
-    private:
-        [[nodiscard]] bool stage_surfaces_ready() const noexcept
-        {
-            return std::all_of(stage_surfaces_.begin(), stage_surfaces_.end(),
-                               [](gs_stagesurf_t *surface) { return surface != nullptr; });
-        }
-
-        void map_staged_surface(std::size_t surface_index, std::vector<std::uint8_t> &alpha, std::string &error_message)
-        {
-            std::uint8_t *data = nullptr;
-            std::uint32_t linesize = 0U;
-            gs_stagesurf_t *const stage_surface = stage_surfaces_[surface_index];
-            if (stage_surface == nullptr || !gs_stagesurface_map(stage_surface, &data, &linesize))
-            {
-                error_message = "Alpha Recorder could not map the staged alpha frame.";
-                return;
-            }
-
-            if (data == nullptr || linesize < width_)
-            {
-                gs_stagesurface_unmap(stage_surface);
-                error_message = "Alpha Recorder received an invalid staged alpha frame.";
-                return;
-            }
-
-            copy_alpha_plane(alpha, data, linesize, width_, height_);
-            gs_stagesurface_unmap(stage_surface);
-        }
-
-        bool render_alpha_mask(gs_texture_t *program_texture)
-        {
-            gs_texture_t *previous_render_target = gs_get_render_target();
-            gs_zstencil_t *previous_zstencil_target = gs_get_zstencil_target();
-
-            gs_set_render_target(mask_texture_, nullptr);
-            vec4 clear_color;
-            vec4_set(&clear_color, 0.0F, 0.0F, 0.0F, 1.0F);
-            gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0F, 0);
-            gs_ortho(0.0F, static_cast<float>(width_), 0.0F, static_cast<float>(height_), -100.0F, 100.0F);
-            gs_set_viewport(0, 0, static_cast<int>(width_), static_cast<int>(height_));
-
-            gs_enable_blending(false);
-            gs_effect_set_texture(image_param_, program_texture);
-            while (gs_effect_loop(effect_, "Draw"))
-            {
-                gs_draw_sprite(program_texture, 0, width_, height_);
-            }
-            gs_enable_blending(true);
-            gs_set_render_target(previous_render_target, previous_zstencil_target);
-            return true;
-        }
-
-        gs_effect_t *effect_ = nullptr;
-        gs_eparam_t *image_param_ = nullptr;
-        gs_texture_t *mask_texture_ = nullptr;
-        static constexpr std::size_t kStageSurfaceCount = 4U;
-        std::array<gs_stagesurf_t *, kStageSurfaceCount> stage_surfaces_{};
-        std::array<std::uint64_t, kStageSurfaceCount> staged_timestamps_{};
-        std::uint32_t width_ = 0U;
-        std::uint32_t height_ = 0U;
-        std::size_t next_stage_surface_ = 0U;
-        std::size_t next_map_surface_ = 0U;
-        std::size_t staged_surface_count_ = 0U;
-    };
-
-    struct EncodedAlphaFrame
-    {
-        std::int64_t pts = 0;
-        std::uint64_t cts = 0U;
-        std::uint64_t fer = 0U;
-        std::uint64_t ferc = 0U;
-        bool texture_encoded = false;
-    };
-
-    struct AlignmentTraceSelection
-    {
-        std::size_t output_index = 0U;
-        std::size_t alpha_index = 0U;
-        std::uint64_t output_delta = 0U;
-        std::uint64_t alpha_delta = 0U;
-        bool alpha_index_valid = false;
-        bool repeated = false;
-    };
-
-    enum class AlignmentRepeatReason
-    {
-        MissingOutput,
-        MissingAlpha,
-        TextureStall,
-    };
 
     class RecordingSessionController
     {
@@ -876,27 +510,46 @@ technique Draw
 
             finalization_format_ = settings.finalization_format;
             settings_ = settings;
+            gpu_texture_path_ = settings_use_gpu_texture_path(settings_);
             session_active_ = true;
             session_aborted_ = false;
             recording_paused_ = obs_frontend_recording_paused();
             video_info_ = video_info;
             recording_path_.clear();
             next_sequence_ = 0;
-            last_alpha_frame_.alpha.reset();
-            last_alpha_frame_.timestamp = 0U;
-            last_captured_alpha_frame_.alpha.reset();
-            last_captured_alpha_frame_.timestamp = 0U;
-            clear_pending_alignment_locked();
+            reset_gpu_texture_timing_locked();
+            alignment_engine_.reset_all();
             raw_video_cadence_.reset();
             live_telemetry_.reset();
             recording_texture_encoded_ =
                 recording_output_uses_texture_encoder(recording_output_, video_info_.output_format);
-            start_alignment_worker_locked();
 
-            obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
-            main_rendered_callback_connected_ = true;
-            obs_add_raw_video_callback(nullptr, &RecordingSessionController::on_raw_video, this);
-            raw_video_callback_connected_ = true;
+            if (!gpu_texture_path_)
+            {
+                start_alignment_worker_locked();
+                obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
+                main_rendered_callback_connected_ = true;
+                obs_add_raw_video_callback(nullptr, &RecordingSessionController::on_raw_video, this);
+                raw_video_callback_connected_ = true;
+            }
+            else
+            {
+                const std::filesystem::path temporary_mask_path = temporary_gpu_texture_output_path(recording_output_);
+                if (!temporary_mask_path.empty())
+                {
+                    if (!open_gpu_texture_segment_locked({}, temporary_mask_path, video_info, false))
+                    {
+                        return false;
+                    }
+                    gpu_texture_output_is_temporary_ = true;
+                }
+                signal_handler_t *signal_handler = obs_output_get_signal_handler(recording_output_);
+                if (signal_handler != nullptr && !file_changed_connected_)
+                {
+                    signal_handler_connect(signal_handler, "file_changed", &RecordingSessionController::on_file_changed, this);
+                    file_changed_connected_ = true;
+                }
+            }
             obs_output_add_packet_callback(recording_output_, &RecordingSessionController::on_video_packet, this);
             packet_callback_connected_ = true;
             return true;
@@ -909,9 +562,11 @@ technique Draw
             {
                 return true;
             }
+            const std::uint64_t recording_started_video_time = obs_get_video_frame_time();
 
             std::lock_guard<std::mutex> lock(mutex_);
-            if (writer_.is_open())
+            const bool use_gpu_texture_path = settings_use_gpu_texture_path(settings);
+            if (!use_gpu_texture_path && alpha_sink_.is_open())
             {
                 return true;
             }
@@ -937,17 +592,7 @@ technique Draw
                 }
             }
 
-            char *recording_path_text = obs_frontend_get_current_record_output_path();
-            std::filesystem::path recording_path = recording_file_path_from_output(recording_output);
-            if (recording_path.empty() && recording_path_text != nullptr && *recording_path_text != '\0')
-            {
-                recording_path = path_from_utf8(recording_path_text);
-            }
-
-            if (recording_path_text != nullptr)
-            {
-                bfree(recording_path_text);
-            }
+            std::filesystem::path recording_path = current_recording_file_path(recording_output);
 
             if (recording_path.empty())
             {
@@ -975,13 +620,14 @@ technique Draw
 
             finalization_format_ = settings.finalization_format;
             settings_ = settings;
+            gpu_texture_path_ = use_gpu_texture_path;
 
             if (!open_segment_locked(recording_path, video_info, true))
             {
                 obs_output_release(recording_output_);
                 recording_output_ = nullptr;
                 session_active_ = false;
-                clear_pending_alignment_locked();
+                alignment_engine_.clear_pending();
                 return false;
             }
 
@@ -990,18 +636,22 @@ technique Draw
             recording_paused_ = obs_frontend_recording_paused();
             video_info_ = video_info;
             recording_path_ = recording_path;
+            if (gpu_texture_path_)
+            {
+                gpu_recording_started_video_time_ = recording_started_video_time;
+            }
             const bool detected_texture_encoded =
                 recording_output_uses_texture_encoder(recording_output_, video_info_.output_format);
             recording_texture_encoded_ = recording_texture_encoded_ || detected_texture_encoded;
-            if (recording_texture_encoded_)
+            if (!gpu_texture_path_)
             {
-                for (EncodedAlphaFrame &encoded_frame : pending_encoded_alpha_frames_)
+                if (recording_texture_encoded_)
                 {
-                    encoded_frame.texture_encoded = true;
+                    alignment_engine_.mark_pending_encoded_texture_encoded();
                 }
+                start_alignment_worker_locked();
+                notify_alignment_worker_locked();
             }
-            start_alignment_worker_locked();
-            notify_alignment_worker_locked();
 
             signal_handler_t *signal_handler = obs_output_get_signal_handler(recording_output_);
             if (signal_handler != nullptr && !file_changed_connected_)
@@ -1010,12 +660,12 @@ technique Draw
                 file_changed_connected_ = true;
             }
 
-            if (!main_rendered_callback_connected_)
+            if (!gpu_texture_path_ && !main_rendered_callback_connected_)
             {
                 obs_add_main_rendered_callback(&RecordingSessionController::on_main_rendered, this);
                 main_rendered_callback_connected_ = true;
             }
-            if (!raw_video_callback_connected_)
+            if (!gpu_texture_path_ && !raw_video_callback_connected_)
             {
                 obs_add_raw_video_callback(nullptr, &RecordingSessionController::on_raw_video, this);
                 raw_video_callback_connected_ = true;
@@ -1034,7 +684,12 @@ technique Draw
         {
             const std::filesystem::path mask_path = alpha_recorder::obs::recording_alpha_movie_path(recording_path, finalization_format_);
 
-            alpha_recorder::obs::AlphaMaskVideoWriterConfig config{};
+            if (gpu_texture_path_)
+            {
+                return open_gpu_texture_segment_locked(recording_path, mask_path, video_info, show_popup);
+            }
+
+            alpha_recorder::obs::AlphaOutputSinkConfig config{};
             config.output_path = mask_path;
             config.finalization_format = finalization_format_;
             config.width = video_info.output_width;
@@ -1046,9 +701,16 @@ technique Draw
                 alignment_alpha_queue_frame_limit(config.fps_num, config.fps_den);
             max_pending_output_frames_ =
                 alignment_output_queue_frame_limit(config.fps_num, config.fps_den);
+            alignment_engine_.configure(AlphaAlignmentEngineConfig{config.width,
+                                                                   config.height,
+                                                                   config.fps_num,
+                                                                   config.fps_den,
+                                                                   max_pending_alpha_frames_,
+                                                                   max_pending_output_frames_,
+                                                                   kMaxEncoderReorderFrames});
 
             std::string writer_error;
-            if (!writer_.open(config, &writer_error))
+            if (!alpha_sink_.open(config, &writer_error))
             {
                 const std::string message = writer_error.empty()
                                                 ? std::string{"Alpha Recorder could not open the alpha mask movie for recording path: "} +
@@ -1072,16 +734,114 @@ technique Draw
             return true;
         }
 
+        bool open_gpu_texture_segment_locked(const std::filesystem::path &recording_path,
+                                             const std::filesystem::path &mask_path,
+                                             const obs_video_info &video_info,
+                                             bool show_popup)
+        {
+            if (gpu_texture_output_ != nullptr && obs_output_active(gpu_texture_output_))
+            {
+                if (gpu_texture_output_path_ == mask_path ||
+                    (gpu_texture_output_is_temporary_ &&
+                     (gpu_texture_final_output_path_.empty() || gpu_texture_final_output_path_ == mask_path)))
+                {
+                    if (gpu_texture_output_is_temporary_ && gpu_texture_output_path_ != mask_path)
+                    {
+                        gpu_texture_final_output_path_ = mask_path;
+                        blog(LOG_INFO,
+                             "Alpha Recorder GPU texture bound temporary output to final path: temp=\"%s\" final=\"%s\"",
+                             gpu_texture_output_path_.generic_string().c_str(),
+                             gpu_texture_final_output_path_.generic_string().c_str());
+                    }
+                    video_info_ = video_info;
+                    recording_path_ = recording_path;
+                    return true;
+                }
+            }
+
+            if (gpu_texture_output_ != nullptr)
+            {
+                std::string finalize_error;
+                (void)finalize_gpu_texture_segment_locked(&finalize_error);
+            }
+
+            std::string unavailable_reason;
+            if (!alpha_recorder::obs::gpu_texture_hevc_encoder_runtime_available(
+                    settings_.finalization_format, &unavailable_reason))
+            {
+                const std::string message =
+                    unavailable_reason.empty()
+                        ? "Alpha Recorder could not find the selected GPU texture alpha encoder."
+                        : unavailable_reason;
+                log_and_show_error(message, show_popup);
+                return false;
+            }
+
+            obs_data_t *output_settings = make_gpu_texture_output_settings(mask_path, video_info, settings_);
+            gpu_texture_output_ = obs_output_create(alpha_recorder::obs::gpu_texture_recording_output_id(),
+                                                    "Alpha Recorder GPU Texture Recording",
+                                                    output_settings,
+                                                    nullptr);
+            obs_data_release(output_settings);
+            if (gpu_texture_output_ == nullptr)
+            {
+                const std::string message = "Alpha Recorder could not create the GPU texture alpha output.";
+                log_and_show_error(message, show_popup);
+                return false;
+            }
+
+            reset_gpu_texture_timing_locked();
+            gpu_texture_output_path_ = mask_path;
+            gpu_texture_final_output_path_.clear();
+            if (!obs_output_start(gpu_texture_output_))
+            {
+                const char *last_error = obs_output_get_last_error(gpu_texture_output_);
+                const std::string message = last_error != nullptr && *last_error != '\0'
+                                                ? last_error
+                                                : "Alpha Recorder could not start the GPU texture alpha output.";
+                obs_output_release(gpu_texture_output_);
+                gpu_texture_output_ = nullptr;
+                gpu_texture_output_path_.clear();
+                gpu_texture_final_output_path_.clear();
+                gpu_texture_output_is_temporary_ = false;
+                log_and_show_error(message, show_popup);
+                return false;
+            }
+            gpu_texture_output_start_video_time_ = obs_get_video_frame_time();
+
+            alpha_recorder::obs::AlphaOutputSinkConfig log_config{};
+            log_config.output_path = mask_path;
+            log_config.finalization_format = finalization_format_;
+            log_config.width = video_info.output_width;
+            log_config.height = video_info.output_height;
+            log_config.fps_num = video_info.fps_num;
+            log_config.fps_den = video_info.fps_den;
+            log_config.hevc_encoder = settings_.hevc_encoder;
+            max_pending_alpha_frames_ = 0U;
+            max_pending_output_frames_ = 0U;
+            video_info_ = video_info;
+            recording_path_ = recording_path;
+            session_aborted_ = false;
+            live_telemetry_.reset();
+            log_segment_start_locked(mask_path, log_config);
+            return true;
+        }
+
         bool finalize_current_segment_locked(std::string *error_message)
         {
-            if (!writer_.is_open())
+            if (gpu_texture_path_)
+            {
+                return finalize_gpu_texture_segment_locked(error_message);
+            }
+
+            if (!alpha_sink_.is_open())
             {
                 return true;
             }
 
-            const std::filesystem::path writer_path = writer_.path();
-            alpha_recorder::obs::AlphaMaskVideoWriterStats writer_stats{};
-            if (!writer_.close(error_message, &writer_stats))
+            const std::filesystem::path writer_path = alpha_sink_.path();
+            AlphaOutputSinkStats writer_stats{};
+            if (!alpha_sink_.close(error_message, &writer_stats))
             {
                 log_performance_summary_locked(writer_path, writer_stats);
                 return false;
@@ -1091,17 +851,137 @@ technique Draw
             return true;
         }
 
+        bool finalize_gpu_texture_segment_locked(std::string *error_message)
+        {
+            if (gpu_texture_output_ == nullptr)
+            {
+                return true;
+            }
+
+            const std::filesystem::path actual_writer_path = gpu_texture_output_path_;
+            const std::filesystem::path final_writer_path =
+                !gpu_texture_final_output_path_.empty() ? gpu_texture_final_output_path_ : actual_writer_path;
+            const bool rename_temporary_output =
+                gpu_texture_output_is_temporary_ && !gpu_texture_final_output_path_.empty() &&
+                actual_writer_path != final_writer_path;
+            alpha_recorder::obs::AlphaVisiblePacketRange visible_range{};
+            std::string range_error;
+            bool finalize_failed = false;
+            if (!alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
+                    gpu_texture_output_,
+                    gpu_main_first_packet_cts_,
+                    gpu_main_packet_count_,
+                    recording_texture_encoded_,
+                    visible_range,
+                    &range_error))
+            {
+                finalize_failed = true;
+                if (error_message != nullptr)
+                {
+                    *error_message = range_error.empty()
+                                         ? "Alpha Recorder could not compute the GPU texture alpha visible range."
+                                         : range_error;
+                }
+                if (gpu_main_packet_count_ > 0U &&
+                    gpu_main_packet_count_ <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                {
+                    visible_range.media_time = frame_delta_from_video_time(
+                        gpu_texture_output_start_video_time_,
+                        gpu_main_first_packet_cts_,
+                        video_info_.fps_num,
+                        video_info_.fps_den == 0U ? 1U : video_info_.fps_den);
+                    visible_range.duration = static_cast<std::int64_t>(gpu_main_packet_count_);
+                    finalize_failed = false;
+                    if (error_message != nullptr)
+                    {
+                        error_message->clear();
+                    }
+                    blog(LOG_INFO,
+                         "Alpha Recorder GPU texture using video-time edit fallback: media_time=%lld duration=%lld output_start=%llu main_first_cts=%llu main_packets=%llu reason=\"%s\"",
+                         static_cast<long long>(visible_range.media_time),
+                         static_cast<long long>(visible_range.duration),
+                         static_cast<unsigned long long>(gpu_texture_output_start_video_time_),
+                         static_cast<unsigned long long>(gpu_main_first_packet_cts_),
+                         static_cast<unsigned long long>(gpu_main_packet_count_),
+                         range_error.c_str());
+                }
+            }
+            if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_set_visible_range(
+                                      gpu_texture_output_, visible_range, error_message))
+            {
+                finalize_failed = true;
+            }
+
+            if (!finalize_failed)
+            {
+                wait_for_gpu_texture_visible_packets_locked(visible_range);
+            }
+
+            obs_output_stop(gpu_texture_output_);
+            const alpha_recorder::obs::GpuTextureRecordingOutputStats gpu_stats =
+                alpha_recorder::obs::gpu_texture_recording_output_stats(gpu_texture_output_);
+            const char *last_error = obs_output_get_last_error(gpu_texture_output_);
+            const std::string last_error_text = last_error != nullptr ? last_error : "";
+            obs_output_release(gpu_texture_output_);
+            gpu_texture_output_ = nullptr;
+            if (!finalize_failed && gpu_stats.finalized && rename_temporary_output &&
+                !move_completed_gpu_texture_output(actual_writer_path, final_writer_path, error_message))
+            {
+                finalize_failed = true;
+            }
+            gpu_texture_output_path_.clear();
+            gpu_texture_final_output_path_.clear();
+            gpu_texture_output_is_temporary_ = false;
+
+            log_gpu_texture_performance_summary_locked(final_writer_path, gpu_stats, visible_range);
+            if (finalize_failed || !gpu_stats.finalized)
+            {
+                if (error_message != nullptr)
+                {
+                    if (error_message->empty())
+                    {
+                        *error_message = !last_error_text.empty()
+                                             ? last_error_text
+                                             : "Alpha Recorder failed to finalize the GPU texture alpha MP4.";
+                    }
+                }
+                return false;
+            }
+
+            return true;
+        }
+
+        void wait_for_gpu_texture_visible_packets_locked(
+            const alpha_recorder::obs::AlphaVisiblePacketRange &visible_range)
+        {
+            if (gpu_texture_output_ == nullptr || visible_range.media_time < 0 || visible_range.duration <= 0)
+            {
+                return;
+            }
+
+            const std::uint64_t target_packets =
+                static_cast<std::uint64_t>(visible_range.media_time) +
+                static_cast<std::uint64_t>(visible_range.duration);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{750};
+            while (obs_output_active(gpu_texture_output_) && std::chrono::steady_clock::now() < deadline)
+            {
+                const alpha_recorder::obs::GpuTextureRecordingOutputStats stats =
+                    alpha_recorder::obs::gpu_texture_recording_output_stats(gpu_texture_output_);
+                if (stats.packet_count >= target_packets)
+                {
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds{5});
+            }
+        }
+
         void clear_pending_alignment_locked() noexcept
         {
-            pending_alpha_frames_.clear();
-            pending_encoded_alpha_frames_.clear();
-            pending_output_frames_.clear();
-            consecutive_output_duplicate_frames_ = 0U;
-            last_aligned_packet_cts_ = 0U;
+            alignment_engine_.clear_pending();
         }
 
         void log_performance_summary_locked(const std::filesystem::path &mask_path,
-                                            const alpha_recorder::obs::AlphaMaskVideoWriterStats &writer_stats)
+                                            const AlphaOutputSinkStats &writer_stats)
         {
             const std::string message = performance_summary_text_locked(mask_path, writer_stats);
             blog(LOG_INFO, "%s", message.c_str());
@@ -1111,8 +991,37 @@ technique Draw
             }
         }
 
+        void log_gpu_texture_performance_summary_locked(
+            const std::filesystem::path &mask_path,
+            const alpha_recorder::obs::GpuTextureRecordingOutputStats &gpu_stats,
+            const alpha_recorder::obs::AlphaVisiblePacketRange &visible_range)
+        {
+            char buffer[2048];
+            (void)std::snprintf(
+                buffer, sizeof(buffer),
+                "Alpha Recorder GPU texture telemetry: path=\"%s\" packets=%llu keyframes=%llu packet_bytes=%s muxed_packets=%llu finalized=%s first_pts=%lld last_pts=%lld visible_range={media_time=%lld duration=%lld} main_packets={count=%llu first_cts=%llu last_cts=%llu}",
+                mask_path.generic_string().c_str(),
+                static_cast<unsigned long long>(gpu_stats.packet_count),
+                static_cast<unsigned long long>(gpu_stats.keyframe_count),
+                format_bytes(gpu_stats.packet_bytes).c_str(),
+                static_cast<unsigned long long>(gpu_stats.muxed_packet_count),
+                gpu_stats.finalized ? "true" : "false",
+                static_cast<long long>(gpu_stats.first_pts),
+                static_cast<long long>(gpu_stats.last_pts),
+                static_cast<long long>(visible_range.media_time),
+                static_cast<long long>(visible_range.duration),
+                static_cast<unsigned long long>(gpu_main_packet_count_),
+                static_cast<unsigned long long>(gpu_main_first_packet_cts_),
+                static_cast<unsigned long long>(gpu_main_last_packet_cts_));
+            blog(LOG_INFO, "%s", buffer);
+            if (settings_.diagnostic_logging)
+            {
+                alpha_recorder::obs::append_diagnostic_log_line(buffer);
+            }
+        }
+
         void log_segment_start_locked(const std::filesystem::path &mask_path,
-                                      const alpha_recorder::obs::AlphaMaskVideoWriterConfig &config)
+                                      const alpha_recorder::obs::AlphaOutputSinkConfig &config)
         {
             if (!settings_.diagnostic_logging)
             {
@@ -1147,7 +1056,7 @@ technique Draw
         }
 
         std::string performance_summary_text_locked(const std::filesystem::path &mask_path,
-                                                    const alpha_recorder::obs::AlphaMaskVideoWriterStats &writer_stats)
+                                                    const AlphaOutputSinkStats &writer_stats)
         {
             const std::string capture_total = format_timing_summary(live_telemetry_.capture_total);
             const std::string capture_map = format_timing_summary(live_telemetry_.capture_map);
@@ -1237,15 +1146,10 @@ technique Draw
 
         [[nodiscard]] bool alignment_worker_has_work_locked() const noexcept
         {
-            return writer_.is_open() && pending_encoded_alpha_frames_.size() > kMaxEncoderReorderFrames &&
-                   !pending_output_frames_.empty();
+            return !gpu_texture_path_ && alpha_sink_.is_open() && alignment_engine_.has_work();
         }
 
-        void append_alignment_trace_locked(const char *reason,
-                                           const EncodedAlphaFrame &encoded_frame,
-                                           const alpha_recorder::obs::OutputFrameCadence &output_frame,
-                                           const alpha_recorder::obs::AlphaFrame &alpha_frame,
-                                           const AlignmentTraceSelection &selection) const
+        void append_alignment_trace_locked(const AlignmentTraceEvent &event) const
         {
             if (!settings_.diagnostic_logging || live_telemetry_.aligned_frames >= kMaxDiagnosticAlignmentTraceFrames)
             {
@@ -1257,26 +1161,26 @@ technique Draw
                 buffer, sizeof(buffer),
                 "Alpha Recorder alignment trace: seq=%llu reason=%s packet={pts=%lld cts=%llu fer=%llu ferc=%llu texture=%s} output={index=%zu timestamp=%llu content=%llu duplicate=%s delta_ns=%llu} alpha={index=%zu index_valid=%s timestamp=%llu delta_ns=%llu repeated=%s} queues={alpha=%zu output=%zu encoded=%zu duplicate_run=%u}",
                 static_cast<unsigned long long>(live_telemetry_.aligned_frames),
-                reason,
-                static_cast<long long>(encoded_frame.pts),
-                static_cast<unsigned long long>(encoded_frame.cts),
-                static_cast<unsigned long long>(encoded_frame.fer),
-                static_cast<unsigned long long>(encoded_frame.ferc),
-                bool_text(encoded_frame.texture_encoded),
-                selection.output_index,
-                static_cast<unsigned long long>(output_frame.timestamp),
-                static_cast<unsigned long long>(output_frame.content_timestamp),
-                bool_text(output_frame.duplicate_previous),
-                static_cast<unsigned long long>(selection.output_delta),
-                selection.alpha_index,
-                bool_text(selection.alpha_index_valid),
-                static_cast<unsigned long long>(alpha_frame.timestamp),
-                static_cast<unsigned long long>(selection.alpha_delta),
-                bool_text(selection.repeated),
-                pending_alpha_frames_.size(),
-                pending_output_frames_.size(),
-                pending_encoded_alpha_frames_.size(),
-                consecutive_output_duplicate_frames_);
+                event.reason,
+                static_cast<long long>(event.encoded_frame.pts),
+                static_cast<unsigned long long>(event.encoded_frame.cts),
+                static_cast<unsigned long long>(event.encoded_frame.fer),
+                static_cast<unsigned long long>(event.encoded_frame.ferc),
+                bool_text(event.encoded_frame.texture_encoded),
+                event.selection.output_index,
+                static_cast<unsigned long long>(event.output_frame.timestamp),
+                static_cast<unsigned long long>(event.output_frame.content_timestamp),
+                bool_text(event.output_frame.duplicate_previous),
+                static_cast<unsigned long long>(event.selection.output_delta),
+                event.selection.alpha_index,
+                bool_text(event.selection.alpha_index_valid),
+                static_cast<unsigned long long>(event.alpha_frame.timestamp),
+                static_cast<unsigned long long>(event.selection.alpha_delta),
+                bool_text(event.selection.repeated),
+                event.alpha_queue_size,
+                event.output_queue_size,
+                event.encoded_queue_size,
+                event.consecutive_output_duplicate_frames);
             alpha_recorder::obs::append_diagnostic_log_line(buffer);
         }
 
@@ -1331,139 +1235,45 @@ technique Draw
             }
         }
 
-        void trim_pending_alpha_frames_locked() noexcept
-        {
-            while (pending_alpha_frames_.size() > max_pending_alpha_frames_)
-            {
-                pending_alpha_frames_.pop_front();
-                ++live_telemetry_.alignment_alpha_dropped_frames;
-            }
-        }
-
-        void trim_pending_output_frames_locked() noexcept
-        {
-            while (pending_output_frames_.size() > max_pending_output_frames_)
-            {
-                pending_output_frames_.pop_front();
-                ++live_telemetry_.alignment_output_dropped_frames;
-            }
-        }
-
-        void discard_alpha_frames_through_timestamp_locked(std::uint64_t timestamp) noexcept
-        {
-            while (!pending_alpha_frames_.empty() && pending_alpha_frames_.front().timestamp <= timestamp)
-            {
-                pending_alpha_frames_.pop_front();
-                ++live_telemetry_.alignment_alpha_dropped_frames;
-            }
-        }
-
-        bool make_alignment_repeat_frame_locked(alpha_recorder::obs::AlphaFrame &frame) noexcept
-        {
-            if (!last_alpha_frame_.empty())
-            {
-                frame = last_alpha_frame_;
-                return true;
-            }
-
-            if (!last_captured_alpha_frame_.empty())
-            {
-                frame = last_captured_alpha_frame_;
-                return true;
-            }
-
-            if (video_info_.output_width == 0U || video_info_.output_height == 0U)
-            {
-                return false;
-            }
-
-            const std::size_t width = static_cast<std::size_t>(video_info_.output_width);
-            const std::size_t height = static_cast<std::size_t>(video_info_.output_height);
-            if (width > std::numeric_limits<std::size_t>::max() / height)
-            {
-                return false;
-            }
-
-            const std::size_t bytes = width * height;
-            if (!fallback_black_alpha_ || fallback_black_alpha_->size() != bytes)
-            {
-                try
-                {
-                    fallback_black_alpha_ = std::make_shared<std::vector<std::uint8_t>>(bytes, 0U);
-                }
-                catch (...)
-                {
-                    fallback_black_alpha_.reset();
-                    return false;
-                }
-            }
-
-            frame = alpha_recorder::obs::AlphaFrame{0U, fallback_black_alpha_};
-            ++live_telemetry_.alignment_black_repeats;
-            return true;
-        }
-
-        bool repeat_alignment_frame_locked(AlignmentRepeatReason reason,
-                                           alpha_recorder::obs::AlphaFrame &frame,
-                                           std::string &error_message)
-        {
-            if (!make_alignment_repeat_frame_locked(frame))
-            {
-                session_aborted_ = true;
-                if (reason == AlignmentRepeatReason::MissingOutput)
-                {
-                    error_message =
-                        "Alpha Recorder could not recover alignment because no previous alpha frame is available for a missing output cadence frame.";
-                }
-                else if (reason == AlignmentRepeatReason::TextureStall)
-                {
-                    error_message =
-                        "Alpha Recorder could not recover alignment because no previous alpha frame is available for texture-encoder stall recovery.";
-                }
-                else
-                {
-                    error_message =
-                        "Alpha Recorder could not recover alignment because no previous alpha frame is available for a missing alpha frame.";
-                }
-                return false;
-            }
-
-            ++live_telemetry_.alignment_repeated_frames;
-            if (reason == AlignmentRepeatReason::MissingOutput)
-            {
-                ++live_telemetry_.alignment_missing_output_repeats;
-            }
-            else if (reason == AlignmentRepeatReason::MissingAlpha)
-            {
-                ++live_telemetry_.alignment_missing_alpha_repeats;
-            }
-            else
-            {
-                ++live_telemetry_.alignment_texture_stall_repeats;
-            }
-            return true;
-        }
-
         bool remember_pending_alpha_frame_locked(alpha_recorder::obs::AlphaFrame frame, std::string &error_message)
         {
             (void)error_message;
-            remember_timestamp_span(frame.timestamp, live_telemetry_.first_alpha_timestamp,
-                                    live_telemetry_.last_alpha_timestamp);
-            pending_alpha_frames_.push_back(std::move(frame));
-            ++live_telemetry_.queued_alpha_frames;
-            live_telemetry_.max_pending_alpha_frames =
-                std::max(live_telemetry_.max_pending_alpha_frames, pending_alpha_frames_.size());
-            trim_pending_alpha_frames_locked();
-
+            alignment_engine_.remember_alpha_frame(std::move(frame), live_telemetry_);
             notify_alignment_worker_locked();
             return true;
         }
 
-        bool write_alpha_frame_locked(const alpha_recorder::obs::AlphaFrame &frame, std::string &error_message)
+        void reset_gpu_texture_timing_locked() noexcept
         {
-            alpha_recorder::obs::AlphaMaskVideoWriterFrameDisposition disposition =
-                alpha_recorder::obs::AlphaMaskVideoWriterFrameDisposition::Queued;
-            if (frame.empty() || !writer_.write_frame(frame.alpha, &error_message, &disposition))
+            gpu_main_packet_count_ = 0U;
+            gpu_main_first_packet_cts_ = 0U;
+            gpu_main_last_packet_cts_ = 0U;
+            gpu_main_first_packet_pts_ = 0;
+            gpu_main_last_packet_pts_ = 0;
+            gpu_texture_output_start_video_time_ = 0U;
+            gpu_recording_started_video_time_ = 0U;
+        }
+
+        void remember_gpu_texture_main_packet_locked(const encoder_packet &packet,
+                                                     const encoder_packet_time &packet_time) noexcept
+        {
+            if (gpu_main_packet_count_ == 0U)
+            {
+                gpu_main_first_packet_cts_ = packet_time.cts;
+                gpu_main_first_packet_pts_ = packet.pts;
+            }
+            gpu_main_last_packet_cts_ = packet_time.cts;
+            gpu_main_last_packet_pts_ = packet.pts;
+            ++gpu_main_packet_count_;
+        }
+
+        bool write_alpha_frame_locked(const alpha_recorder::obs::AlphaFrame &frame,
+                                      bool &queued,
+                                      std::string &error_message)
+        {
+            alpha_recorder::obs::AlphaOutputFrameDisposition disposition =
+                alpha_recorder::obs::AlphaOutputFrameDisposition::Queued;
+            if (frame.empty() || !alpha_sink_.write_frame(frame.alpha, &error_message, &disposition))
             {
                 session_aborted_ = true;
                 if (error_message.empty())
@@ -1473,220 +1283,36 @@ technique Draw
                 return false;
             }
 
-            if (disposition == alpha_recorder::obs::AlphaMaskVideoWriterFrameDisposition::Queued)
-            {
-                last_alpha_frame_ = frame;
-            }
+            queued = disposition == alpha_recorder::obs::AlphaOutputFrameDisposition::Queued;
             ++next_sequence_;
-            return true;
-        }
-
-        bool resolve_output_alpha_frame_locked(const EncodedAlphaFrame &encoded_frame,
-                                               bool drain_all,
-                                               alpha_recorder::obs::AlphaFrame &frame,
-                                               std::string &error_message)
-        {
-            if (encoded_frame.cts == 0U)
-            {
-                session_aborted_ = true;
-                error_message =
-                    "Alpha Recorder could not align alpha output because OBS did not provide an encoded-frame composition timestamp.";
-                return false;
-            }
-
-            const alpha_recorder::obs::TimestampFrameSelection output_selection =
-                encoded_frame.texture_encoded
-                    ? alpha_recorder::obs::select_frame_after_timestamp(pending_output_frames_, encoded_frame.cts, drain_all)
-                    : alpha_recorder::obs::select_frame_by_timestamp(pending_output_frames_, encoded_frame.cts, drain_all);
-            if (output_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::WaitingForMoreFrames)
-            {
-                return false;
-            }
-
-            if (output_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::NoPlausibleFrame)
-            {
-                consecutive_output_duplicate_frames_ = 0U;
-                return repeat_alignment_frame_locked(AlignmentRepeatReason::MissingOutput, frame, error_message);
-            }
-
-            if (encoded_frame.texture_encoded &&
-                output_selection.timestamp_delta >
-                    texture_encoder_alignment_delta_ns(video_info_.fps_num, video_info_.fps_den))
-            {
-                consecutive_output_duplicate_frames_ = 0U;
-                return repeat_alignment_frame_locked(AlignmentRepeatReason::MissingOutput, frame, error_message);
-            }
-
-            const alpha_recorder::obs::OutputFrameCadence output_frame =
-                pending_output_frames_[output_selection.selected_index];
-            live_telemetry_.alignment_output_cts_delta.add(
-                signed_timestamp_delta_ns(output_frame.timestamp, encoded_frame.cts));
-            if (alpha_recorder::obs::duplicate_output_uses_previous_alpha(output_frame, last_alpha_frame_,
-                                                                          frame))
-            {
-                live_telemetry_.alignment_alpha_content_delta.add(
-                    signed_timestamp_delta_ns(frame.timestamp, output_frame.content_timestamp));
-                append_alignment_trace_locked(
-                    "output_duplicate", encoded_frame, output_frame, frame,
-                    AlignmentTraceSelection{output_selection.selected_index, 0U, output_selection.timestamp_delta,
-                                            alpha_recorder::obs::timestamp_delta(frame.timestamp,
-                                                                                output_frame.content_timestamp),
-                                            false, true});
-                ++consecutive_output_duplicate_frames_;
-                pending_output_frames_.erase(
-                    pending_output_frames_.begin(),
-                    pending_output_frames_.begin() + static_cast<std::ptrdiff_t>(output_selection.selected_index + 1U));
-                return true;
-            }
-
-            const std::uint64_t texture_successor_delta =
-                texture_successor_delta_ns(video_info_.fps_num, video_info_.fps_den);
-            const bool cts_advances_like_successor =
-                last_aligned_packet_cts_ != 0U && encoded_frame.cts > last_aligned_packet_cts_ &&
-                encoded_frame.cts - last_aligned_packet_cts_ <= texture_successor_delta;
-            const bool recover_texture_stall =
-                encoded_frame.texture_encoded && cts_advances_like_successor &&
-                ((consecutive_output_duplicate_frames_ >= 1U &&
-                  output_selection.timestamp_delta <= texture_successor_delta) ||
-                 (consecutive_output_duplicate_frames_ >= 2U &&
-                  output_selection.timestamp_delta <= plausible_alignment_delta_ns(video_info_.fps_num, video_info_.fps_den)));
-            if (recover_texture_stall)
-            {
-                ++live_telemetry_.texture_stall_corrections;
-                if (!repeat_alignment_frame_locked(AlignmentRepeatReason::TextureStall, frame, error_message))
-                {
-                    return false;
-                }
-                live_telemetry_.alignment_alpha_content_delta.add(
-                    signed_timestamp_delta_ns(frame.timestamp, output_frame.content_timestamp));
-                append_alignment_trace_locked(
-                    "texture_stall", encoded_frame, output_frame, frame,
-                    AlignmentTraceSelection{output_selection.selected_index, 0U, output_selection.timestamp_delta,
-                                            alpha_recorder::obs::timestamp_delta(frame.timestamp,
-                                                                                output_frame.content_timestamp),
-                                            false, true});
-                consecutive_output_duplicate_frames_ = 0U;
-                discard_alpha_frames_through_timestamp_locked(output_frame.content_timestamp);
-                pending_output_frames_.erase(
-                    pending_output_frames_.begin(),
-                    pending_output_frames_.begin() + static_cast<std::ptrdiff_t>(output_selection.selected_index + 1U));
-                return true;
-            }
-
-            consecutive_output_duplicate_frames_ = 0U;
-            const alpha_recorder::obs::TimestampFrameSelection alpha_selection =
-                alpha_recorder::obs::select_frame_by_timestamp(pending_alpha_frames_, output_frame.content_timestamp, drain_all);
-            if (alpha_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::WaitingForMoreFrames)
-            {
-                return false;
-            }
-
-            if (alpha_selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::NoPlausibleFrame)
-            {
-                consecutive_output_duplicate_frames_ = 0U;
-                discard_alpha_frames_through_timestamp_locked(output_frame.content_timestamp);
-                pending_output_frames_.erase(
-                    pending_output_frames_.begin(),
-                    pending_output_frames_.begin() + static_cast<std::ptrdiff_t>(output_selection.selected_index + 1U));
-                if (!repeat_alignment_frame_locked(AlignmentRepeatReason::MissingAlpha, frame, error_message))
-                {
-                    return false;
-                }
-                append_alignment_trace_locked(
-                    "missing_alpha", encoded_frame, output_frame, frame,
-                    AlignmentTraceSelection{output_selection.selected_index, 0U, output_selection.timestamp_delta,
-                                            alpha_recorder::obs::timestamp_delta(frame.timestamp,
-                                                                                output_frame.content_timestamp),
-                                            false, true});
-                return true;
-            }
-
-            frame = std::move(pending_alpha_frames_[alpha_selection.selected_index]);
-            live_telemetry_.alignment_alpha_content_delta.add(
-                signed_timestamp_delta_ns(frame.timestamp, output_frame.content_timestamp));
-            append_alignment_trace_locked(
-                "selected", encoded_frame, output_frame, frame,
-                AlignmentTraceSelection{output_selection.selected_index, alpha_selection.selected_index,
-                                        output_selection.timestamp_delta, alpha_selection.timestamp_delta,
-                                        true, false});
-            pending_alpha_frames_.erase(
-                pending_alpha_frames_.begin(),
-                pending_alpha_frames_.begin() + static_cast<std::ptrdiff_t>(alpha_selection.selected_index + 1U));
-            pending_output_frames_.erase(
-                pending_output_frames_.begin(),
-                pending_output_frames_.begin() + static_cast<std::ptrdiff_t>(output_selection.selected_index + 1U));
             return true;
         }
 
         void drain_encoded_alpha_locked(bool drain_all, std::size_t max_frames = static_cast<std::size_t>(-1))
         {
-            if (!writer_.is_open())
+            if (!alpha_sink_.is_open())
             {
                 return;
             }
 
-            const auto batch_start = std::chrono::steady_clock::now();
-            alpha_recorder::obs::AlphaFrame alpha_frame{};
-            std::string error_message;
-            std::size_t drained_frames = 0U;
-            while (!pending_encoded_alpha_frames_.empty() &&
-                   (drain_all || pending_encoded_alpha_frames_.size() > kMaxEncoderReorderFrames) &&
-                   drained_frames < max_frames)
+            const AlphaAlignmentDrainResult result = alignment_engine_.drain(
+                drain_all,
+                max_frames,
+                live_telemetry_,
+                [this](const alpha_recorder::obs::AlphaFrame &frame, bool &queued, std::string &error_message) {
+                    return write_alpha_frame_locked(frame, queued, error_message);
+                },
+                [this](const AlignmentTraceEvent &event) {
+                    append_alignment_trace_locked(event);
+                });
+            if (result.failed)
             {
-                auto selected = std::min_element(
-                    pending_encoded_alpha_frames_.begin(), pending_encoded_alpha_frames_.end(),
-                    [](const EncodedAlphaFrame &left, const EncodedAlphaFrame &right) { return left.pts < right.pts; });
-                if (pending_output_frames_.empty())
-                {
-                    if (!drain_all)
-                    {
-                        return;
-                    }
-
-                    if (!repeat_alignment_frame_locked(AlignmentRepeatReason::MissingOutput, alpha_frame, error_message))
-                    {
-                        clear_pending_alignment_locked();
-                        log_and_show_error(error_message, false);
-                        return;
-                    }
-                    pending_encoded_alpha_frames_.erase(selected);
-                    if (!write_alpha_frame_locked(alpha_frame, error_message))
-                    {
-                        clear_pending_alignment_locked();
-                        log_and_show_error(error_message, false);
-                        return;
-                    }
-                    ++drained_frames;
-                    ++live_telemetry_.aligned_frames;
-                    continue;
-                }
-
-                const std::uint64_t aligned_packet_cts = selected->cts;
-                if (!resolve_output_alpha_frame_locked(*selected, drain_all, alpha_frame, error_message))
-                {
-                    if (!error_message.empty())
-                    {
-                        clear_pending_alignment_locked();
-                        log_and_show_error(error_message, false);
-                    }
-                    return;
-                }
-
-                last_aligned_packet_cts_ = aligned_packet_cts;
-                pending_encoded_alpha_frames_.erase(selected);
-
-                if (!write_alpha_frame_locked(alpha_frame, error_message))
-                {
-                    clear_pending_alignment_locked();
-                    log_and_show_error(error_message, false);
-                    return;
-                }
-                ++drained_frames;
-                ++live_telemetry_.aligned_frames;
-            }
-            if (drained_frames > 0U)
-            {
-                live_telemetry_.alignment_batch.add(elapsed_ns(batch_start, std::chrono::steady_clock::now()));
+                session_aborted_ = true;
+                alignment_engine_.clear_pending();
+                log_and_show_error(result.error_message.empty()
+                                       ? "Alpha Recorder failed to align an alpha mask frame."
+                                       : result.error_message,
+                                   false);
             }
         }
 
@@ -1696,57 +1322,21 @@ technique Draw
                                            std::uint64_t ferc,
                                            bool texture_encoded)
         {
-            remember_timestamp_span(cts, live_telemetry_.first_packet_cts, live_telemetry_.last_packet_cts);
-            if (fer != 0U)
-            {
-                live_telemetry_.packet_fer_cts_delta.add(signed_timestamp_delta_ns(fer, cts));
-            }
-            if (live_telemetry_.last_packet_cts_for_delta != 0U)
-            {
-                live_telemetry_.packet_cts_delta.add(
-                    signed_timestamp_delta_ns(cts, live_telemetry_.last_packet_cts_for_delta));
-            }
-            if (fer != 0U && live_telemetry_.last_packet_fer_for_delta != 0U)
-            {
-                live_telemetry_.packet_fer_delta.add(
-                    signed_timestamp_delta_ns(fer, live_telemetry_.last_packet_fer_for_delta));
-            }
-            live_telemetry_.last_packet_cts_for_delta = cts;
-            if (fer != 0U)
-            {
-                live_telemetry_.last_packet_fer_for_delta = fer;
-            }
-            EncodedAlphaFrame encoded_frame{};
-            encoded_frame.pts = pts;
-            encoded_frame.cts = cts;
-            encoded_frame.fer = fer;
-            encoded_frame.ferc = ferc;
-            encoded_frame.texture_encoded = texture_encoded;
-            pending_encoded_alpha_frames_.push_back(std::move(encoded_frame));
-            ++live_telemetry_.packet_frames;
-            live_telemetry_.max_pending_encoded_frames =
-                std::max(live_telemetry_.max_pending_encoded_frames, pending_encoded_alpha_frames_.size());
+            alignment_engine_.queue_packet(pts, cts, fer, ferc, texture_encoded, live_telemetry_);
             notify_alignment_worker_locked();
         }
 
         bool remember_output_frame_locked(alpha_recorder::obs::OutputFrameCadence frame, std::string &error_message)
         {
             (void)error_message;
-            remember_timestamp_span(frame.timestamp, live_telemetry_.first_raw_output_timestamp,
-                                    live_telemetry_.last_raw_output_timestamp);
-            pending_output_frames_.push_back(frame);
-            ++live_telemetry_.raw_video_frames;
-            live_telemetry_.max_pending_output_frames =
-                std::max(live_telemetry_.max_pending_output_frames, pending_output_frames_.size());
-            trim_pending_output_frames_locked();
-
+            alignment_engine_.remember_output_frame(frame, live_telemetry_);
             notify_alignment_worker_locked();
             return true;
         }
 
         void reconcile_output_frame_count_locked(std::string &error_message)
         {
-            if (!writer_.is_open())
+            if (!alpha_sink_.is_open())
             {
                 return;
             }
@@ -1802,7 +1392,7 @@ technique Draw
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (!session_active_ && !writer_.is_open() && recording_output_ == nullptr &&
+                if (!session_active_ && !alpha_sink_.is_open() && gpu_texture_output_ == nullptr && recording_output_ == nullptr &&
                     !main_rendered_callback_connected_ && !raw_video_callback_connected_ &&
                     !packet_callback_connected_ && !file_changed_connected_)
                 {
@@ -1855,7 +1445,10 @@ technique Draw
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                capture_final_alpha_frame_locked();
+                if (!gpu_texture_path_)
+                {
+                    capture_final_alpha_frame_locked();
+                }
                 reconcile_output_frame_count_locked(finalize_error);
                 if (!finalize_error.empty())
                 {
@@ -1866,17 +1459,17 @@ technique Draw
                     finalize_failed = true;
                 }
 
-                last_alpha_frame_.alpha.reset();
-                last_alpha_frame_.timestamp = 0U;
-                last_captured_alpha_frame_.alpha.reset();
-                last_captured_alpha_frame_.timestamp = 0U;
-                fallback_black_alpha_.reset();
-                clear_pending_alignment_locked();
+                alignment_engine_.reset_all();
                 raw_video_cadence_.reset();
+                reset_gpu_texture_timing_locked();
                 recording_texture_encoded_ = false;
-                obs_enter_graphics();
-                alpha_extractor_.destroy();
-                obs_leave_graphics();
+                if (!gpu_texture_path_)
+                {
+                    obs_enter_graphics();
+                    alpha_extractor_.destroy();
+                    obs_leave_graphics();
+                }
+                gpu_texture_path_ = false;
             }
 
             if (recording_output != nullptr)
@@ -1921,7 +1514,17 @@ technique Draw
                     return;
                 }
 
-                if (writer_.is_open())
+                if (gpu_texture_path_ && gpu_texture_output_ != nullptr)
+                {
+                    if (!finalize_current_segment_locked(&error_message))
+                    {
+                        if (error_message.empty())
+                        {
+                            error_message = "Alpha Recorder failed to finalize the current split GPU texture alpha movie.";
+                        }
+                    }
+                }
+                else if (alpha_sink_.is_open())
                 {
                     reconcile_output_frame_count_locked(error_message);
                     if (!finalize_current_segment_locked(&error_message))
@@ -1935,12 +1538,7 @@ technique Draw
 
                 if (!session_aborted_)
                 {
-                    last_alpha_frame_.alpha.reset();
-                    last_alpha_frame_.timestamp = 0U;
-                    last_captured_alpha_frame_.alpha.reset();
-                    last_captured_alpha_frame_.timestamp = 0U;
-                    fallback_black_alpha_.reset();
-                    clear_pending_alignment_locked();
+                    alignment_engine_.reset_all();
                     raw_video_cadence_.reset();
 
                     if (!open_segment_locked(next_recording_path, video_info_, false))
@@ -1970,7 +1568,7 @@ technique Draw
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!session_active_ || session_aborted_ || recording_paused_ || recording_output_ == nullptr ||
-                    video_info_.output_width == 0U || video_info_.output_height == 0U)
+                    gpu_texture_path_ || video_info_.output_width == 0U || video_info_.output_height == 0U)
                 {
                     return;
                 }
@@ -2013,10 +1611,12 @@ technique Draw
                 live_telemetry_.capture_render.add(capture_timing.render_ns);
                 live_telemetry_.capture_stage.add(capture_timing.stage_ns);
                 if (session_active_ && !session_aborted_ && !recording_paused_ && recording_output_ != nullptr &&
-                    video_info_.output_width == output_width && video_info_.output_height == output_height)
+                    !gpu_texture_path_ && video_info_.output_width == output_width && video_info_.output_height == output_height)
                 {
-                    last_captured_alpha_frame_ = alpha_recorder::obs::AlphaFrame{alpha_timestamp, std::make_shared<std::vector<std::uint8_t>>(std::move(alpha))};
-                    (void)remember_pending_alpha_frame_locked(last_captured_alpha_frame_, error_message);
+                    (void)remember_pending_alpha_frame_locked(
+                        alpha_recorder::obs::AlphaFrame{alpha_timestamp,
+                                                        std::make_shared<std::vector<std::uint8_t>>(std::move(alpha))},
+                        error_message);
                 }
             }
             else
@@ -2047,7 +1647,7 @@ technique Draw
 
             std::lock_guard<std::mutex> lock(mutex_);
             if (!session_active_ || session_aborted_ || recording_paused_ || recording_output_ == nullptr ||
-                video_info_.output_width == 0U || video_info_.output_height == 0U)
+                gpu_texture_path_ || video_info_.output_width == 0U || video_info_.output_height == 0U)
             {
                 return;
             }
@@ -2079,6 +1679,10 @@ technique Draw
                     error_message =
                         "Alpha Recorder could not align alpha output because OBS did not report encoded-frame composition timing.";
                 }
+                else if (gpu_texture_path_)
+                {
+                    remember_gpu_texture_main_packet_locked(*packet, *packet_time);
+                }
                 else
                 {
                     queue_alpha_for_packet_locked(packet->pts, packet_time->cts, packet_time->fer,
@@ -2101,21 +1705,25 @@ technique Draw
         bool session_aborted_ = false;
         bool recording_paused_ = false;
         bool recording_texture_encoded_ = false;
+        bool gpu_texture_path_ = false;
         std::uint64_t next_sequence_ = 0;
-        std::uint32_t consecutive_output_duplicate_frames_ = 0U;
-        std::uint64_t last_aligned_packet_cts_ = 0U;
-        alpha_recorder::obs::AlphaFrame last_alpha_frame_{};
-        alpha_recorder::obs::AlphaFrame last_captured_alpha_frame_{};
-        std::shared_ptr<std::vector<std::uint8_t>> fallback_black_alpha_{};
-        std::deque<alpha_recorder::obs::AlphaFrame> pending_alpha_frames_{};
-        std::deque<EncodedAlphaFrame> pending_encoded_alpha_frames_{};
-        std::deque<alpha_recorder::obs::OutputFrameCadence> pending_output_frames_{};
+        std::uint64_t gpu_main_packet_count_ = 0U;
+        std::uint64_t gpu_main_first_packet_cts_ = 0U;
+        std::uint64_t gpu_main_last_packet_cts_ = 0U;
+        std::int64_t gpu_main_first_packet_pts_ = 0;
+        std::int64_t gpu_main_last_packet_pts_ = 0;
+        std::uint64_t gpu_texture_output_start_video_time_ = 0U;
+        std::uint64_t gpu_recording_started_video_time_ = 0U;
+        AlphaAlignmentEngine alignment_engine_{};
         alpha_recorder::obs::RawVideoCadenceTracker raw_video_cadence_{};
         LivePipelineTelemetry live_telemetry_{};
         std::filesystem::path recording_path_{};
+        std::filesystem::path gpu_texture_output_path_{};
+        std::filesystem::path gpu_texture_final_output_path_{};
         obs_video_info video_info_{};
         AlphaPlaneExtractor alpha_extractor_{};
-        AlphaMaskVideoWriter writer_{};
+        alpha_recorder::obs::CpuAlphaOutputSink alpha_sink_{};
+        obs_output_t *gpu_texture_output_ = nullptr;
         obs_output_t *recording_output_ = nullptr;
         alpha_recorder::obs::FinalizationFormat finalization_format_ = alpha_recorder::obs::FinalizationFormat::MaskPngMov;
         alpha_recorder::obs::Settings settings_{};
@@ -2126,6 +1734,7 @@ technique Draw
         std::condition_variable alignment_condition_{};
         std::thread alignment_worker_{};
         bool alignment_worker_stop_ = false;
+        bool gpu_texture_output_is_temporary_ = false;
         std::mutex mutex_{};
     };
 

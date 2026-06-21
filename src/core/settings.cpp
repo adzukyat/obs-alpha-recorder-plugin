@@ -1,5 +1,4 @@
 #include "alpha_recorder/plugin.hpp"
-#include "alpha_recorder/export_worker.hpp"
 
 #include <cstdint>
 #include <string_view>
@@ -22,17 +21,6 @@ namespace alpha_recorder::obs
             config_set_string(config, settings_section().data(), settings_finalization_format_key().data(),
                               finalization_format_config_value(format).data());
             (void)config_save(config);
-        }
-
-        void persist_hevc_nvenc_split_encode(struct config_data *config, HevcNvencSplitEncodeMode mode) noexcept
-        {
-            if (config == nullptr)
-            {
-                return;
-            }
-
-            config_set_string(config, settings_section().data(), settings_hevc_nvenc_split_encode_key().data(),
-                              hevc_nvenc_split_encode_config_value(mode).data());
         }
 
         void load_hevc_encoder_settings(struct config_data *config, HevcEncoderSettings &settings) noexcept
@@ -126,24 +114,6 @@ namespace alpha_recorder::obs
             }
         }
 
-        void sanitize_hevc_nvenc_runtime_settings(struct config_data *config,
-                                                  HevcEncoderSettings &settings) noexcept
-        {
-            bool changed = false;
-            if (settings.nvenc_split_encode != HevcNvencSplitEncodeMode::Auto &&
-                !hevc_nvenc_split_encode_runtime_available(settings.nvenc_split_encode))
-            {
-                settings.nvenc_split_encode = HevcNvencSplitEncodeMode::Auto;
-                persist_hevc_nvenc_split_encode(config, settings.nvenc_split_encode);
-                changed = true;
-            }
-
-            if (changed && config != nullptr)
-            {
-                (void)config_save(config);
-            }
-        }
-
     } // namespace
 
     Settings load_settings(struct config_data *config) noexcept
@@ -162,7 +132,7 @@ namespace alpha_recorder::obs
         load_hevc_encoder_settings(config, settings.hevc_encoder);
         load_diagnostic_settings(config, settings);
 
-        settings.finalization_format = preferred_runtime_finalization_format();
+        settings.finalization_format = finalization_format_default();
 
         const char *stored_format = config_get_string(config, settings_section().data(), settings_finalization_format_key().data());
         if (stored_format != nullptr)
@@ -172,21 +142,13 @@ namespace alpha_recorder::obs
             if (try_parse_finalization_format(std::string_view{stored_format}, parsed_format))
             {
                 const FinalizationFormat normalized_format = normalize_finalization_format(parsed_format);
-                if (finalization_format_runtime_available(normalized_format))
-                {
-                    settings.finalization_format = normalized_format;
-                }
+                settings.finalization_format = normalized_format;
             }
 
             if (has_user_value && finalization_format_config_value(settings.finalization_format) != std::string_view{stored_format})
             {
                 persist_normalized_finalization_format(config, settings.finalization_format);
             }
-        }
-
-        if (settings.finalization_format == FinalizationFormat::MaskHevcNvenc)
-        {
-            sanitize_hevc_nvenc_runtime_settings(config, settings.hevc_encoder);
         }
 
         return settings;

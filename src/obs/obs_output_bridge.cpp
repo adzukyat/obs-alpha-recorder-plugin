@@ -283,4 +283,8 @@ namespace alpha_recorder::obs
         return true;
     }
 
+    void unregister_output_module() noexcept
+    {
+    }
+
 } // namespace alpha_recorder::obs

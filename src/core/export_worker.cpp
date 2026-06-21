@@ -142,6 +142,10 @@ namespace alpha_recorder::obs
 
             case FinalizationFormat::MaskHevcAmf:
                 return avcodec_find_encoder_by_name("hevc_amf");
+
+            case FinalizationFormat::MaskHevcQsv:
+            case FinalizationFormat::MaskHevcVaapi:
+                return nullptr;
             }
 
             return nullptr;
@@ -400,6 +404,12 @@ namespace alpha_recorder::obs
                     (void)av_opt_set(encoder.priv_data, "vbaq", "true", 0);
                 }
                 return true;
+
+            case FinalizationFormat::MaskHevcQsv:
+            case FinalizationFormat::MaskHevcVaapi:
+                return set_error(error_message,
+                                 std::string{finalization_format_display_name(config.finalization_format)} +
+                                     " is only supported through the OBS GPU texture output path.");
             }
 
             return set_error(error_message, "Alpha Recorder received an unsupported mask format.");
