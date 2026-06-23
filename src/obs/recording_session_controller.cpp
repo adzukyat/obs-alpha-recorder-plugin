@@ -27,6 +27,7 @@
 #include <obs-module.h>
 
 #include <util/bmem.h>
+#include <util/config-file.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -75,6 +76,48 @@ namespace
 
         std::error_code error;
         return std::filesystem::is_directory(path, error) && !error;
+    }
+
+    bool text_equals(const char *text, const char *expected) noexcept
+    {
+        if (text == nullptr || expected == nullptr)
+        {
+            return false;
+        }
+
+        return std::string_view{text} == expected;
+    }
+
+    std::filesystem::path active_profile_recording_directory(config_t *profile_config)
+    {
+        if (profile_config == nullptr)
+        {
+            return {};
+        }
+
+        std::filesystem::path directory{};
+        const char *mode = config_get_string(profile_config, "Output", "Mode");
+        if (text_equals(mode, "Advanced"))
+        {
+            const char *recording_type = config_get_string(profile_config, "AdvOut", "RecType");
+            if (text_equals(recording_type, "FFmpeg"))
+            {
+                if (config_get_bool(profile_config, "AdvOut", "FFOutputToFile"))
+                {
+                    directory = path_from_utf8(config_get_string(profile_config, "AdvOut", "FFFilePath"));
+                }
+            }
+            else
+            {
+                directory = path_from_utf8(config_get_string(profile_config, "AdvOut", "RecFilePath"));
+            }
+        }
+        else
+        {
+            directory = path_from_utf8(config_get_string(profile_config, "SimpleOutput", "FilePath"));
+        }
+
+        return directory;
     }
 
     std::filesystem::path recording_file_path_from_output(obs_output_t *recording_output)
@@ -136,6 +179,15 @@ namespace
                 {
                     directory = path_is_directory(configured_path) ? configured_path : configured_path.parent_path();
                 }
+            }
+        }
+
+        if (directory.empty())
+        {
+            config_t *profile_config = obs_frontend_get_profile_config();
+            if (profile_config != nullptr)
+            {
+                directory = active_profile_recording_directory(profile_config);
             }
         }
 

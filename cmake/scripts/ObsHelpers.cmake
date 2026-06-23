@@ -97,6 +97,7 @@ function(alpha_recorder_linux_runtime_layout obs_root out_bin_dir out_plugin_dir
 
     alpha_recorder_first_existing(data_dir
         "${obs_root}/share/obs/obs-studio"
+        "${obs_root}/share/obs"
         "${obs_root}/data"
     )
 
@@ -147,6 +148,7 @@ function(alpha_recorder_validate_obs_runtime obs_root)
             alpha_recorder_any_exists(has_runtime_candidate
                 "${lib_dir}/libobs.so"
                 "${lib_dir}/libobs.so.0"
+                "${lib_dir}/libobs.so.30"
             )
             if(has_runtime_candidate)
                 set(has_runtime ON)

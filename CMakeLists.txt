@@ -640,6 +640,98 @@ if(_alpha_recorder_build_full_targets)
     alpha_recorder_probe_obs_app_e2e_hevc_encoder("NVENC" "hevc_nvenc" _alpha_recorder_obs_app_e2e_has_nvenc _alpha_recorder_obs_app_e2e_nvenc_reason)
     alpha_recorder_probe_obs_app_e2e_hevc_encoder("AMF" "hevc_amf" _alpha_recorder_obs_app_e2e_has_amf _alpha_recorder_obs_app_e2e_amf_reason)
 
+    function(alpha_recorder_probe_obs_app_e2e_vaapi_encoder out_available out_reason)
+        if(NOT UNIX OR APPLE)
+            set(${out_available} FALSE PARENT_SCOPE)
+            set(${out_reason} "VAAPI OBS app E2E is only registered on Linux runtimes" PARENT_SCOPE)
+            return()
+        endif()
+        if(NOT ALPHA_RECORDER_FFMPEG_EXECUTABLE)
+            set(${out_available} FALSE PARENT_SCOPE)
+            set(${out_reason} "ffmpeg was not found on PATH, so VAAPI HEVC availability could not be probed" PARENT_SCOPE)
+            return()
+        endif()
+
+        set(_alpha_recorder_vaapi_devices)
+        foreach(_alpha_recorder_vaapi_index RANGE 128 143)
+            if(EXISTS "/dev/dri/renderD${_alpha_recorder_vaapi_index}")
+                list(APPEND _alpha_recorder_vaapi_devices "/dev/dri/renderD${_alpha_recorder_vaapi_index}")
+            endif()
+        endforeach()
+        foreach(_alpha_recorder_vaapi_index RANGE 0 15)
+            if(EXISTS "/dev/dri/card${_alpha_recorder_vaapi_index}")
+                list(APPEND _alpha_recorder_vaapi_devices "/dev/dri/card${_alpha_recorder_vaapi_index}")
+            endif()
+        endforeach()
+        if(_alpha_recorder_vaapi_devices STREQUAL "")
+            set(${out_available} FALSE PARENT_SCOPE)
+            set(${out_reason} "no /dev/dri VAAPI device was found" PARENT_SCOPE)
+            return()
+        endif()
+
+        set(_alpha_recorder_vaapi_errors)
+        foreach(_alpha_recorder_vaapi_device IN LISTS _alpha_recorder_vaapi_devices)
+            foreach(_alpha_recorder_vaapi_driver IN ITEMS "" "d3d12")
+                set(_alpha_recorder_vaapi_env)
+                if(NOT _alpha_recorder_vaapi_driver STREQUAL "")
+                    list(APPEND _alpha_recorder_vaapi_env "LIBVA_DRIVER_NAME=${_alpha_recorder_vaapi_driver}")
+                endif()
+                execute_process(
+                    COMMAND "${CMAKE_COMMAND}" -E env ${_alpha_recorder_vaapi_env}
+                        "${ALPHA_RECORDER_FFMPEG_EXECUTABLE}"
+                        -nostdin -hide_banner -loglevel error
+                        -init_hw_device "vaapi=alpha_recorder_vaapi:${_alpha_recorder_vaapi_device}"
+                        -filter_hw_device alpha_recorder_vaapi
+                        -f lavfi -i color=c=black:s=1920x1080:r=60
+                        -frames:v 1 -vf format=nv12,hwupload -c:v hevc_vaapi -f null -
+                    RESULT_VARIABLE _alpha_recorder_vaapi_probe_result
+                    OUTPUT_VARIABLE _alpha_recorder_vaapi_probe_output
+                    ERROR_VARIABLE _alpha_recorder_vaapi_probe_error
+                    TIMEOUT 20
+                )
+                if(_alpha_recorder_vaapi_probe_result EQUAL 0)
+                    set(${out_available} TRUE PARENT_SCOPE)
+                    if(_alpha_recorder_vaapi_driver STREQUAL "")
+                        set(${out_reason} "VAAPI HEVC encoder opened successfully on ${_alpha_recorder_vaapi_device}" PARENT_SCOPE)
+                    else()
+                        set(${out_reason} "VAAPI HEVC encoder opened successfully on ${_alpha_recorder_vaapi_device} with LIBVA_DRIVER_NAME=${_alpha_recorder_vaapi_driver}" PARENT_SCOPE)
+                    endif()
+                    return()
+                endif()
+                string(STRIP "${_alpha_recorder_vaapi_probe_error}" _alpha_recorder_vaapi_probe_error)
+                string(STRIP "${_alpha_recorder_vaapi_probe_output}" _alpha_recorder_vaapi_probe_output)
+                string(REPLACE "\n" " | " _alpha_recorder_vaapi_probe_error "${_alpha_recorder_vaapi_probe_error}")
+                string(REPLACE "\n" " | " _alpha_recorder_vaapi_probe_output "${_alpha_recorder_vaapi_probe_output}")
+                string(REPLACE "\r" "" _alpha_recorder_vaapi_probe_error "${_alpha_recorder_vaapi_probe_error}")
+                string(REPLACE "\r" "" _alpha_recorder_vaapi_probe_output "${_alpha_recorder_vaapi_probe_output}")
+                if(NOT _alpha_recorder_vaapi_probe_output STREQUAL "")
+                    if(_alpha_recorder_vaapi_probe_error STREQUAL "")
+                        set(_alpha_recorder_vaapi_probe_error "${_alpha_recorder_vaapi_probe_output}")
+                    else()
+                        string(APPEND _alpha_recorder_vaapi_probe_error " | ${_alpha_recorder_vaapi_probe_output}")
+                    endif()
+                endif()
+                if(_alpha_recorder_vaapi_probe_error STREQUAL "")
+                    set(_alpha_recorder_vaapi_probe_error "ffmpeg exited with ${_alpha_recorder_vaapi_probe_result}")
+                endif()
+                if(_alpha_recorder_vaapi_driver STREQUAL "")
+                    list(APPEND _alpha_recorder_vaapi_errors "${_alpha_recorder_vaapi_device}: ${_alpha_recorder_vaapi_probe_error}")
+                else()
+                    list(APPEND _alpha_recorder_vaapi_errors "${_alpha_recorder_vaapi_device} (${_alpha_recorder_vaapi_driver}): ${_alpha_recorder_vaapi_probe_error}")
+                endif()
+            endforeach()
+        endforeach()
+
+        string(REPLACE ";" " | " _alpha_recorder_vaapi_error_summary "${_alpha_recorder_vaapi_errors}")
+        if(_alpha_recorder_vaapi_error_summary STREQUAL "")
+            set(_alpha_recorder_vaapi_error_summary "no candidate /dev/dri VAAPI device could be opened by ffmpeg; on WSL, load vgem and verify `LIBVA_DRIVER_NAME=d3d12 vainfo --display drm --device /dev/dri/card0` first")
+        endif()
+        set(${out_available} FALSE PARENT_SCOPE)
+        set(${out_reason} "VAAPI HEVC encoder probe failed: ${_alpha_recorder_vaapi_error_summary}" PARENT_SCOPE)
+    endfunction()
+
+    alpha_recorder_probe_obs_app_e2e_vaapi_encoder(_alpha_recorder_obs_app_e2e_has_vaapi _alpha_recorder_obs_app_e2e_vaapi_reason)
+
     set(_alpha_recorder_obs_app_e2e_has_obs_nvenc_plugin TRUE)
     set(_alpha_recorder_obs_app_e2e_obs_nvenc_plugin_reason "OBS NVENC plugin is available")
     if(UNIX AND NOT APPLE)
@@ -756,6 +848,14 @@ if(_alpha_recorder_build_full_targets)
         )
     else()
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf "${_alpha_recorder_obs_app_e2e_amf_reason}")
+    endif()
+    if(_alpha_recorder_obs_app_e2e_has_vaapi)
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_vaapi fhd60-rgb-sw-alpha-hevc-vaapi
+            FINALIZATION_FORMAT mask_hevc_vaapi
+            RGB_ENCODER software
+        )
+    else()
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_vaapi "${_alpha_recorder_obs_app_e2e_vaapi_reason}")
     endif()
     if(_alpha_recorder_obs_app_e2e_has_nvenc_rgb)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov fhd60-rgb-nvenc-hevc-alpha-png-mov

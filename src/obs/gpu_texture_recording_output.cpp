@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <mutex>
@@ -19,6 +20,10 @@
 #include <graphics/graphics.h>
 #include <graphics/vec4.h>
 #include <util/bmem.h>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
 
 namespace
 {
@@ -427,6 +432,91 @@ technique Draw
         return "normal";
     }
 
+    bool path_is_read_write_accessible(const std::filesystem::path &path) noexcept
+    {
+#if defined(_WIN32)
+        (void)path;
+        return false;
+#else
+        return !path.empty() && ::access(path.c_str(), R_OK | W_OK) == 0;
+#endif
+    }
+
+    std::string obs_vaapi_hevc_default_device_path()
+    {
+        obs_data_t *defaults = obs_encoder_defaults("hevc_ffmpeg_vaapi_tex");
+        if (defaults == nullptr)
+        {
+            return {};
+        }
+
+        std::string device = obs_data_get_string(defaults, "vaapi_device");
+        obs_data_release(defaults);
+        return device;
+    }
+
+    std::string obs_vaapi_hevc_property_device_path()
+    {
+        obs_properties_t *properties = obs_get_encoder_properties("hevc_ffmpeg_vaapi_tex");
+        if (properties == nullptr)
+        {
+            return {};
+        }
+
+        std::string device;
+        obs_property_t *device_property = obs_properties_get(properties, "vaapi_device");
+        if (device_property != nullptr)
+        {
+            const size_t count = obs_property_list_item_count(device_property);
+            for (size_t index = 0; index < count; ++index)
+            {
+                if (obs_property_list_item_disabled(device_property, index))
+                {
+                    continue;
+                }
+
+                const char *value = obs_property_list_item_string(device_property, index);
+                const std::string_view path{value != nullptr ? value : ""};
+                if (path.find("/dev/dri/by-path/") != std::string_view::npos)
+                {
+                    device = value;
+                    break;
+                }
+            }
+        }
+
+        obs_properties_destroy(properties);
+        return device;
+    }
+
+    std::string discover_vaapi_device_path()
+    {
+#if defined(_WIN32) || defined(__APPLE__)
+        return {};
+#else
+        if (const char *configured = std::getenv("ALPHA_RECORDER_VAAPI_DEVICE");
+            configured != nullptr && *configured != '\0' &&
+            path_is_read_write_accessible(std::filesystem::path{configured}))
+        {
+            return configured;
+        }
+
+        if (std::string device = obs_vaapi_hevc_default_device_path();
+            path_is_read_write_accessible(std::filesystem::path{device}))
+        {
+            return device;
+        }
+
+        if (std::string device = obs_vaapi_hevc_property_device_path();
+            path_is_read_write_accessible(std::filesystem::path{device}))
+        {
+            return device;
+        }
+
+        return {};
+#endif
+    }
+
     void program_alpha_update(void *data, obs_data_t *settings)
     {
         auto *source = static_cast<ProgramAlphaSource *>(data);
@@ -763,7 +853,10 @@ technique Draw
             break;
 
         case TextureHevcBackend::Vaapi:
+            obs_data_set_string(settings, "vaapi_device", discover_vaapi_device_path().c_str());
             obs_data_set_string(settings, "rate_control", "CQP");
+            obs_data_set_int(settings, "profile", 1);
+            obs_data_set_int(settings, "level", -99);
             obs_data_set_int(settings, "qp", static_cast<long long>(cqp));
             obs_data_set_int(settings, "keyint_sec", static_cast<long long>(keyint_sec));
             obs_data_set_int(settings, "bf", static_cast<long long>(b_frames));
@@ -780,6 +873,7 @@ technique Draw
 
         const std::string opts = "keyint=" + std::to_string(gop_frames);
         obs_data_set_string(settings, "opts", opts.c_str());
+        obs_data_set_string(settings, "ffmpeg_opts", opts.c_str());
         return settings;
     }
 
@@ -1163,6 +1257,21 @@ namespace alpha_recorder::obs
             return false;
         }
 
+        if (format == FinalizationFormat::MaskHevcVaapi)
+        {
+            const std::string device = discover_vaapi_device_path();
+            if (device.empty())
+            {
+                assign_error(reason,
+                             "HEVC VAAPI Mask is not available because no readable/writable /dev/dri VAAPI "
+                             "device was found. On WSL, try loading vgem and ensure the distro can run "
+                             "`LIBVA_DRIVER_NAME=d3d12 vainfo --display drm --device /dev/dri/card0`; if OBS "
+                             "does not expose a HEVC-capable render node, set ALPHA_RECORDER_VAAPI_DEVICE "
+                             "to the working device path.");
+                return false;
+            }
+        }
+
         if (reason != nullptr)
         {
             reason->clear();
@@ -1329,8 +1438,12 @@ namespace alpha_recorder::obs
             }
         }
 
-        const std::int64_t alpha_content_cts_offset =
+        const std::int64_t measured_alpha_content_cts_offset =
             median_offset(content_offset_samples);
+        const bool use_packet_cts_for_alignment =
+            !main_texture_encoded && selected_render_bias > 4U;
+        const std::int64_t alpha_content_cts_offset =
+            use_packet_cts_for_alignment ? 0 : measured_alpha_content_cts_offset;
         const std::uint64_t target_content_cts =
             add_signed_ns(main_first_packet_cts, main_texture_encoded ? alpha_content_cts_offset : 0);
 
@@ -1350,6 +1463,7 @@ namespace alpha_recorder::obs
                 return lhs.pts < rhs.pts;
             });
         if (best == context->alpha_packet_times.end() || best->pts < 0 ||
+            static_cast<std::uint64_t>(best->pts) >= context->alpha_packet_times.size() ||
             main_packet_count > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
         {
             assign_error(error_message, "Alpha Recorder GPU texture output computed an invalid edit range");
@@ -1357,9 +1471,12 @@ namespace alpha_recorder::obs
         }
 
         range.media_time = best->pts;
-        range.duration = static_cast<std::int64_t>(main_packet_count);
+        const std::uint64_t available_alpha_packets =
+            static_cast<std::uint64_t>(context->alpha_packet_times.size()) -
+            static_cast<std::uint64_t>(best->pts);
+        range.duration = static_cast<std::int64_t>(std::min(main_packet_count, available_alpha_packets));
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] dynamic edit range media_time=%lld duration=%lld main_first_cts=%llu target_content_cts=%llu alpha_cts=%llu alpha_content_cts=%llu delta_ns=%llu alpha_content_offset_ns=%lld alpha_render_bias=%llu alpha_offset_samples=%llu alpha_offset_candidates=%llu first_alpha_offset_candidate_ns=%lld alpha_input_renders=%llu alpha_timings=%llu main_texture=%s",
+             "[alpha_recorder_gpu_texture] dynamic edit range media_time=%lld duration=%lld main_first_cts=%llu target_content_cts=%llu alpha_cts=%llu alpha_content_cts=%llu delta_ns=%llu alpha_content_offset_ns=%lld measured_alpha_content_offset_ns=%lld alpha_render_bias=%llu alpha_offset_samples=%llu alpha_offset_candidates=%llu first_alpha_offset_candidate_ns=%lld alpha_input_renders=%llu alpha_timings=%llu main_texture=%s packet_cts_alignment=%s",
              static_cast<long long>(range.media_time),
              static_cast<long long>(range.duration),
              static_cast<unsigned long long>(main_first_packet_cts),
@@ -1369,13 +1486,15 @@ namespace alpha_recorder::obs
              static_cast<unsigned long long>(abs_delta(add_signed_ns(best->cts, alpha_content_cts_offset),
                                                        target_content_cts)),
              static_cast<long long>(alpha_content_cts_offset),
+             static_cast<long long>(measured_alpha_content_cts_offset),
              static_cast<unsigned long long>(selected_render_bias),
              static_cast<unsigned long long>(content_offset_samples.size()),
              static_cast<unsigned long long>(content_offset_candidates),
              static_cast<long long>(first_content_offset_candidate),
              static_cast<unsigned long long>(context->alpha_input_render_times.size()),
              static_cast<unsigned long long>(context->alpha_packet_times.size()),
-             main_texture_encoded ? "true" : "false");
+             main_texture_encoded ? "true" : "false",
+             use_packet_cts_for_alignment ? "true" : "false");
         return true;
     }
 
