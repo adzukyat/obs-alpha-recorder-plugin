@@ -1,6 +1,7 @@
 #pragma once
 
 #include "alpha_output_sink.hpp"
+#include "gpu_texture_timeline_ledger.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -21,12 +22,6 @@ namespace alpha_recorder::obs
         std::int64_t first_pts = 0;
         std::int64_t last_pts = 0;
         bool finalized = false;
-    };
-
-    struct GpuTextureRecordingTiming
-    {
-        std::int64_t pts = 0;
-        std::uint64_t cts = 0U;
     };
 
     [[nodiscard]] constexpr const char *gpu_texture_recording_output_id() noexcept
@@ -55,10 +50,15 @@ namespace alpha_recorder::obs
         const AlphaVisiblePacketRange &range,
         std::string *error_message = nullptr) noexcept;
 
+    [[nodiscard]] bool gpu_texture_recording_output_finalize_mux(
+        obs_output_t *output,
+        std::string *error_message = nullptr) noexcept;
+
+    void gpu_texture_recording_output_abort_mux(obs_output_t *output) noexcept;
+
     [[nodiscard]] bool gpu_texture_recording_output_compute_visible_range(
         obs_output_t *output,
-        std::uint64_t main_first_packet_cts,
-        std::uint64_t main_packet_count,
+        const std::vector<GpuTexturePacketRecord> &main_packets,
         bool main_texture_encoded,
         AlphaVisiblePacketRange &range,
         std::string *error_message = nullptr) noexcept;

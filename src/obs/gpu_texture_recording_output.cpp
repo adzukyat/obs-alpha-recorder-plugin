@@ -4,6 +4,7 @@
 #include "gpu_texture_alpha_output_sink.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -30,6 +31,9 @@ namespace
     constexpr const char *kOutputName = "Alpha Recorder GPU Texture Recording";
     constexpr const char *kSourceName = "Alpha Recorder Program Alpha";
     constexpr const char *kDefaultEncoderId = "obs_nvenc_hevc_tex";
+    constexpr std::uint64_t kEncoderStartupPhaseDelayFrames = 12U;
+    constexpr std::size_t kPhaseTextureCount =
+        static_cast<std::size_t>(kEncoderStartupPhaseDelayFrames + 3U);
 
     enum class TextureHevcBackend
     {
@@ -71,12 +75,27 @@ float4 PSAlpha(VertInOut vert_in) : TARGET
     return float4(alpha, alpha, alpha, 1.0);
 }
 
-technique Draw
+float4 PSRed(VertInOut vert_in) : TARGET
+{
+    float alpha = image.Sample(def_sampler, vert_in.uv).r;
+    return float4(alpha, alpha, alpha, 1.0);
+}
+
+technique DrawAlpha
 {
     pass
     {
         vertex_shader = VSDefault(vert_in);
         pixel_shader  = PSAlpha(vert_in);
+    }
+}
+
+technique DrawRed
+{
+    pass
+    {
+        vertex_shader = VSDefault(vert_in);
+        pixel_shader  = PSRed(vert_in);
     }
 }
 )";
@@ -88,6 +107,11 @@ technique Draw
         gs_effect_t *effect = nullptr;
         gs_eparam_t *image_param = nullptr;
         GpuTextureRecordingOutputContext *context = nullptr;
+        std::array<gs_texture_t *, kPhaseTextureCount> alpha_textures{};
+        std::array<std::uint64_t, kPhaseTextureCount> alpha_texture_generations{};
+        std::array<bool, kPhaseTextureCount> alpha_texture_valid{};
+        std::uint32_t write_texture_index = 0U;
+        std::uint64_t next_generation = 0U;
     };
 
     struct GpuTextureRecordingOutputContext
@@ -96,7 +120,6 @@ technique Draw
         obs_source_t *source = nullptr;
         obs_view_t *view = nullptr;
         obs_encoder_t *encoder = nullptr;
-        obs_encoder_t *audio_encoder = nullptr;
         video_t *video = nullptr;
         alpha_recorder::obs::GpuTextureAlphaOutputSink sink{};
 
@@ -107,11 +130,17 @@ technique Draw
         std::uint32_t fps_num = 0U;
         std::uint32_t fps_den = 1U;
         alpha_recorder::obs::HevcEncoderSettings hevc_encoder{};
+        alpha_recorder::obs::MainContentPhase main_phase =
+            alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
 
         std::mutex mutex{};
-        std::vector<alpha_recorder::obs::GpuTextureRecordingTiming> alpha_packet_times{};
-        std::vector<std::uint64_t> alpha_input_render_times{};
-        std::vector<std::int64_t> alpha_content_cts_offset_samples{};
+        std::vector<alpha_recorder::obs::GpuTexturePacketRecord> alpha_packet_records{};
+        std::vector<alpha_recorder::obs::ProgramRenderRecord> alpha_render_records{};
+        std::uint32_t start_total_frames = 0U;
+        std::uint32_t start_lagged_frames = 0U;
+        std::uint32_t stop_total_frames = 0U;
+        std::uint32_t stop_lagged_frames = 0U;
+        bool has_stop_frame_counters = false;
         bool packet_callback_connected = false;
         bool stop_finalized = false;
     };
@@ -176,71 +205,17 @@ technique Draw
         return "unknown";
     }
 
-    std::uint64_t abs_delta(std::uint64_t lhs, std::uint64_t rhs) noexcept
+    void remember_alpha_render_record(
+        GpuTextureRecordingOutputContext *context,
+        const alpha_recorder::obs::ProgramRenderRecord &record) noexcept
     {
-        return lhs >= rhs ? lhs - rhs : rhs - lhs;
-    }
-
-    std::uint64_t abs_i64(std::int64_t value) noexcept
-    {
-        return value >= 0 ? static_cast<std::uint64_t>(value)
-                          : static_cast<std::uint64_t>(-(value + 1)) + 1ULL;
-    }
-
-    std::int64_t signed_delta_ns(std::uint64_t lhs, std::uint64_t rhs) noexcept
-    {
-        const std::uint64_t delta = abs_delta(lhs, rhs);
-        const std::uint64_t clamped = std::min<std::uint64_t>(
-            delta, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
-        return lhs >= rhs ? static_cast<std::int64_t>(clamped) : -static_cast<std::int64_t>(clamped);
-    }
-
-    std::uint64_t add_signed_ns(std::uint64_t value, std::int64_t delta) noexcept
-    {
-        if (delta >= 0)
-        {
-            const auto unsigned_delta = static_cast<std::uint64_t>(delta);
-            return value > std::numeric_limits<std::uint64_t>::max() - unsigned_delta
-                       ? std::numeric_limits<std::uint64_t>::max()
-                       : value + unsigned_delta;
-        }
-
-        const auto unsigned_delta = static_cast<std::uint64_t>(-(delta + 1)) + 1ULL;
-        return unsigned_delta > value ? 0U : value - unsigned_delta;
-    }
-
-    std::uint64_t frame_interval_ns(const GpuTextureRecordingOutputContext &context) noexcept
-    {
-        const std::uint32_t fps_num = context.fps_num == 0U ? 60U : context.fps_num;
-        const std::uint32_t fps_den = context.fps_den == 0U ? 1U : context.fps_den;
-        return std::max<std::uint64_t>(
-            1ULL,
-            (1000000000ULL * static_cast<std::uint64_t>(fps_den)) /
-                static_cast<std::uint64_t>(fps_num));
-    }
-
-    std::int64_t median_offset(std::vector<std::int64_t> samples)
-    {
-        if (samples.empty())
-        {
-            return 0;
-        }
-
-        const auto middle = samples.begin() + static_cast<std::ptrdiff_t>(samples.size() / 2U);
-        std::nth_element(samples.begin(), middle, samples.end());
-        return *middle;
-    }
-
-    void remember_alpha_input_render_time(GpuTextureRecordingOutputContext *context,
-                                          std::uint64_t render_time) noexcept
-    {
-        if (context == nullptr || render_time == 0U)
+        if (context == nullptr || record.render_time_ns == 0U)
         {
             return;
         }
 
         std::lock_guard<std::mutex> lock(context->mutex);
-        context->alpha_input_render_times.push_back(render_time);
+        context->alpha_render_records.push_back(record);
     }
 
     GpuTextureRecordingOutputContext *find_context(obs_output_t *output) noexcept
@@ -553,6 +528,98 @@ technique Draw
         return source.image_param != nullptr;
     }
 
+    bool ensure_program_alpha_phase_textures(ProgramAlphaSource &source)
+    {
+        for (gs_texture_t *&texture : source.alpha_textures)
+        {
+            if (texture == nullptr)
+            {
+                texture = gs_texture_create(source.width, source.height, GS_R8, 1, nullptr, GS_RENDER_TARGET);
+            }
+            if (texture == nullptr)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void destroy_program_alpha_phase_textures(ProgramAlphaSource &source) noexcept
+    {
+        for (gs_texture_t *&texture : source.alpha_textures)
+        {
+            if (texture != nullptr)
+            {
+                gs_texture_destroy(texture);
+                texture = nullptr;
+            }
+        }
+        source.write_texture_index = 0U;
+        source.alpha_texture_generations = {};
+        source.alpha_texture_valid = {};
+    }
+
+    bool render_program_alpha_to_texture(ProgramAlphaSource &source,
+                                         gs_texture_t *program_texture,
+                                         gs_texture_t *target)
+    {
+        if (target == nullptr)
+        {
+            return false;
+        }
+
+        gs_texture_t *previous_render_target = gs_get_render_target();
+        gs_zstencil_t *previous_zstencil_target = gs_get_zstencil_target();
+        gs_set_render_target(target, nullptr);
+
+        vec4 clear_color;
+        vec4_set(&clear_color, 0.0F, 0.0F, 0.0F, 1.0F);
+        gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0F, 0);
+        gs_ortho(0.0F, static_cast<float>(source.width), 0.0F, static_cast<float>(source.height),
+                 -100.0F, 100.0F);
+        gs_set_viewport(0, 0, static_cast<int>(source.width), static_cast<int>(source.height));
+
+        gs_effect_set_texture(source.image_param, program_texture);
+        gs_enable_blending(false);
+        while (gs_effect_loop(source.effect, "DrawAlpha"))
+        {
+            gs_draw_sprite(program_texture, 0, source.width, source.height);
+        }
+        gs_enable_blending(true);
+        gs_set_render_target(previous_render_target, previous_zstencil_target);
+        return true;
+    }
+
+    void draw_alpha_texture(ProgramAlphaSource &source, gs_texture_t *texture)
+    {
+        if (texture == nullptr)
+        {
+            return;
+        }
+
+        gs_effect_set_texture(source.image_param, texture);
+        gs_enable_blending(false);
+        while (gs_effect_loop(source.effect, "DrawRed"))
+        {
+            gs_draw_sprite(texture, 0, source.width, source.height);
+        }
+        gs_enable_blending(true);
+    }
+
+    gs_texture_t *find_generation_texture(ProgramAlphaSource &source,
+                                          std::uint64_t generation) noexcept
+    {
+        for (std::size_t index = 0U; index < source.alpha_textures.size(); ++index)
+        {
+            if (source.alpha_texture_valid[index] &&
+                source.alpha_texture_generations[index] == generation)
+            {
+                return source.alpha_textures[index];
+            }
+        }
+        return nullptr;
+    }
+
     void *program_alpha_create(obs_data_t *settings, obs_source_t *)
     {
         auto *source = new ProgramAlphaSource{};
@@ -572,6 +639,7 @@ technique Draw
             gs_effect_destroy(source->effect);
             source->effect = nullptr;
         }
+        destroy_program_alpha_phase_textures(*source);
         delete source;
     }
 
@@ -589,7 +657,7 @@ technique Draw
     {
         auto *source = static_cast<ProgramAlphaSource *>(data);
         if (source == nullptr || source->width == 0U || source->height == 0U ||
-            !ensure_program_alpha_effect(*source))
+            !ensure_program_alpha_effect(*source) || !ensure_program_alpha_phase_textures(*source))
         {
             return;
         }
@@ -600,15 +668,50 @@ technique Draw
             return;
         }
 
-        remember_alpha_input_render_time(source->context, obs_get_video_frame_time());
-
-        gs_effect_set_texture(source->image_param, program_texture);
-        gs_enable_blending(false);
-        while (gs_effect_loop(source->effect, "Draw"))
+        const std::uint64_t render_time = obs_get_video_frame_time();
+        const std::uint64_t generation = source->next_generation++;
+        const std::uint32_t write_index = source->write_texture_index % source->alpha_textures.size();
+        gs_texture_t *write_texture = source->alpha_textures[write_index];
+        if (!render_program_alpha_to_texture(*source, program_texture, write_texture))
         {
-            gs_draw_sprite(program_texture, 0, source->width, source->height);
+            return;
         }
-        gs_enable_blending(true);
+
+        const bool previous_phase =
+            source->context != nullptr &&
+            source->context->main_phase == alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
+        bool emitted = true;
+        std::uint64_t emitted_generation = generation;
+        gs_texture_t *output_texture = write_texture;
+        const std::uint64_t phase_delay =
+            kEncoderStartupPhaseDelayFrames + (previous_phase ? 1U : 0U);
+        if (generation >= phase_delay)
+        {
+            const std::uint64_t target_generation = generation - phase_delay;
+            if (gs_texture_t *delayed_texture = find_generation_texture(*source, target_generation);
+                delayed_texture != nullptr)
+            {
+                emitted_generation = target_generation;
+                output_texture = delayed_texture;
+            }
+            else
+            {
+                emitted = false;
+            }
+        }
+        else
+        {
+            emitted = false;
+        }
+
+        draw_alpha_texture(*source, output_texture);
+        remember_alpha_render_record(
+            source->context,
+            alpha_recorder::obs::ProgramRenderRecord{generation, render_time, emitted_generation, emitted});
+
+        source->alpha_texture_generations[write_index] = generation;
+        source->alpha_texture_valid[write_index] = true;
+        source->write_texture_index = (write_index + 1U) % source->alpha_textures.size();
     }
 
     const char *program_alpha_name(void *)
@@ -633,14 +736,7 @@ technique Draw
             if (!obs_output_active(context.output))
             {
                 obs_output_set_video_encoder(context.output, nullptr);
-                obs_output_set_audio_encoder(context.output, nullptr, 0U);
             }
-        }
-
-        if (context.audio_encoder != nullptr)
-        {
-            obs_encoder_release(context.audio_encoder);
-            context.audio_encoder = nullptr;
         }
 
         if (context.encoder != nullptr)
@@ -734,6 +830,9 @@ technique Draw
         context->hevc_encoder.nvenc_gpu_index =
             alpha_recorder::obs::normalize_hevc_nvenc_gpu_index_from_int64(
                 obs_data_get_int(settings, "hevc_nvenc_gpu_index"));
+        context->main_phase = obs_data_get_bool(settings, "main_texture_encoded")
+                                   ? alpha_recorder::obs::MainContentPhase::LiveProgramGeneration
+                                   : alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
     }
 
     void *gpu_texture_recording_create(obs_data_t *settings, obs_output_t *output)
@@ -877,27 +976,6 @@ technique Draw
         return settings;
     }
 
-    obs_encoder_t *create_timing_audio_encoder()
-    {
-        obs_data_t *settings = obs_data_create();
-        obs_data_set_int(settings, "bitrate", 32);
-        obs_encoder_t *encoder = obs_audio_encoder_create("ffmpeg_aac",
-                                                          "Alpha Recorder GPU Texture Timing Audio Encoder",
-                                                          settings,
-                                                          0U,
-                                                          nullptr);
-        if (encoder == nullptr)
-        {
-            encoder = obs_audio_encoder_create("CoreAudio_AAC",
-                                               "Alpha Recorder GPU Texture Timing Audio Encoder",
-                                               settings,
-                                               0U,
-                                               nullptr);
-        }
-        obs_data_release(settings);
-        return encoder;
-    }
-
     bool setup_graph(GpuTextureRecordingOutputContext &context, std::string *error_message)
     {
         obs_video_info main_video_info = {};
@@ -920,10 +998,10 @@ technique Draw
         obs_data_set_int(source_settings, "height", height);
         obs_data_set_int(source_settings, "context_ptr",
                          static_cast<long long>(reinterpret_cast<std::intptr_t>(&context)));
-        context.source = obs_source_create(alpha_recorder::obs::gpu_texture_program_alpha_source_id(),
-                                           kSourceName,
-                                           source_settings,
-                                           nullptr);
+        context.source = obs_source_create_private(
+            alpha_recorder::obs::gpu_texture_program_alpha_source_id(),
+            kSourceName,
+            source_settings);
         obs_data_release(source_settings);
         if (context.source == nullptr)
         {
@@ -983,21 +1061,6 @@ technique Draw
 
         obs_encoder_set_video(context.encoder, context.video);
         obs_output_set_video_encoder(context.output, context.encoder);
-
-        context.audio_encoder = create_timing_audio_encoder();
-        if (context.audio_encoder == nullptr)
-        {
-            assign_error(error_message, "Alpha Recorder GPU texture output could not create the timing audio encoder");
-            return false;
-        }
-        audio_t *audio = obs_get_audio();
-        if (audio == nullptr)
-        {
-            assign_error(error_message, "Alpha Recorder GPU texture output could not access OBS audio for timing");
-            return false;
-        }
-        obs_encoder_set_audio(context.audio_encoder, audio);
-        obs_output_set_audio_encoder(context.output, context.audio_encoder, 0U);
         return true;
     }
 
@@ -1016,22 +1079,17 @@ technique Draw
         std::lock_guard<std::mutex> lock(context->mutex);
         if (packet->pts >= 0)
         {
-            const auto input_index = static_cast<std::uint64_t>(packet->pts);
-            if (input_index < context->alpha_input_render_times.size())
+            auto found = std::find_if(context->alpha_packet_records.begin(),
+                                      context->alpha_packet_records.end(),
+                                      [packet](const alpha_recorder::obs::GpuTexturePacketRecord &record) {
+                                          return record.pts == packet->pts;
+                                      });
+            if (found != context->alpha_packet_records.end())
             {
-                const std::uint64_t render_time =
-                    context->alpha_input_render_times[static_cast<std::size_t>(input_index)];
-                const std::int64_t sample = signed_delta_ns(render_time, packet_time->cts);
-                const std::uint64_t plausible_offset = frame_interval_ns(*context) * 4ULL;
-                if (abs_i64(sample) <= plausible_offset &&
-                    context->alpha_content_cts_offset_samples.size() < 240U)
-                {
-                    context->alpha_content_cts_offset_samples.push_back(sample);
-                }
+                found->cts = packet_time->cts;
+                found->has_cts = true;
             }
         }
-        context->alpha_packet_times.push_back(
-            alpha_recorder::obs::GpuTextureRecordingTiming{packet->pts, packet_time->cts});
     }
 
     bool gpu_texture_recording_start(void *data)
@@ -1046,9 +1104,13 @@ technique Draw
         release_graph(*context);
         {
             std::lock_guard<std::mutex> lock(context->mutex);
-            context->alpha_packet_times.clear();
-            context->alpha_input_render_times.clear();
-            context->alpha_content_cts_offset_samples.clear();
+            context->alpha_packet_records.clear();
+            context->alpha_render_records.clear();
+            context->start_total_frames = 0U;
+            context->start_lagged_frames = 0U;
+            context->stop_total_frames = 0U;
+            context->stop_lagged_frames = 0U;
+            context->has_stop_frame_counters = false;
         }
         context->stop_finalized = false;
 
@@ -1103,8 +1165,14 @@ technique Draw
             return false;
         }
 
+        {
+            std::lock_guard<std::mutex> lock(context->mutex);
+            context->start_total_frames = obs_get_total_frames();
+            context->start_lagged_frames = obs_get_lagged_frames();
+        }
+
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u b_frames=%u preset=%s tune=%s split=%s gpu=%d",
+             "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u b_frames=%u preset=%s tune=%s split=%s gpu=%d phase=%s",
              context->path.generic_string().c_str(),
              context->encoder_id.c_str(),
              backend_name(backend_for_encoder_id(context->encoder_id)),
@@ -1120,7 +1188,10 @@ technique Draw
              alpha_recorder::obs::hevc_nvenc_split_encode_config_value(
                  context->hevc_encoder.nvenc_split_encode)
                  .data(),
-             static_cast<int>(context->hevc_encoder.nvenc_gpu_index));
+             static_cast<int>(context->hevc_encoder.nvenc_gpu_index),
+             context->main_phase == alpha_recorder::obs::MainContentPhase::LiveProgramGeneration
+                 ? "live"
+                 : "previous");
         obs_output_set_last_error(context->output, nullptr);
         return true;
     }
@@ -1133,31 +1204,23 @@ technique Draw
             return;
         }
 
-        if (context->stop_finalized)
-        {
-            obs_output_end_data_capture(context->output);
-            return;
-        }
-
         if (context->packet_callback_connected)
         {
             obs_output_remove_packet_callback(context->output, &gpu_texture_recording_packet_time, context);
             context->packet_callback_connected = false;
         }
 
-        std::string error_message;
-        if (!context->sink.finalize(&error_message) && !error_message.empty())
-        {
-            obs_output_set_last_error(context->output, error_message.c_str());
-            blog(LOG_ERROR, "[alpha_recorder_gpu_texture] %s", error_message.c_str());
-        }
-
         obs_output_end_data_capture(context->output);
-        context->sink.close_storage();
+        {
+            std::lock_guard<std::mutex> lock(context->mutex);
+            context->stop_total_frames = obs_get_total_frames();
+            context->stop_lagged_frames = obs_get_lagged_frames();
+            context->has_stop_frame_counters = true;
+        }
 
         const alpha_recorder::obs::GpuTextureAlphaOutputSinkStats &stats = context->sink.stats();
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] stopped packets=%llu keyframes=%llu packet_bytes=%llu muxed_packets=%llu finalized=%s first_pts=%lld last_pts=%lld path=\"%s\"",
+             "[alpha_recorder_gpu_texture] stopped capture packets=%llu keyframes=%llu packet_bytes=%llu muxed_packets=%llu finalized=%s first_pts=%lld last_pts=%lld path=\"%s\"",
              static_cast<unsigned long long>(stats.packet_count),
              static_cast<unsigned long long>(stats.keyframe_count),
              static_cast<unsigned long long>(stats.packet_bytes),
@@ -1166,8 +1229,6 @@ technique Draw
              static_cast<long long>(stats.first_pts),
              static_cast<long long>(stats.last_pts),
              context->path.generic_string().c_str());
-
-        context->stop_finalized = true;
     }
 
     void gpu_texture_recording_packet(void *data, encoder_packet *packet)
@@ -1179,6 +1240,15 @@ technique Draw
         }
 
         std::lock_guard<std::mutex> lock(context->mutex);
+        context->alpha_packet_records.push_back(
+            alpha_recorder::obs::GpuTexturePacketRecord{packet->pts,
+                                                        packet->dts,
+                                                        packet->timebase_num,
+                                                        packet->timebase_den,
+                                                        packet->keyframe,
+                                                        packet->sys_dts_usec,
+                                                        0U,
+                                                        false});
         std::string error_message;
         if (!context->sink.submit_packet(packet, &error_message) && !error_message.empty())
         {
@@ -1296,9 +1366,8 @@ namespace alpha_recorder::obs
 
         obs_output_info output_info = {};
         output_info.id = gpu_texture_recording_output_id();
-        output_info.flags = OBS_OUTPUT_VIDEO | OBS_OUTPUT_AUDIO | OBS_OUTPUT_ENCODED;
+        output_info.flags = OBS_OUTPUT_VIDEO | OBS_OUTPUT_ENCODED;
         output_info.encoded_video_codecs = "hevc";
-        output_info.encoded_audio_codecs = "aac";
         output_info.get_name = [](void *) { return kOutputName; };
         output_info.create = gpu_texture_recording_create;
         output_info.destroy = gpu_texture_recording_destroy;
@@ -1330,15 +1399,53 @@ namespace alpha_recorder::obs
         return context->sink.set_visible_range(range, error_message);
     }
 
+    bool gpu_texture_recording_output_finalize_mux(obs_output_t *output,
+                                                   std::string *error_message) noexcept
+    {
+        GpuTextureRecordingOutputContext *context = find_context(output);
+        if (context == nullptr)
+        {
+            assign_error(error_message, "Alpha Recorder GPU texture output context is unavailable");
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(context->mutex);
+        if (context->stop_finalized)
+        {
+            return context->sink.stats().finalized;
+        }
+
+        if (!context->sink.finalize(error_message))
+        {
+            return false;
+        }
+
+        context->sink.close_storage();
+        context->stop_finalized = true;
+        return true;
+    }
+
+    void gpu_texture_recording_output_abort_mux(obs_output_t *output) noexcept
+    {
+        GpuTextureRecordingOutputContext *context = find_context(output);
+        if (context == nullptr)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(context->mutex);
+        context->sink.abort();
+        context->stop_finalized = true;
+    }
+
     bool gpu_texture_recording_output_compute_visible_range(obs_output_t *output,
-                                                            std::uint64_t main_first_packet_cts,
-                                                            std::uint64_t main_packet_count,
+                                                            const std::vector<GpuTexturePacketRecord> &main_packets,
                                                             bool main_texture_encoded,
                                                             AlphaVisiblePacketRange &range,
                                                             std::string *error_message) noexcept
     {
         range = {};
-        if (main_first_packet_cts == 0U || main_packet_count == 0U)
+        if (main_packets.empty())
         {
             assign_error(error_message, "Alpha Recorder GPU texture output cannot compute an edit range without main recording packet timing");
             return false;
@@ -1352,149 +1459,60 @@ namespace alpha_recorder::obs
         }
 
         std::lock_guard<std::mutex> lock(context->mutex);
-        if (context->alpha_packet_times.empty())
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.main_packets = main_packets;
+        input.alpha_packets = context->alpha_packet_records;
+        input.alpha_renders = context->alpha_render_records;
+        input.main_phase = main_texture_encoded
+                               ? alpha_recorder::obs::MainContentPhase::LiveProgramGeneration
+                               : alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
+        if (context->has_stop_frame_counters &&
+            context->stop_total_frames >= context->start_total_frames &&
+            context->stop_lagged_frames >= context->start_lagged_frames)
         {
-            assign_error(error_message, "Alpha Recorder GPU texture output did not receive alpha packet timing");
+            const std::uint64_t attempted_frames =
+                static_cast<std::uint64_t>(context->stop_total_frames - context->start_total_frames);
+            const std::uint64_t lagged_frames =
+                static_cast<std::uint64_t>(context->stop_lagged_frames - context->start_lagged_frames);
+            const std::uint64_t drawn_frames = attempted_frames > lagged_frames
+                                                   ? attempted_frames - lagged_frames
+                                                   : 0U;
+            if (context->alpha_render_records.size() >= drawn_frames)
+            {
+                input.has_alpha_render_packet_offset = true;
+                input.alpha_render_packet_offset =
+                    static_cast<std::uint64_t>(context->alpha_render_records.size()) - drawn_frames;
+            }
+        }
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult solve =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (solve.error != alpha_recorder::obs::TimelineSolveError::None)
+        {
+            assign_error(error_message, alpha_recorder::obs::timeline_solve_error_message(solve.error));
+            blog(LOG_WARNING,
+                 "[alpha_recorder_gpu_texture] timeline solve failed error=%s main_packets=%llu alpha_packets=%llu alpha_renders=%llu main_texture=%s",
+                 alpha_recorder::obs::timeline_solve_error_name(solve.error),
+                 static_cast<unsigned long long>(main_packets.size()),
+                 static_cast<unsigned long long>(context->alpha_packet_records.size()),
+                 static_cast<unsigned long long>(context->alpha_render_records.size()),
+                 main_texture_encoded ? "true" : "false");
             return false;
         }
 
-        std::vector<std::int64_t> content_offset_samples = context->alpha_content_cts_offset_samples;
-        const std::uint64_t frame_interval = frame_interval_ns(*context);
-        const std::int64_t expected_texture_offset = static_cast<std::int64_t>(std::min<std::uint64_t>(
-            frame_interval, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())));
-        std::int64_t first_content_offset_candidate = 0;
-        std::uint64_t content_offset_candidates = 0U;
-        std::size_t selected_render_bias = 0U;
-
-        const auto collect_samples = [&](std::size_t render_bias,
-                                         std::int64_t &first_candidate,
-                                         std::uint64_t &candidates) {
-            std::vector<std::int64_t> samples;
-            first_candidate = 0;
-            candidates = 0U;
-            for (const GpuTextureRecordingTiming &timing : context->alpha_packet_times)
-            {
-                if (timing.pts < 0)
-                {
-                    continue;
-                }
-                const auto input_index = static_cast<std::uint64_t>(timing.pts) +
-                                         static_cast<std::uint64_t>(render_bias);
-                if (input_index >= context->alpha_input_render_times.size())
-                {
-                    continue;
-                }
-                const std::uint64_t render_time =
-                    context->alpha_input_render_times[static_cast<std::size_t>(input_index)];
-                const std::int64_t sample = signed_delta_ns(render_time, timing.cts);
-                if (candidates == 0U)
-                {
-                    first_candidate = sample;
-                }
-                ++candidates;
-                if (abs_i64(sample) <= frame_interval * 16ULL)
-                {
-                    samples.push_back(sample);
-                }
-            }
-            return samples;
-        };
-
-        std::uint64_t best_bias_error = std::numeric_limits<std::uint64_t>::max();
-        const std::size_t max_render_bias =
-            std::min<std::size_t>(30U, context->alpha_input_render_times.size());
-        for (std::size_t render_bias = 0U; render_bias <= max_render_bias; ++render_bias)
-        {
-            std::int64_t first_candidate = 0;
-            std::uint64_t candidates = 0U;
-            std::vector<std::int64_t> samples = collect_samples(render_bias, first_candidate, candidates);
-            if (samples.empty())
-            {
-                continue;
-            }
-            const std::int64_t candidate_median = median_offset(samples);
-            const std::uint64_t error = abs_i64(candidate_median - expected_texture_offset);
-            if (error < best_bias_error)
-            {
-                best_bias_error = error;
-                selected_render_bias = render_bias;
-                first_content_offset_candidate = first_candidate;
-                content_offset_candidates = candidates;
-                content_offset_samples = std::move(samples);
-            }
-        }
-
-        if (best_bias_error > frame_interval * 4ULL)
-        {
-            std::int64_t first_candidate = 0;
-            std::uint64_t candidates = 0U;
-            std::vector<std::int64_t> samples = collect_samples(0U, first_candidate, candidates);
-            if (!samples.empty())
-            {
-                selected_render_bias = 0U;
-                first_content_offset_candidate = first_candidate;
-                content_offset_candidates = candidates;
-                content_offset_samples = std::move(samples);
-            }
-        }
-
-        const std::int64_t measured_alpha_content_cts_offset =
-            median_offset(content_offset_samples);
-        const bool use_packet_cts_for_alignment =
-            !main_texture_encoded && selected_render_bias > 4U;
-        const std::int64_t alpha_content_cts_offset =
-            use_packet_cts_for_alignment ? 0 : measured_alpha_content_cts_offset;
-        const std::uint64_t target_content_cts =
-            add_signed_ns(main_first_packet_cts, main_texture_encoded ? alpha_content_cts_offset : 0);
-
-        const auto best = std::min_element(
-            context->alpha_packet_times.begin(),
-            context->alpha_packet_times.end(),
-            [target_content_cts, alpha_content_cts_offset](const GpuTextureRecordingTiming &lhs,
-                                                           const GpuTextureRecordingTiming &rhs) {
-                const std::uint64_t lhs_content_cts = add_signed_ns(lhs.cts, alpha_content_cts_offset);
-                const std::uint64_t rhs_content_cts = add_signed_ns(rhs.cts, alpha_content_cts_offset);
-                const std::uint64_t lhs_delta = abs_delta(lhs_content_cts, target_content_cts);
-                const std::uint64_t rhs_delta = abs_delta(rhs_content_cts, target_content_cts);
-                if (lhs_delta != rhs_delta)
-                {
-                    return lhs_delta < rhs_delta;
-                }
-                return lhs.pts < rhs.pts;
-            });
-        if (best == context->alpha_packet_times.end() || best->pts < 0 ||
-            static_cast<std::uint64_t>(best->pts) >= context->alpha_packet_times.size() ||
-            main_packet_count > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-        {
-            assign_error(error_message, "Alpha Recorder GPU texture output computed an invalid edit range");
-            return false;
-        }
-
-        range.media_time = best->pts;
-        const std::uint64_t available_alpha_packets =
-            static_cast<std::uint64_t>(context->alpha_packet_times.size()) -
-            static_cast<std::uint64_t>(best->pts);
-        range.duration = static_cast<std::int64_t>(std::min(main_packet_count, available_alpha_packets));
+        range = solve.solution.range;
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] dynamic edit range media_time=%lld duration=%lld main_first_cts=%llu target_content_cts=%llu alpha_cts=%llu alpha_content_cts=%llu delta_ns=%llu alpha_content_offset_ns=%lld measured_alpha_content_offset_ns=%lld alpha_render_bias=%llu alpha_offset_samples=%llu alpha_offset_candidates=%llu first_alpha_offset_candidate_ns=%lld alpha_input_renders=%llu alpha_timings=%llu main_texture=%s packet_cts_alignment=%s",
+             "[alpha_recorder_gpu_texture] certified edit range media_time=%lld duration=%lld main_generation=%llu alpha_generation=%llu alpha_pts_step=%lld alpha_render_index=%llu main_packets=%llu alpha_packets=%llu alpha_renders=%llu main_texture=%s",
              static_cast<long long>(range.media_time),
              static_cast<long long>(range.duration),
-             static_cast<unsigned long long>(main_first_packet_cts),
-             static_cast<unsigned long long>(target_content_cts),
-             static_cast<unsigned long long>(best->cts),
-             static_cast<unsigned long long>(add_signed_ns(best->cts, alpha_content_cts_offset)),
-             static_cast<unsigned long long>(abs_delta(add_signed_ns(best->cts, alpha_content_cts_offset),
-                                                       target_content_cts)),
-             static_cast<long long>(alpha_content_cts_offset),
-             static_cast<long long>(measured_alpha_content_cts_offset),
-             static_cast<unsigned long long>(selected_render_bias),
-             static_cast<unsigned long long>(content_offset_samples.size()),
-             static_cast<unsigned long long>(content_offset_candidates),
-             static_cast<long long>(first_content_offset_candidate),
-             static_cast<unsigned long long>(context->alpha_input_render_times.size()),
-             static_cast<unsigned long long>(context->alpha_packet_times.size()),
-             main_texture_encoded ? "true" : "false",
-             use_packet_cts_for_alignment ? "true" : "false");
+             static_cast<unsigned long long>(solve.solution.main_generation),
+             static_cast<unsigned long long>(solve.solution.alpha_generation),
+             static_cast<long long>(solve.solution.alpha_pts_step),
+             static_cast<unsigned long long>(solve.solution.alpha_render_index),
+             static_cast<unsigned long long>(solve.solution.main_packet_count),
+             static_cast<unsigned long long>(solve.solution.alpha_packet_count),
+             static_cast<unsigned long long>(context->alpha_render_records.size()),
+             main_texture_encoded ? "true" : "false");
         return true;
     }
 

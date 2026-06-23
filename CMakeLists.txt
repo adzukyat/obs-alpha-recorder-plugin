@@ -257,6 +257,7 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
         ${_alpha_recorder_direct_mp4_sources}
         src/obs/diagnostic_log.cpp
         src/obs/gpu_texture_recording_output.cpp
+        src/obs/gpu_texture_timeline_ledger.cpp
         src/obs/plugin.cpp
         src/obs/recording_session_controller.cpp
         src/obs/settings_ui.cpp
@@ -467,6 +468,23 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
     )
     add_test(NAME alpha_recorder.unit.alpha_alignment_engine COMMAND alpha_recorder_unit_alpha_alignment_engine)
     set_tests_properties(alpha_recorder.unit.alpha_alignment_engine PROPERTIES LABELS "unit")
+
+    add_executable(alpha_recorder_unit_gpu_texture_timeline_ledger
+        tests/unit/gpu_texture_timeline_ledger_test.cpp
+        src/obs/gpu_texture_timeline_ledger.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_gpu_texture_timeline_ledger)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_gpu_texture_timeline_ledger)
+    target_include_directories(alpha_recorder_unit_gpu_texture_timeline_ledger PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/obs
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}
+    )
+    set_target_properties(alpha_recorder_unit_gpu_texture_timeline_ledger PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.gpu_texture_timeline_ledger COMMAND alpha_recorder_unit_gpu_texture_timeline_ledger)
+    set_tests_properties(alpha_recorder.unit.gpu_texture_timeline_ledger PROPERTIES LABELS "unit")
 
     add_executable(alpha_recorder_unit_settings
         tests/unit/settings_test.cpp

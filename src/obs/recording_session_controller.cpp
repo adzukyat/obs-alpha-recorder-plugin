@@ -8,6 +8,7 @@
 #include "recording_session_controller_gate.hpp"
 #include "recording_telemetry.hpp"
 
+#include <algorithm>
 #include <condition_variable>
 #include <chrono>
 #include <cstdio>
@@ -56,6 +57,17 @@ namespace
     using alpha_recorder::obs::alignment_output_queue_frame_limit;
     using alpha_recorder::obs::plausible_alignment_delta_ns;
     using alpha_recorder::obs::timestamp_span_ms;
+
+    constexpr std::uint64_t kGpuTextureTailDelayFrames = 18U;
+
+    std::chrono::milliseconds gpu_texture_tail_delay(const obs_video_info &video_info) noexcept
+    {
+        const std::uint64_t fps_num = video_info.fps_num == 0U ? 60U : video_info.fps_num;
+        const std::uint64_t fps_den = video_info.fps_den == 0U ? 1U : video_info.fps_den;
+        const std::uint64_t delay_ms =
+            (1000U * kGpuTextureTailDelayFrames * fps_den + fps_num - 1U) / fps_num;
+        return std::chrono::milliseconds{std::clamp<std::uint64_t>(delay_ms, 100U, 500U)};
+    }
 
     std::filesystem::path path_from_utf8(const char *text)
     {
@@ -278,28 +290,10 @@ namespace
         return alpha_recorder::obs::finalization_format_uses_gpu_texture_path(settings.finalization_format);
     }
 
-    std::int64_t frame_delta_from_video_time(std::uint64_t start_ns,
-                                             std::uint64_t end_ns,
-                                             std::uint32_t fps_num,
-                                             std::uint32_t fps_den) noexcept
-    {
-        if (end_ns <= start_ns || fps_num == 0U || fps_den == 0U)
-        {
-            return 0;
-        }
-
-        const std::uint64_t elapsed_ns = end_ns - start_ns;
-        const std::uint64_t denominator = 1000000000ULL * static_cast<std::uint64_t>(fps_den);
-        const std::uint64_t numerator = elapsed_ns * static_cast<std::uint64_t>(fps_num);
-        const std::uint64_t rounded = (numerator + (denominator / 2U)) / denominator;
-        return rounded > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())
-                   ? std::numeric_limits<std::int64_t>::max()
-                   : static_cast<std::int64_t>(rounded);
-    }
-
     obs_data_t *make_gpu_texture_output_settings(const std::filesystem::path &mask_path,
                                                  const obs_video_info &video_info,
-                                                 const alpha_recorder::obs::Settings &settings)
+                                                 const alpha_recorder::obs::Settings &settings,
+                                                 bool main_texture_encoded)
     {
         obs_data_t *data = obs_data_create();
         obs_data_set_string(data, "path", mask_path.string().c_str());
@@ -338,6 +332,7 @@ namespace
                                 .data());
         obs_data_set_int(data, alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key().data(),
                          settings.hevc_encoder.nvenc_gpu_index);
+        obs_data_set_bool(data, "main_texture_encoded", main_texture_encoded);
         return data;
     }
 
@@ -829,7 +824,8 @@ namespace
                 return false;
             }
 
-            obs_data_t *output_settings = make_gpu_texture_output_settings(mask_path, video_info, settings_);
+            obs_data_t *output_settings = make_gpu_texture_output_settings(
+                mask_path, video_info, settings_, recording_texture_encoded_);
             gpu_texture_output_ = obs_output_create(alpha_recorder::obs::gpu_texture_recording_output_id(),
                                                     "Alpha Recorder GPU Texture Recording",
                                                     output_settings,
@@ -919,10 +915,12 @@ namespace
             alpha_recorder::obs::AlphaVisiblePacketRange visible_range{};
             std::string range_error;
             bool finalize_failed = false;
+
+            obs_output_stop(gpu_texture_output_);
+
             if (!alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
                     gpu_texture_output_,
-                    gpu_main_first_packet_cts_,
-                    gpu_main_packet_count_,
+                    gpu_main_packets_,
                     recording_texture_encoded_,
                     visible_range,
                     &range_error))
@@ -934,42 +932,22 @@ namespace
                                          ? "Alpha Recorder could not compute the GPU texture alpha visible range."
                                          : range_error;
                 }
-                if (gpu_main_packet_count_ > 0U &&
-                    gpu_main_packet_count_ <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-                {
-                    visible_range.media_time = frame_delta_from_video_time(
-                        gpu_texture_output_start_video_time_,
-                        gpu_main_first_packet_cts_,
-                        video_info_.fps_num,
-                        video_info_.fps_den == 0U ? 1U : video_info_.fps_den);
-                    visible_range.duration = static_cast<std::int64_t>(gpu_main_packet_count_);
-                    finalize_failed = false;
-                    if (error_message != nullptr)
-                    {
-                        error_message->clear();
-                    }
-                    blog(LOG_INFO,
-                         "Alpha Recorder GPU texture using video-time edit fallback: media_time=%lld duration=%lld output_start=%llu main_first_cts=%llu main_packets=%llu reason=\"%s\"",
-                         static_cast<long long>(visible_range.media_time),
-                         static_cast<long long>(visible_range.duration),
-                         static_cast<unsigned long long>(gpu_texture_output_start_video_time_),
-                         static_cast<unsigned long long>(gpu_main_first_packet_cts_),
-                         static_cast<unsigned long long>(gpu_main_packet_count_),
-                         range_error.c_str());
-                }
             }
             if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_set_visible_range(
                                       gpu_texture_output_, visible_range, error_message))
             {
                 finalize_failed = true;
             }
-
-            if (!finalize_failed)
+            if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_finalize_mux(
+                                      gpu_texture_output_, error_message))
             {
-                wait_for_gpu_texture_visible_packets_locked(visible_range);
+                finalize_failed = true;
+            }
+            if (finalize_failed)
+            {
+                alpha_recorder::obs::gpu_texture_recording_output_abort_mux(gpu_texture_output_);
             }
 
-            obs_output_stop(gpu_texture_output_);
             const alpha_recorder::obs::GpuTextureRecordingOutputStats gpu_stats =
                 alpha_recorder::obs::gpu_texture_recording_output_stats(gpu_texture_output_);
             const char *last_error = obs_output_get_last_error(gpu_texture_output_);
@@ -980,6 +958,11 @@ namespace
                 !move_completed_gpu_texture_output(actual_writer_path, final_writer_path, error_message))
             {
                 finalize_failed = true;
+            }
+            if (finalize_failed && gpu_texture_output_is_temporary_)
+            {
+                std::error_code remove_error;
+                std::filesystem::remove(actual_writer_path, remove_error);
             }
             gpu_texture_output_path_.clear();
             gpu_texture_final_output_path_.clear();
@@ -1001,30 +984,6 @@ namespace
             }
 
             return true;
-        }
-
-        void wait_for_gpu_texture_visible_packets_locked(
-            const alpha_recorder::obs::AlphaVisiblePacketRange &visible_range)
-        {
-            if (gpu_texture_output_ == nullptr || visible_range.media_time < 0 || visible_range.duration <= 0)
-            {
-                return;
-            }
-
-            const std::uint64_t target_packets =
-                static_cast<std::uint64_t>(visible_range.media_time) +
-                static_cast<std::uint64_t>(visible_range.duration);
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{750};
-            while (obs_output_active(gpu_texture_output_) && std::chrono::steady_clock::now() < deadline)
-            {
-                const alpha_recorder::obs::GpuTextureRecordingOutputStats stats =
-                    alpha_recorder::obs::gpu_texture_recording_output_stats(gpu_texture_output_);
-                if (stats.packet_count >= target_packets)
-                {
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds{5});
-            }
         }
 
         void clear_pending_alignment_locked() noexcept
@@ -1302,6 +1261,7 @@ namespace
             gpu_main_last_packet_cts_ = 0U;
             gpu_main_first_packet_pts_ = 0;
             gpu_main_last_packet_pts_ = 0;
+            gpu_main_packets_.clear();
             gpu_texture_output_start_video_time_ = 0U;
             gpu_recording_started_video_time_ = 0U;
         }
@@ -1317,6 +1277,14 @@ namespace
             gpu_main_last_packet_cts_ = packet_time.cts;
             gpu_main_last_packet_pts_ = packet.pts;
             ++gpu_main_packet_count_;
+            gpu_main_packets_.push_back(alpha_recorder::obs::GpuTexturePacketRecord{packet.pts,
+                                                                                    packet.dts,
+                                                                                    packet.timebase_num,
+                                                                                    packet.timebase_den,
+                                                                                    packet.keyframe,
+                                                                                    packet.sys_dts_usec,
+                                                                                    packet_time.cts,
+                                                                                    true});
         }
 
         bool write_alpha_frame_locked(const alpha_recorder::obs::AlphaFrame &frame,
@@ -1440,6 +1408,8 @@ namespace
             bool disconnect_packet_callback = false;
             bool disconnect_file_changed = false;
             bool finalize_failed = false;
+            bool wait_for_gpu_texture_tail = false;
+            obs_video_info gpu_texture_tail_video_info{};
             std::string finalize_error;
 
             {
@@ -1460,6 +1430,9 @@ namespace
                 disconnect_raw_video_callback = raw_video_callback_connected_;
                 disconnect_packet_callback = packet_callback_connected_;
                 disconnect_file_changed = file_changed_connected_;
+                wait_for_gpu_texture_tail =
+                    gpu_texture_path_ && gpu_texture_output_ != nullptr && !recording_texture_encoded_;
+                gpu_texture_tail_video_info = video_info_;
                 main_rendered_callback_connected_ = false;
                 raw_video_callback_connected_ = false;
                 packet_callback_connected_ = false;
@@ -1494,6 +1467,10 @@ namespace
             }
 
             stop_alignment_worker();
+            if (wait_for_gpu_texture_tail)
+            {
+                std::this_thread::sleep_for(gpu_texture_tail_delay(gpu_texture_tail_video_info));
+            }
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1764,6 +1741,7 @@ namespace
         std::uint64_t gpu_main_last_packet_cts_ = 0U;
         std::int64_t gpu_main_first_packet_pts_ = 0;
         std::int64_t gpu_main_last_packet_pts_ = 0;
+        std::vector<alpha_recorder::obs::GpuTexturePacketRecord> gpu_main_packets_{};
         std::uint64_t gpu_texture_output_start_video_time_ = 0U;
         std::uint64_t gpu_recording_started_video_time_ = 0U;
         AlphaAlignmentEngine alignment_engine_{};
