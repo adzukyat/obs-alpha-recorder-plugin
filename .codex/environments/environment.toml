@@ -3,7 +3,10 @@ version = 1
 name = "obs-alpha-recorder-plugin"
 
 [setup]
-script = ""
+script = '''
+git submodule update --init --recursive
+cmake -DREPO_ROOT="$PWD" -DBUILD_FROM_SOURCE=ON -P cmake/scripts/BootstrapObs.cmake
+'''
 
 [[actions]]
 name = "Run"
@@ -14,3 +17,15 @@ cmake --build --preset macos-arm64-relwithdebinfo
 cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_stage_obs_tree
 open ./out/stage/obs/OBS.app
 '''
+platform = "darwin"
+
+[[actions]]
+name = "Run"
+icon = "run"
+command = '''
+cmake --preset windows-x64-msvc
+cmake --build --preset windows-x64-msvc-relwithdebinfo
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_stage_obs_tree
+Start-Process -FilePath .\out\stage\obs\bin\64bit\obs64.exe -WorkingDirectory .\out\stage\obs\bin\64bit\
+'''
+platform = "win32"
