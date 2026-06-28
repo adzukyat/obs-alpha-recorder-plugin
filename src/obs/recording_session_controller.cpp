@@ -1284,7 +1284,11 @@ namespace
                                                                                     packet.keyframe,
                                                                                     packet.sys_dts_usec,
                                                                                     packet_time.cts,
-                                                                                    true});
+                                                                                    true,
+                                                                                    0U,
+                                                                                    0U,
+                                                                                    false,
+                                                                                    false});
         }
 
         bool write_alpha_frame_locked(const alpha_recorder::obs::AlphaFrame &frame,

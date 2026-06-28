@@ -82,9 +82,9 @@ namespace alpha_recorder::obs
         }
 
         [[nodiscard]] bool pts_range_present(const std::set<std::int64_t> &pts_values,
-                                             std::int64_t first,
-                                             std::int64_t step,
-                                             std::uint64_t count) noexcept
+                                              std::int64_t first,
+                                              std::int64_t step,
+                                              std::uint64_t count) noexcept
         {
             if (step <= 0)
             {
@@ -144,23 +144,23 @@ namespace alpha_recorder::obs
             return render.generation - 1U;
         }
 
-        [[nodiscard]] std::uint64_t render_index_for_generation(
-            const std::vector<ProgramRenderRecord> &records,
-            std::uint64_t generation,
-            bool &found) noexcept
+        [[nodiscard]] const GpuTexturePacketRecord *first_alpha_packet_for_generation(
+            const std::vector<GpuTexturePacketRecord> &packets,
+            std::uint64_t generation) noexcept
         {
-            found = false;
-            for (std::size_t index = 0U; index < records.size(); ++index)
+            const GpuTexturePacketRecord *match = nullptr;
+            for (const GpuTexturePacketRecord &packet : packets)
             {
-                const ProgramRenderRecord &record = records[index];
-                if (!record.emitted || record.emitted_generation != generation)
+                if (!packet.has_generation || packet.emitted_generation != generation)
                 {
                     continue;
                 }
-                found = true;
-                return static_cast<std::uint64_t>(index);
+                if (match == nullptr || packet.pts < match->pts)
+                {
+                    match = &packet;
+                }
             }
-            return 0U;
+            return match;
         }
     } // namespace
 
@@ -180,6 +180,10 @@ namespace alpha_recorder::obs
             return "MissingPrefixContent";
         case TimelineSolveError::AmbiguousMainGeneration:
             return "AmbiguousMainGeneration";
+        case TimelineSolveError::MissingAlphaGeneration:
+            return "MissingAlphaGeneration";
+        case TimelineSolveError::AmbiguousGeneration:
+            return "AmbiguousGeneration";
         case TimelineSolveError::NonContiguousPts:
             return "NonContiguousPts";
         case TimelineSolveError::TimebaseMismatch:
@@ -226,13 +230,13 @@ namespace alpha_recorder::obs
         const std::vector<GpuTexturePacketRecord> main_sorted = sorted_by_pts(input.main_packets);
         const std::vector<GpuTexturePacketRecord> alpha_sorted = sorted_by_pts(input.alpha_packets);
         const GpuTexturePacketRecord &main_first = main_sorted.front();
-        if (!main_first.has_cts || main_first.cts == 0U)
+        if (!main_first.has_input_cts || main_first.input_cts == 0U)
         {
             result.error = TimelineSolveError::MissingMainPacketTiming;
             return result;
         }
 
-        const ProgramRenderRecord *main_render = find_render_by_cts(input.alpha_renders, main_first.cts);
+        const ProgramRenderRecord *main_render = find_render_by_cts(input.alpha_renders, main_first.input_cts);
         if (main_render == nullptr)
         {
             result.error = TimelineSolveError::AmbiguousMainGeneration;
@@ -248,10 +252,20 @@ namespace alpha_recorder::obs
             return result;
         }
 
-        bool alpha_render_found = false;
-        const std::uint64_t alpha_render_index =
-            render_index_for_generation(input.alpha_renders, main_generation, alpha_render_found);
-        if (!alpha_render_found)
+        std::uint64_t alpha_packets_with_generation = 0U;
+        for (const GpuTexturePacketRecord &packet : alpha_sorted)
+        {
+            if (packet.ambiguous_generation)
+            {
+                result.error = TimelineSolveError::AmbiguousGeneration;
+                return result;
+            }
+            alpha_packets_with_generation += packet.has_generation ? 1U : 0U;
+        }
+
+        const GpuTexturePacketRecord *alpha_visible_first =
+            first_alpha_packet_for_generation(alpha_sorted, main_generation);
+        if (alpha_visible_first == nullptr)
         {
             result.error = TimelineSolveError::MissingPrefixContent;
             return result;
@@ -263,43 +277,40 @@ namespace alpha_recorder::obs
             result.error = TimelineSolveError::NonContiguousPts;
             return result;
         }
-
-        const std::int64_t alpha_first_pts = alpha_sorted.front().pts;
-        if (input.alpha_renders.size() < alpha_sorted.size())
-        {
-            result.error = TimelineSolveError::UnsupportedObsTimingModel;
-            return result;
-        }
-        const std::uint64_t render_packet_offset =
-            input.has_alpha_render_packet_offset
-                ? input.alpha_render_packet_offset
-                : static_cast<std::uint64_t>(input.alpha_renders.size() - alpha_sorted.size());
-        if (alpha_render_index < render_packet_offset)
-        {
-            result.error = TimelineSolveError::MissingPrefixContent;
-            return result;
-        }
-        const std::uint64_t alpha_packet_index = alpha_render_index - render_packet_offset;
-        if (alpha_packet_index >
-            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / alpha_step))
-        {
-            result.error = TimelineSolveError::MissingTailCoverage;
-            return result;
-        }
-        const std::int64_t alpha_visible_pts =
-            alpha_first_pts + static_cast<std::int64_t>(alpha_packet_index) * alpha_step;
+        const std::int64_t alpha_visible_pts = alpha_visible_first->pts;
 
         std::set<std::int64_t> alpha_pts;
+        std::vector<const GpuTexturePacketRecord *> alpha_visible_packets;
         for (const GpuTexturePacketRecord &packet : alpha_sorted)
         {
             alpha_pts.insert(packet.pts);
+            alpha_visible_packets.push_back(&packet);
         }
 
         const std::uint64_t main_packet_count = static_cast<std::uint64_t>(main_sorted.size());
+        if (main_packet_count == 0U)
+        {
+            result.error = TimelineSolveError::MissingMainPacketTiming;
+            return result;
+        }
         if (!pts_range_present(alpha_pts, alpha_visible_pts, alpha_step, main_packet_count))
         {
             result.error = TimelineSolveError::MissingTailCoverage;
             return result;
+        }
+
+        for (std::uint64_t index = 0U; index < main_packet_count; ++index)
+        {
+            const std::int64_t pts = alpha_visible_pts + static_cast<std::int64_t>(index) * alpha_step;
+            const auto found = std::find_if(alpha_visible_packets.begin(), alpha_visible_packets.end(),
+                                            [pts](const GpuTexturePacketRecord *packet) {
+                                                return packet != nullptr && packet->pts == pts;
+                                            });
+            if (found == alpha_visible_packets.end() || *found == nullptr || !(*found)->has_generation)
+            {
+                result.error = TimelineSolveError::MissingAlphaGeneration;
+                return result;
+            }
         }
 
         if (main_packet_count >
@@ -309,14 +320,17 @@ namespace alpha_recorder::obs
             return result;
         }
 
+        const std::int64_t last_visible_alpha_pts =
+            alpha_visible_pts + static_cast<std::int64_t>(main_packet_count - 1U) * alpha_step;
         result.solution.range.media_time = alpha_visible_pts;
-        result.solution.range.duration = static_cast<std::int64_t>(main_packet_count) * alpha_step;
+        result.solution.range.duration = last_visible_alpha_pts + alpha_step - alpha_visible_pts;
         result.solution.main_generation = main_generation;
         result.solution.alpha_generation = main_generation;
         result.solution.alpha_pts_step = alpha_step;
-        result.solution.alpha_render_index = alpha_render_index;
+        result.solution.first_visible_alpha_pts = alpha_visible_pts;
         result.solution.main_packet_count = main_packet_count;
         result.solution.alpha_packet_count = static_cast<std::uint64_t>(alpha_sorted.size());
+        result.solution.alpha_packets_with_generation = alpha_packets_with_generation;
         result.error = TimelineSolveError::None;
         return result;
     }
