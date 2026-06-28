@@ -45,6 +45,23 @@ namespace alpha_recorder::obs
     bool register_gpu_texture_recording_output() noexcept;
     void unregister_gpu_texture_recording_output() noexcept;
 
+    void gpu_texture_recording_output_request_stop(obs_output_t *output) noexcept;
+
+    [[nodiscard]] bool gpu_texture_recording_output_wait_stop_boundary(
+        obs_output_t *output,
+        std::uint32_t timeout_ms,
+        std::string *error_message = nullptr) noexcept;
+
+    void gpu_texture_recording_output_end_data_capture(obs_output_t *output) noexcept;
+
+    void gpu_texture_recording_output_set_main_texture_encoded(obs_output_t *output,
+                                                               bool main_texture_encoded) noexcept;
+
+    [[nodiscard]] bool gpu_texture_recording_output_wait_deactivated(
+        obs_output_t *output,
+        std::uint32_t timeout_ms,
+        std::string *error_message = nullptr) noexcept;
+
     [[nodiscard]] bool gpu_texture_recording_output_set_visible_range(
         obs_output_t *output,
         const AlphaVisiblePacketRange &range,

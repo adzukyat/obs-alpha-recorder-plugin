@@ -58,16 +58,7 @@ namespace
     using alpha_recorder::obs::plausible_alignment_delta_ns;
     using alpha_recorder::obs::timestamp_span_ms;
 
-    constexpr std::uint64_t kGpuTextureTailDelayFrames = 18U;
-
-    std::chrono::milliseconds gpu_texture_tail_delay(const obs_video_info &video_info) noexcept
-    {
-        const std::uint64_t fps_num = video_info.fps_num == 0U ? 60U : video_info.fps_num;
-        const std::uint64_t fps_den = video_info.fps_den == 0U ? 1U : video_info.fps_den;
-        const std::uint64_t delay_ms =
-            (1000U * kGpuTextureTailDelayFrames * fps_den + fps_num - 1U) / fps_num;
-        return std::chrono::milliseconds{std::clamp<std::uint64_t>(delay_ms, 100U, 500U)};
-    }
+    constexpr std::uint32_t kGpuTextureDeactivateTimeoutMs = 10000U;
 
     std::filesystem::path path_from_utf8(const char *text)
     {
@@ -690,6 +681,11 @@ namespace
             const bool detected_texture_encoded =
                 recording_output_uses_texture_encoder(recording_output_, video_info_.output_format);
             recording_texture_encoded_ = recording_texture_encoded_ || detected_texture_encoded;
+            if (gpu_texture_path_ && gpu_texture_output_ != nullptr)
+            {
+                alpha_recorder::obs::gpu_texture_recording_output_set_main_texture_encoded(
+                    gpu_texture_output_, recording_texture_encoded_);
+            }
             if (!gpu_texture_path_)
             {
                 if (recording_texture_encoded_)
@@ -824,8 +820,10 @@ namespace
                 return false;
             }
 
+            const bool initial_main_texture_encoded =
+                recording_path.empty() ? true : recording_texture_encoded_;
             obs_data_t *output_settings = make_gpu_texture_output_settings(
-                mask_path, video_info, settings_, recording_texture_encoded_);
+                mask_path, video_info, settings_, initial_main_texture_encoded);
             gpu_texture_output_ = obs_output_create(alpha_recorder::obs::gpu_texture_recording_output_id(),
                                                     "Alpha Recorder GPU Texture Recording",
                                                     output_settings,
@@ -915,10 +913,16 @@ namespace
             alpha_recorder::obs::AlphaVisiblePacketRange visible_range{};
             std::string range_error;
             bool finalize_failed = false;
+            bool data_capture_end_requested = false;
 
-            obs_output_stop(gpu_texture_output_);
+            alpha_recorder::obs::gpu_texture_recording_output_request_stop(gpu_texture_output_);
+            if (!alpha_recorder::obs::gpu_texture_recording_output_wait_stop_boundary(
+                    gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
+            {
+                finalize_failed = true;
+            }
 
-            if (!alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
+            if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
                     gpu_texture_output_,
                     gpu_main_packets_,
                     recording_texture_encoded_,
@@ -943,8 +947,25 @@ namespace
             {
                 finalize_failed = true;
             }
+            if (!finalize_failed)
+            {
+                alpha_recorder::obs::gpu_texture_recording_output_end_data_capture(gpu_texture_output_);
+                data_capture_end_requested = true;
+                if (!alpha_recorder::obs::gpu_texture_recording_output_wait_deactivated(
+                        gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
+                {
+                    finalize_failed = true;
+                }
+            }
             if (finalize_failed)
             {
+                if (!data_capture_end_requested)
+                {
+                    std::string deactivate_error;
+                    alpha_recorder::obs::gpu_texture_recording_output_end_data_capture(gpu_texture_output_);
+                    (void)alpha_recorder::obs::gpu_texture_recording_output_wait_deactivated(
+                        gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, &deactivate_error);
+                }
                 alpha_recorder::obs::gpu_texture_recording_output_abort_mux(gpu_texture_output_);
             }
 
@@ -1412,8 +1433,6 @@ namespace
             bool disconnect_packet_callback = false;
             bool disconnect_file_changed = false;
             bool finalize_failed = false;
-            bool wait_for_gpu_texture_tail = false;
-            obs_video_info gpu_texture_tail_video_info{};
             std::string finalize_error;
 
             {
@@ -1434,9 +1453,6 @@ namespace
                 disconnect_raw_video_callback = raw_video_callback_connected_;
                 disconnect_packet_callback = packet_callback_connected_;
                 disconnect_file_changed = file_changed_connected_;
-                wait_for_gpu_texture_tail =
-                    gpu_texture_path_ && gpu_texture_output_ != nullptr && !recording_texture_encoded_;
-                gpu_texture_tail_video_info = video_info_;
                 main_rendered_callback_connected_ = false;
                 raw_video_callback_connected_ = false;
                 packet_callback_connected_ = false;
@@ -1471,10 +1487,6 @@ namespace
             }
 
             stop_alignment_worker();
-            if (wait_for_gpu_texture_tail)
-            {
-                std::this_thread::sleep_for(gpu_texture_tail_delay(gpu_texture_tail_video_info));
-            }
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
