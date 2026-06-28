@@ -60,6 +60,19 @@ namespace alpha_recorder::obs
             return step;
         }
 
+        [[nodiscard]] std::uint64_t timestamp_delta_ns(std::uint64_t lhs,
+                                                       std::uint64_t rhs) noexcept
+        {
+            return lhs >= rhs ? lhs - rhs : rhs - lhs;
+        }
+
+        [[nodiscard]] std::uint64_t frame_interval_ns(const GpuTextureTimelineInput &input) noexcept
+        {
+            const std::uint64_t fps_num = input.fps_num == 0U ? 60U : input.fps_num;
+            const std::uint64_t fps_den = input.fps_den == 0U ? 1U : input.fps_den;
+            return (1000000000ULL * fps_den + fps_num / 2U) / fps_num;
+        }
+
         [[nodiscard]] bool has_consistent_timebase(
             const std::vector<GpuTexturePacketRecord> &packets) noexcept
         {
@@ -108,12 +121,13 @@ namespace alpha_recorder::obs
 
         [[nodiscard]] const ProgramRenderRecord *find_render_by_cts(
             const std::vector<ProgramRenderRecord> &records,
-            std::uint64_t cts) noexcept
+            std::uint64_t cts,
+            std::uint64_t tolerance_ns) noexcept
         {
             const ProgramRenderRecord *match = nullptr;
             for (const ProgramRenderRecord &record : records)
             {
-                if (record.render_time_ns != cts)
+                if (timestamp_delta_ns(record.render_time_ns, cts) > tolerance_ns)
                 {
                     continue;
                 }
@@ -124,6 +138,238 @@ namespace alpha_recorder::obs
                 match = &record;
             }
             return match;
+        }
+
+        [[nodiscard]] GpuTexturePacketRecord *find_packet_by_pts(
+            std::vector<GpuTexturePacketRecord> &records,
+            std::int64_t pts,
+            bool &ambiguous) noexcept
+        {
+            GpuTexturePacketRecord *match = nullptr;
+            ambiguous = false;
+            for (GpuTexturePacketRecord &record : records)
+            {
+                if (record.pts != pts)
+                {
+                    continue;
+                }
+                if (match != nullptr)
+                {
+                    ambiguous = true;
+                    return nullptr;
+                }
+                match = &record;
+            }
+            return match;
+        }
+
+        [[nodiscard]] TimelineSolveError resolve_packet_generation_from_cts(
+            const std::vector<ProgramRenderRecord> &renders,
+            GpuTexturePacketRecord &packet,
+            std::uint64_t tolerance_ns) noexcept
+        {
+            if (!packet.has_input_cts || packet.input_cts == 0U)
+            {
+                return TimelineSolveError::None;
+            }
+
+            const ProgramRenderRecord *render = find_render_by_cts(renders, packet.input_cts, tolerance_ns);
+            if (render == nullptr)
+            {
+                packet.ambiguous_generation = true;
+                packet.has_generation = false;
+                return TimelineSolveError::AmbiguousGeneration;
+            }
+
+            if (!render->emitted)
+            {
+                packet.has_generation = false;
+                packet.ambiguous_generation = false;
+                packet.input_generation = 0U;
+                packet.emitted_generation = 0U;
+                return TimelineSolveError::None;
+            }
+
+            if (packet.has_generation && packet.emitted_generation != render->emitted_generation)
+            {
+                packet.ambiguous_generation = true;
+                packet.has_generation = false;
+                return TimelineSolveError::AmbiguousGeneration;
+            }
+
+            packet.input_generation = render->generation;
+            packet.emitted_generation = render->emitted_generation;
+            packet.has_generation = true;
+            packet.ambiguous_generation = false;
+            return TimelineSolveError::None;
+        }
+
+        struct AlphaGenerationResolution
+        {
+            TimelineSolveError error = TimelineSolveError::None;
+            AlphaEpochSource source = AlphaEpochSource::None;
+            std::uint64_t latency_frames = 0U;
+            std::uint64_t latency_ns = 0U;
+            std::uint64_t candidate_count = 0U;
+        };
+
+        [[nodiscard]] AlphaGenerationResolution resolve_alpha_generations(
+            const GpuTextureTimelineInput &input,
+            std::vector<GpuTexturePacketRecord> &alpha_packets,
+            std::int64_t alpha_step) noexcept
+        {
+            AlphaGenerationResolution result{};
+
+            bool direct_cts_seen = false;
+            for (GpuTexturePacketRecord &packet : alpha_packets)
+            {
+                if (!packet.has_input_cts)
+                {
+                    continue;
+                }
+                direct_cts_seen = true;
+                const TimelineSolveError error = resolve_packet_generation_from_cts(
+                    input.alpha_renders, packet, input.cts_tolerance_ns);
+                if (error != TimelineSolveError::None)
+                {
+                    result.error = error;
+                    return result;
+                }
+            }
+
+            const bool needs_sys_dts =
+                std::any_of(alpha_packets.begin(), alpha_packets.end(),
+                            [](const GpuTexturePacketRecord &packet) {
+                                return !packet.has_generation && !packet.has_input_cts &&
+                                       packet.sys_dts_usec > 0;
+                            });
+            if (!needs_sys_dts)
+            {
+                result.source = direct_cts_seen ? AlphaEpochSource::DirectCts : AlphaEpochSource::None;
+                return result;
+            }
+
+            if (alpha_step <= 0)
+            {
+                result.error = TimelineSolveError::NonContiguousPts;
+                return result;
+            }
+
+            std::uint64_t last_render_cts = 0U;
+            for (const ProgramRenderRecord &render : input.alpha_renders)
+            {
+                last_render_cts = std::max(last_render_cts, render.render_time_ns);
+            }
+
+            std::uint64_t last_packet_sys_dts_ns = 0U;
+            for (const GpuTexturePacketRecord &packet : alpha_packets)
+            {
+                if (packet.sys_dts_usec <= 0)
+                {
+                    continue;
+                }
+                last_packet_sys_dts_ns =
+                    std::max(last_packet_sys_dts_ns,
+                             static_cast<std::uint64_t>(packet.sys_dts_usec) * 1000U);
+            }
+            if (last_render_cts == 0U || last_packet_sys_dts_ns == 0U)
+            {
+                result.error = TimelineSolveError::UnsupportedObsTimingModel;
+                return result;
+            }
+
+            const std::uint64_t interval_ns = frame_interval_ns(input);
+            if (interval_ns == 0U)
+            {
+                result.error = TimelineSolveError::UnsupportedObsTimingModel;
+                return result;
+            }
+
+            const std::uint64_t latency_ns =
+                last_render_cts > last_packet_sys_dts_ns ? last_render_cts - last_packet_sys_dts_ns : 0U;
+            const std::uint64_t latency_frames = (latency_ns + interval_ns / 2U) / interval_ns;
+            const std::uint64_t rounded_latency_ns = latency_frames * interval_ns;
+            if (timestamp_delta_ns(latency_ns, rounded_latency_ns) > input.cts_tolerance_ns)
+            {
+                result.error = TimelineSolveError::UnsupportedObsTimingModel;
+                return result;
+            }
+            if (latency_frames >
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / alpha_step))
+            {
+                result.error = TimelineSolveError::UnsupportedObsTimingModel;
+                return result;
+            }
+
+            const std::int64_t pts_delay = static_cast<std::int64_t>(latency_frames) * alpha_step;
+            std::uint64_t assignment_count = 0U;
+            result.candidate_count = 1U;
+            result.latency_frames = latency_frames;
+            result.latency_ns = latency_ns;
+
+            for (const GpuTexturePacketRecord &packet : alpha_packets)
+            {
+                if (packet.sys_dts_usec <= 0 || packet.pts < pts_delay)
+                {
+                    continue;
+                }
+
+                const std::uint64_t packet_sys_dts_ns =
+                    static_cast<std::uint64_t>(packet.sys_dts_usec) * 1000U;
+                if (packet_sys_dts_ns < latency_ns)
+                {
+                    result.error = TimelineSolveError::UnsupportedObsTimingModel;
+                    return result;
+                }
+
+                const std::int64_t target_pts = packet.pts - pts_delay;
+                bool ambiguous_target = false;
+                GpuTexturePacketRecord *target =
+                    find_packet_by_pts(alpha_packets, target_pts, ambiguous_target);
+                if (ambiguous_target)
+                {
+                    result.error = TimelineSolveError::AmbiguousAlphaEpoch;
+                    return result;
+                }
+                if (target == nullptr)
+                {
+                    continue;
+                }
+
+                const std::uint64_t derived_cts = packet_sys_dts_ns - latency_ns;
+                if (target->has_input_cts &&
+                    timestamp_delta_ns(target->input_cts, derived_cts) > input.cts_tolerance_ns)
+                {
+                    result.error = TimelineSolveError::AmbiguousAlphaEpoch;
+                    return result;
+                }
+
+                target->input_cts = derived_cts;
+                target->has_input_cts = true;
+                const TimelineSolveError error = resolve_packet_generation_from_cts(
+                    input.alpha_renders, *target, input.cts_tolerance_ns);
+                if (error != TimelineSolveError::None)
+                {
+                    result.error =
+                        error == TimelineSolveError::AmbiguousGeneration
+                            ? TimelineSolveError::AmbiguousAlphaEpoch
+                            : error;
+                    return result;
+                }
+                if (target->has_generation)
+                {
+                    ++assignment_count;
+                }
+            }
+
+            if (assignment_count == 0U)
+            {
+                result.error = TimelineSolveError::UnsupportedObsTimingModel;
+                return result;
+            }
+
+            result.source = AlphaEpochSource::SysDts;
+            return result;
         }
 
         [[nodiscard]] std::uint64_t main_content_generation(
@@ -184,6 +430,8 @@ namespace alpha_recorder::obs
             return "MissingAlphaGeneration";
         case TimelineSolveError::AmbiguousGeneration:
             return "AmbiguousGeneration";
+        case TimelineSolveError::AmbiguousAlphaEpoch:
+            return "AmbiguousAlphaEpoch";
         case TimelineSolveError::NonContiguousPts:
             return "NonContiguousPts";
         case TimelineSolveError::TimebaseMismatch:
@@ -194,6 +442,20 @@ namespace alpha_recorder::obs
             return "UnsupportedObsTimingModel";
         }
         return "Unknown";
+    }
+
+    const char *alpha_epoch_source_name(AlphaEpochSource source) noexcept
+    {
+        switch (source)
+        {
+        case AlphaEpochSource::None:
+            return "none";
+        case AlphaEpochSource::DirectCts:
+            return "direct_cts";
+        case AlphaEpochSource::SysDts:
+            return "sys_dts";
+        }
+        return "unknown";
     }
 
     std::string timeline_solve_error_message(TimelineSolveError error)
@@ -228,7 +490,26 @@ namespace alpha_recorder::obs
         }
 
         const std::vector<GpuTexturePacketRecord> main_sorted = sorted_by_pts(input.main_packets);
-        const std::vector<GpuTexturePacketRecord> alpha_sorted = sorted_by_pts(input.alpha_packets);
+        std::vector<GpuTexturePacketRecord> alpha_sorted = sorted_by_pts(input.alpha_packets);
+        const std::int64_t alpha_step = packet_pts_step(alpha_sorted);
+        if (alpha_step <= 0)
+        {
+            result.error = TimelineSolveError::NonContiguousPts;
+            return result;
+        }
+
+        const AlphaGenerationResolution generation_resolution =
+            resolve_alpha_generations(input, alpha_sorted, alpha_step);
+        if (generation_resolution.error != TimelineSolveError::None)
+        {
+            result.solution.alpha_epoch_source = generation_resolution.source;
+            result.solution.alpha_latency_frames = generation_resolution.latency_frames;
+            result.solution.alpha_latency_ns = generation_resolution.latency_ns;
+            result.solution.alpha_epoch_candidate_count = generation_resolution.candidate_count;
+            result.error = generation_resolution.error;
+            return result;
+        }
+
         const GpuTexturePacketRecord &main_first = main_sorted.front();
         if (!main_first.has_input_cts || main_first.input_cts == 0U)
         {
@@ -236,7 +517,8 @@ namespace alpha_recorder::obs
             return result;
         }
 
-        const ProgramRenderRecord *main_render = find_render_by_cts(input.alpha_renders, main_first.input_cts);
+        const ProgramRenderRecord *main_render =
+            find_render_by_cts(input.alpha_renders, main_first.input_cts, input.cts_tolerance_ns);
         if (main_render == nullptr)
         {
             result.error = TimelineSolveError::AmbiguousMainGeneration;
@@ -257,11 +539,23 @@ namespace alpha_recorder::obs
         {
             if (packet.ambiguous_generation)
             {
+                result.solution.alpha_epoch_source = generation_resolution.source;
+                result.solution.alpha_latency_frames = generation_resolution.latency_frames;
+                result.solution.alpha_latency_ns = generation_resolution.latency_ns;
+                result.solution.alpha_epoch_candidate_count = generation_resolution.candidate_count;
+                result.solution.alpha_packet_count = static_cast<std::uint64_t>(alpha_sorted.size());
+                result.solution.alpha_packets_with_generation = alpha_packets_with_generation;
                 result.error = TimelineSolveError::AmbiguousGeneration;
                 return result;
             }
             alpha_packets_with_generation += packet.has_generation ? 1U : 0U;
         }
+        result.solution.alpha_epoch_source = generation_resolution.source;
+        result.solution.alpha_latency_frames = generation_resolution.latency_frames;
+        result.solution.alpha_latency_ns = generation_resolution.latency_ns;
+        result.solution.alpha_epoch_candidate_count = generation_resolution.candidate_count;
+        result.solution.alpha_packet_count = static_cast<std::uint64_t>(alpha_sorted.size());
+        result.solution.alpha_packets_with_generation = alpha_packets_with_generation;
 
         const GpuTexturePacketRecord *alpha_visible_first =
             first_alpha_packet_for_generation(alpha_sorted, main_generation);
@@ -271,12 +565,6 @@ namespace alpha_recorder::obs
             return result;
         }
 
-        const std::int64_t alpha_step = packet_pts_step(alpha_sorted);
-        if (alpha_step <= 0)
-        {
-            result.error = TimelineSolveError::NonContiguousPts;
-            return result;
-        }
         const std::int64_t alpha_visible_pts = alpha_visible_first->pts;
 
         std::set<std::int64_t> alpha_pts;
@@ -331,6 +619,10 @@ namespace alpha_recorder::obs
         result.solution.main_packet_count = main_packet_count;
         result.solution.alpha_packet_count = static_cast<std::uint64_t>(alpha_sorted.size());
         result.solution.alpha_packets_with_generation = alpha_packets_with_generation;
+        result.solution.alpha_epoch_source = generation_resolution.source;
+        result.solution.alpha_latency_frames = generation_resolution.latency_frames;
+        result.solution.alpha_latency_ns = generation_resolution.latency_ns;
+        result.solution.alpha_epoch_candidate_count = generation_resolution.candidate_count;
         result.error = TimelineSolveError::None;
         return result;
     }

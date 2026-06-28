@@ -25,10 +25,18 @@ namespace alpha_recorder::obs
         AmbiguousMainGeneration,
         MissingAlphaGeneration,
         AmbiguousGeneration,
+        AmbiguousAlphaEpoch,
         NonContiguousPts,
         TimebaseMismatch,
         MissingTailCoverage,
         UnsupportedObsTimingModel,
+    };
+
+    enum class AlphaEpochSource
+    {
+        None,
+        DirectCts,
+        SysDts,
     };
 
     struct ProgramRenderRecord
@@ -61,6 +69,9 @@ namespace alpha_recorder::obs
         std::vector<GpuTexturePacketRecord> alpha_packets{};
         std::vector<ProgramRenderRecord> alpha_renders{};
         MainContentPhase main_phase = MainContentPhase::PreviousProgramGeneration;
+        std::uint32_t fps_num = 60U;
+        std::uint32_t fps_den = 1U;
+        std::uint64_t cts_tolerance_ns = 10000U;
     };
 
     struct GpuTextureTimelineSolution
@@ -73,6 +84,10 @@ namespace alpha_recorder::obs
         std::uint64_t main_packet_count = 0U;
         std::uint64_t alpha_packet_count = 0U;
         std::uint64_t alpha_packets_with_generation = 0U;
+        AlphaEpochSource alpha_epoch_source = AlphaEpochSource::None;
+        std::uint64_t alpha_latency_frames = 0U;
+        std::uint64_t alpha_latency_ns = 0U;
+        std::uint64_t alpha_epoch_candidate_count = 0U;
     };
 
     struct GpuTextureTimelineSolveResult
@@ -82,6 +97,7 @@ namespace alpha_recorder::obs
     };
 
     [[nodiscard]] const char *timeline_solve_error_name(TimelineSolveError error) noexcept;
+    [[nodiscard]] const char *alpha_epoch_source_name(AlphaEpochSource source) noexcept;
     [[nodiscard]] std::string timeline_solve_error_message(TimelineSolveError error);
 
     [[nodiscard]] GpuTextureTimelineSolveResult solve_gpu_texture_timeline(

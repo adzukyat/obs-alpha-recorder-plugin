@@ -9,9 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <limits>
 #include <mutex>
-#include <numeric>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -33,7 +31,6 @@ namespace
     constexpr const char *kSourceName = "Alpha Recorder Program Alpha";
     constexpr const char *kDefaultEncoderId = "obs_nvenc_hevc_tex";
     constexpr std::size_t kPhaseTextureCount = 2U;
-    constexpr std::uint64_t kSysDtsCtsToleranceNs = 10000U;
 
     enum class TextureHevcBackend
     {
@@ -642,201 +639,6 @@ technique DrawRed
         record.sys_dts_usec = packet.sys_dts_usec;
     }
 
-    std::uint64_t timestamp_delta_ns(std::uint64_t lhs, std::uint64_t rhs) noexcept
-    {
-        return lhs >= rhs ? lhs - rhs : rhs - lhs;
-    }
-
-    std::int64_t abs_i64(std::int64_t value) noexcept
-    {
-        return value >= 0 ? value : -(value + 1) + 1;
-    }
-
-    std::int64_t gcd_positive(std::int64_t lhs, std::int64_t rhs) noexcept
-    {
-        lhs = abs_i64(lhs);
-        rhs = abs_i64(rhs);
-        if (lhs == 0)
-        {
-            return rhs;
-        }
-        if (rhs == 0)
-        {
-            return lhs;
-        }
-        return std::gcd(lhs, rhs);
-    }
-
-    std::int64_t alpha_packet_pts_step(
-        const std::vector<alpha_recorder::obs::GpuTexturePacketRecord> &records) noexcept
-    {
-        if (records.size() < 2U)
-        {
-            return 0;
-        }
-
-        std::vector<std::int64_t> pts_values;
-        pts_values.reserve(records.size());
-        for (const alpha_recorder::obs::GpuTexturePacketRecord &record : records)
-        {
-            pts_values.push_back(record.pts);
-        }
-        std::sort(pts_values.begin(), pts_values.end());
-
-        std::int64_t step = 0;
-        for (std::size_t index = 1U; index < pts_values.size(); ++index)
-        {
-            const std::int64_t delta = pts_values[index] - pts_values[index - 1U];
-            if (delta > 0)
-            {
-                step = gcd_positive(step, delta);
-            }
-        }
-        return step;
-    }
-
-    std::uint64_t frame_interval_ns(const GpuTextureRecordingOutputContext &context) noexcept
-    {
-        const std::uint64_t fps_num = context.fps_num == 0U ? 60U : context.fps_num;
-        const std::uint64_t fps_den = context.fps_den == 0U ? 1U : context.fps_den;
-        return (1000000000ULL * fps_den + fps_num / 2U) / fps_num;
-    }
-
-    void resolve_alpha_packet_generation(
-        GpuTextureRecordingOutputContext &context,
-        alpha_recorder::obs::GpuTexturePacketRecord &record) noexcept
-    {
-        record.has_generation = false;
-        record.ambiguous_generation = false;
-        record.input_generation = 0U;
-        record.emitted_generation = 0U;
-
-        if (!record.has_input_cts || record.input_cts == 0U)
-        {
-            return;
-        }
-
-        const alpha_recorder::obs::ProgramRenderRecord *match = nullptr;
-        for (const alpha_recorder::obs::ProgramRenderRecord &render : context.alpha_render_records)
-        {
-            if (timestamp_delta_ns(render.render_time_ns, record.input_cts) > kSysDtsCtsToleranceNs)
-            {
-                continue;
-            }
-            if (match != nullptr)
-            {
-                record.ambiguous_generation = true;
-                return;
-            }
-            match = &render;
-        }
-
-        if (match == nullptr || !match->emitted)
-        {
-            return;
-        }
-
-        record.input_generation = match->generation;
-        record.emitted_generation = match->emitted_generation;
-        record.has_generation = true;
-    }
-
-    void derive_alpha_packet_generations_from_sys_dts(
-        GpuTextureRecordingOutputContext &context) noexcept
-    {
-        if (context.alpha_packet_records.empty() || context.alpha_render_records.empty())
-        {
-            return;
-        }
-
-        const bool needs_derivation =
-            std::any_of(context.alpha_packet_records.begin(), context.alpha_packet_records.end(),
-                        [](const alpha_recorder::obs::GpuTexturePacketRecord &packet) {
-                            return !packet.has_input_cts && packet.sys_dts_usec > 0;
-                        });
-        if (!needs_derivation)
-        {
-            return;
-        }
-
-        std::uint64_t last_render_cts = 0U;
-        for (const alpha_recorder::obs::ProgramRenderRecord &render : context.alpha_render_records)
-        {
-            last_render_cts = std::max(last_render_cts, render.render_time_ns);
-        }
-
-        std::uint64_t last_packet_sys_dts_ns = 0U;
-        for (const alpha_recorder::obs::GpuTexturePacketRecord &packet : context.alpha_packet_records)
-        {
-            if (packet.sys_dts_usec <= 0)
-            {
-                continue;
-            }
-            last_packet_sys_dts_ns =
-                std::max(last_packet_sys_dts_ns, static_cast<std::uint64_t>(packet.sys_dts_usec) * 1000U);
-        }
-        if (last_render_cts == 0U || last_packet_sys_dts_ns == 0U)
-        {
-            return;
-        }
-
-        const std::uint64_t encoder_latency_ns =
-            last_render_cts > last_packet_sys_dts_ns ? last_render_cts - last_packet_sys_dts_ns : 0U;
-        const std::uint64_t interval_ns = frame_interval_ns(context);
-        const std::uint64_t latency_frames =
-            interval_ns == 0U ? 0U : (encoder_latency_ns + interval_ns / 2U) / interval_ns;
-        const std::int64_t pts_step = alpha_packet_pts_step(context.alpha_packet_records);
-        if (pts_step <= 0 ||
-            latency_frames > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / pts_step))
-        {
-            return;
-        }
-
-        const std::int64_t pts_delay = static_cast<std::int64_t>(latency_frames) * pts_step;
-        struct PendingGenerationAssignment
-        {
-            std::int64_t target_pts = 0;
-            std::uint64_t input_cts = 0U;
-        };
-        std::vector<PendingGenerationAssignment> assignments;
-        assignments.reserve(context.alpha_packet_records.size());
-
-        for (const alpha_recorder::obs::GpuTexturePacketRecord &packet : context.alpha_packet_records)
-        {
-            if (packet.has_input_cts || packet.sys_dts_usec <= 0)
-            {
-                continue;
-            }
-
-            const std::uint64_t packet_sys_dts_ns =
-                static_cast<std::uint64_t>(packet.sys_dts_usec) * 1000U;
-            if (packet_sys_dts_ns < encoder_latency_ns)
-            {
-                continue;
-            }
-            if (packet.pts < pts_delay)
-            {
-                continue;
-            }
-            assignments.push_back(PendingGenerationAssignment{packet.pts - pts_delay,
-                                                              packet_sys_dts_ns - encoder_latency_ns});
-        }
-
-        for (const PendingGenerationAssignment &assignment : assignments)
-        {
-            alpha_recorder::obs::GpuTexturePacketRecord *target =
-                find_packet_record_by_pts(context.alpha_packet_records, assignment.target_pts);
-            if (target == nullptr || target->has_input_cts)
-            {
-                continue;
-            }
-
-            target->input_cts = assignment.input_cts;
-            target->has_input_cts = true;
-            resolve_alpha_packet_generation(context, *target);
-        }
-    }
-
     void *program_alpha_create(obs_data_t *settings, obs_source_t *)
     {
         auto *source = new ProgramAlphaSource{};
@@ -1309,7 +1111,6 @@ technique DrawRed
             merge_packet_fields(*record, *packet);
             record->input_cts = packet_time->cts;
             record->has_input_cts = true;
-            resolve_alpha_packet_generation(*context, *record);
         }
     }
 
@@ -1470,10 +1271,6 @@ technique DrawRed
         }
 
         merge_packet_fields(*record, *packet);
-        if (record->has_input_cts)
-        {
-            resolve_alpha_packet_generation(*context, *record);
-        }
         std::string error_message;
         if (!context->sink.submit_packet(packet, &error_message) && !error_message.empty())
         {
@@ -1684,7 +1481,6 @@ namespace alpha_recorder::obs
         }
 
         std::lock_guard<std::mutex> lock(context->mutex);
-        derive_alpha_packet_generations_from_sys_dts(*context);
 
         alpha_recorder::obs::GpuTextureTimelineInput input{};
         input.main_packets = main_packets;
@@ -1693,6 +1489,8 @@ namespace alpha_recorder::obs
         input.main_phase = main_texture_encoded
                                ? alpha_recorder::obs::MainContentPhase::LiveProgramGeneration
                                : alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
+        input.fps_num = context->fps_num;
+        input.fps_den = context->fps_den;
 
         std::uint64_t alpha_packets_with_generation = 0U;
         std::uint64_t alpha_packets_with_input_cts = 0U;
@@ -1770,11 +1568,15 @@ namespace alpha_recorder::obs
 
         const alpha_recorder::obs::GpuTextureTimelineSolveResult solve =
             alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        const std::uint64_t logged_alpha_packets_with_generation =
+            solve.solution.alpha_packets_with_generation != 0U
+                ? solve.solution.alpha_packets_with_generation
+                : alpha_packets_with_generation;
         if (solve.error != alpha_recorder::obs::TimelineSolveError::None)
         {
             assign_error(error_message, alpha_recorder::obs::timeline_solve_error_message(solve.error));
             blog(LOG_WARNING,
-                 "[alpha_recorder_gpu_texture] timeline solve failed error=%s main_packets=%llu alpha_packets=%llu alpha_packets_with_input_cts=%llu alpha_input_cts_range=%llu..%llu alpha_sys_dts_usec_range=%lld..%lld alpha_packets_with_generation=%llu alpha_generation_range=%llu..%llu alpha_renders=%llu alpha_render_cts_range=%llu..%llu phase=%s",
+                 "[alpha_recorder_gpu_texture] timeline solve failed error=%s main_packets=%llu alpha_packets=%llu alpha_packets_with_input_cts=%llu alpha_input_cts_range=%llu..%llu alpha_sys_dts_usec_range=%lld..%lld alpha_packets_with_generation=%llu alpha_generation_range=%llu..%llu alpha_renders=%llu alpha_render_cts_range=%llu..%llu phase=%s alpha_epoch_source=%s alpha_latency_frames=%llu alpha_latency_ns=%llu alpha_epoch_candidates=%llu",
                  alpha_recorder::obs::timeline_solve_error_name(solve.error),
                  static_cast<unsigned long long>(main_packets.size()),
                  static_cast<unsigned long long>(context->alpha_packet_records.size()),
@@ -1783,19 +1585,23 @@ namespace alpha_recorder::obs
                  static_cast<unsigned long long>(alpha_max_cts),
                  static_cast<long long>(alpha_min_sys_dts_usec),
                  static_cast<long long>(alpha_max_sys_dts_usec),
-                 static_cast<unsigned long long>(alpha_packets_with_generation),
+                 static_cast<unsigned long long>(logged_alpha_packets_with_generation),
                  static_cast<unsigned long long>(alpha_min_generation),
                  static_cast<unsigned long long>(alpha_max_generation),
                  static_cast<unsigned long long>(context->alpha_render_records.size()),
                  static_cast<unsigned long long>(render_min_cts),
                  static_cast<unsigned long long>(render_max_cts),
-                 main_texture_encoded ? "live" : "previous");
+                 main_texture_encoded ? "live" : "previous",
+                 alpha_recorder::obs::alpha_epoch_source_name(solve.solution.alpha_epoch_source),
+                 static_cast<unsigned long long>(solve.solution.alpha_latency_frames),
+                 static_cast<unsigned long long>(solve.solution.alpha_latency_ns),
+                 static_cast<unsigned long long>(solve.solution.alpha_epoch_candidate_count));
             return false;
         }
 
         range = solve.solution.range;
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] certified edit range media_time=%lld first_visible_alpha_pts=%lld duration=%lld main_generation=%llu alpha_generation=%llu alpha_pts_step=%lld main_packets=%llu alpha_packets=%llu alpha_packets_with_generation=%llu alpha_renders=%llu phase=%s",
+             "[alpha_recorder_gpu_texture] certified edit range media_time=%lld first_visible_alpha_pts=%lld duration=%lld main_generation=%llu alpha_generation=%llu alpha_pts_step=%lld main_packets=%llu alpha_packets=%llu alpha_packets_with_generation=%llu alpha_renders=%llu phase=%s alpha_epoch_source=%s alpha_latency_frames=%llu alpha_latency_ns=%llu alpha_epoch_candidates=%llu",
              static_cast<long long>(range.media_time),
              static_cast<long long>(solve.solution.first_visible_alpha_pts),
              static_cast<long long>(range.duration),
@@ -1806,7 +1612,11 @@ namespace alpha_recorder::obs
              static_cast<unsigned long long>(solve.solution.alpha_packet_count),
              static_cast<unsigned long long>(solve.solution.alpha_packets_with_generation),
              static_cast<unsigned long long>(context->alpha_render_records.size()),
-             main_texture_encoded ? "live" : "previous");
+             main_texture_encoded ? "live" : "previous",
+             alpha_recorder::obs::alpha_epoch_source_name(solve.solution.alpha_epoch_source),
+             static_cast<unsigned long long>(solve.solution.alpha_latency_frames),
+             static_cast<unsigned long long>(solve.solution.alpha_latency_ns),
+             static_cast<unsigned long long>(solve.solution.alpha_epoch_candidate_count));
         return true;
     }
 

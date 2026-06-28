@@ -53,6 +53,26 @@ namespace
         return packet(pts, cts, true, 0, false);
     }
 
+    alpha_recorder::obs::GpuTexturePacketRecord alpha_sys_dts_packet(std::int64_t pts,
+                                                                     std::int64_t sys_dts_usec,
+                                                                     std::int64_t dts = 0,
+                                                                     std::int32_t timebase_num = 1,
+                                                                     std::int32_t timebase_den = 1)
+    {
+        return alpha_recorder::obs::GpuTexturePacketRecord{pts,
+                                                           dts,
+                                                           timebase_num,
+                                                           timebase_den,
+                                                           true,
+                                                           sys_dts_usec,
+                                                           0,
+                                                           false,
+                                                           0,
+                                                           0,
+                                                           false,
+                                                           false};
+    }
+
     alpha_recorder::obs::ProgramRenderRecord render(std::uint64_t generation,
                                                     std::uint64_t time,
                                                     std::uint64_t emitted_generation,
@@ -66,6 +86,7 @@ int main()
 {
     {
         alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
         input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
         input.main_packets = {
             main_packet(0, 1000),
@@ -73,9 +94,9 @@ int main()
             main_packet(2002, 3000),
         };
         input.alpha_packets = {
-            alpha_packet(0, 1000, 0),
-            alpha_packet(1001, 2000, 1),
-            alpha_packet(2002, 3000, 2),
+            alpha_packet_without_generation(0, 1000),
+            alpha_packet_without_generation(1001, 2000),
+            alpha_packet_without_generation(2002, 3000),
         };
         input.alpha_renders = {
             render(0, 1000, 0),
@@ -96,10 +117,16 @@ int main()
             std::cerr << "live-generation solve used a fixed content delay\n";
             return 2;
         }
+        if (result.solution.alpha_epoch_source != alpha_recorder::obs::AlphaEpochSource::DirectCts)
+        {
+            std::cerr << "live-generation solve did not certify direct CTS\n";
+            return 11;
+        }
     }
 
     {
         alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
         input.main_phase = alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
         input.main_packets = {
             main_packet(0, 2000),
@@ -136,9 +163,11 @@ int main()
 
     {
         alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
         input.main_phase = alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
         input.main_packets = {main_packet(0, 1000), main_packet(1001, 2000)};
-        input.alpha_packets = {alpha_packet_without_generation(0, 1000), alpha_packet(1001, 2000, 1)};
+        input.alpha_packets = {alpha_packet_without_generation(0, 1000),
+                               alpha_packet_without_generation(1001, 2000)};
         input.alpha_renders = {render(0, 1000, 0, false), render(1, 2000, 0)};
 
         const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
@@ -152,6 +181,7 @@ int main()
 
     {
         alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
         input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
         input.main_packets = {
             main_packet(0, 1000, 0),
@@ -181,6 +211,102 @@ int main()
 
     {
         alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.fps_num = 1;
+        input.fps_den = 1;
+        input.main_packets = {main_packet(0, 1000000000, 0, 1, 1),
+                              main_packet(1, 2000000000, 1, 1, 1),
+                              main_packet(2, 3000000000, 2, 1, 1)};
+        input.alpha_packets = {
+            alpha_sys_dts_packet(0, 1000000),
+            alpha_sys_dts_packet(1, 2000000),
+            alpha_sys_dts_packet(2, 3000000),
+            alpha_sys_dts_packet(3, 4000000),
+            alpha_sys_dts_packet(4, 5000000),
+        };
+        input.alpha_renders = {
+            render(0, 1000000000, 0),
+            render(1, 2000000000, 1),
+            render(2, 3000000000, 2),
+            render(3, 4000000000, 3),
+            render(4, 5000000000, 4),
+            render(5, 6000000000, 5),
+            render(6, 7000000000, 6),
+        };
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (result.error != alpha_recorder::obs::TimelineSolveError::None)
+        {
+            std::cerr << "sys_dts epoch solve failed: "
+                      << alpha_recorder::obs::timeline_solve_error_name(result.error) << '\n';
+            return 12;
+        }
+        if (result.solution.range.media_time != 0 || result.solution.alpha_latency_frames != 2 ||
+            result.solution.alpha_epoch_source != alpha_recorder::obs::AlphaEpochSource::SysDts)
+        {
+            std::cerr << "sys_dts epoch solve used the wrong dynamic latency\n";
+            return 13;
+        }
+    }
+
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.fps_num = 1;
+        input.fps_den = 1;
+        input.main_packets = {main_packet(0, 1000000000, 0, 1, 1)};
+        input.alpha_packets = {
+            packet(0, 2000000000, true, 0, false, 0, 1, 1),
+            alpha_sys_dts_packet(1, 2000000),
+        };
+        input.alpha_renders = {
+            render(0, 1000000000, 0),
+            render(1, 2000000000, 1),
+            render(2, 3000000000, 2),
+        };
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (result.error != alpha_recorder::obs::TimelineSolveError::AmbiguousAlphaEpoch)
+        {
+            std::cerr << "conflicting sys_dts/direct CTS epoch was not rejected: "
+                      << alpha_recorder::obs::timeline_solve_error_name(result.error) << '\n';
+            return 14;
+        }
+    }
+
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.fps_num = 1;
+        input.fps_den = 1;
+        input.main_packets = {main_packet(0, 1000000000, 0, 1, 1)};
+        input.alpha_packets = {
+            alpha_sys_dts_packet(0, 1000000),
+            alpha_sys_dts_packet(1, 2000000),
+        };
+        input.alpha_renders = {
+            render(0, 1000000000, 0),
+            render(1, 2000000000, 1),
+            render(2, 3500000000, 2),
+        };
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (result.error != alpha_recorder::obs::TimelineSolveError::UnsupportedObsTimingModel)
+        {
+            std::cerr << "non-grid sys_dts epoch was not rejected\n";
+            return 15;
+        }
+    }
+
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
         input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
         input.main_packets = {
             main_packet(0, 1000, 0, 1, 30),
@@ -206,9 +332,10 @@ int main()
 
     {
         alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
         input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
         input.main_packets = {main_packet(0, 1000), main_packet(1001, 2000), main_packet(2002, 3000)};
-        input.alpha_packets = {alpha_packet(0, 1000, 0), alpha_packet_without_generation(1001, 2000),
+        input.alpha_packets = {alpha_packet(0, 1000, 0), packet(1001, 0, false, 0, false),
                                alpha_packet(2002, 3000, 2)};
         input.alpha_renders = {render(0, 1000, 0), render(1, 2000, 1), render(2, 3000, 2)};
 
@@ -223,11 +350,12 @@ int main()
 
     {
         alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
         input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
         input.main_packets = {main_packet(0, 1000), main_packet(1001, 2000)};
-        input.alpha_packets = {packet(0, 1000, true, 0, true, 0, 1001, 60000, true),
-                               alpha_packet(1001, 2000, 1)};
-        input.alpha_renders = {render(0, 1000, 0), render(1, 2000, 1)};
+        input.alpha_packets = {alpha_packet_without_generation(0, 1000),
+                               alpha_packet_without_generation(1001, 2000)};
+        input.alpha_renders = {render(0, 1000, 0), render(1, 2000, 1), render(2, 2000, 2)};
 
         const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
             alpha_recorder::obs::solve_gpu_texture_timeline(input);
@@ -240,6 +368,7 @@ int main()
 
     {
         alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
         input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
         input.main_packets = {main_packet(0, 1000), main_packet(1001, 2000), main_packet(2002, 3000)};
         input.alpha_packets = {alpha_packet(0, 1000, 0), alpha_packet(1001, 2000, 1),
