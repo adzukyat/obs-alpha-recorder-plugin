@@ -100,6 +100,15 @@ namespace alpha_recorder::obs
                 settings.diagnostic_logging =
                     config_get_bool(config, settings_section().data(), settings_diagnostic_logging_key().data());
             }
+            if (config_has_user_value(config,
+                                      settings_section().data(),
+                                      settings_fail_close_on_sync_proof_failure_key().data()))
+            {
+                settings.fail_close_on_sync_proof_failure =
+                    config_get_bool(config,
+                                    settings_section().data(),
+                                    settings_fail_close_on_sync_proof_failure_key().data());
+            }
         }
 
     } // namespace

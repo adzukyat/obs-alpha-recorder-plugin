@@ -64,6 +64,9 @@ namespace alpha_recorder::obs
                                 hevc_nvenc_split_encode_config_value(settings.hevc_encoder.nvenc_split_encode).data());
             obs_data_set_int(response, settings_hevc_nvenc_gpu_index_key().data(), settings.hevc_encoder.nvenc_gpu_index);
             obs_data_set_bool(response, settings_diagnostic_logging_key().data(), settings.diagnostic_logging);
+            obs_data_set_bool(response,
+                              settings_fail_close_on_sync_proof_failure_key().data(),
+                              settings.fail_close_on_sync_proof_failure);
             obs_data_t *formats = obs_data_create();
             for (const FinalizationFormatOption &option : finalization_format_options)
             {
@@ -219,6 +222,13 @@ namespace alpha_recorder::obs
                 settings.diagnostic_logging = obs_data_get_bool(request, settings_diagnostic_logging_key().data());
             }
 
+            if (request != nullptr &&
+                obs_data_has_user_value(request, settings_fail_close_on_sync_proof_failure_key().data()))
+            {
+                settings.fail_close_on_sync_proof_failure =
+                    obs_data_get_bool(request, settings_fail_close_on_sync_proof_failure_key().data());
+            }
+
             config_set_bool(config, settings_section().data(), settings_enabled_key().data(), settings.enabled);
             config_set_string(config, settings_section().data(), settings_finalization_format_key().data(),
                               finalization_format_config_value(settings.finalization_format).data());
@@ -238,6 +248,10 @@ namespace alpha_recorder::obs
                            settings.hevc_encoder.nvenc_gpu_index);
             config_set_bool(config, settings_section().data(), settings_diagnostic_logging_key().data(),
                             settings.diagnostic_logging);
+            config_set_bool(config,
+                            settings_section().data(),
+                            settings_fail_close_on_sync_proof_failure_key().data(),
+                            settings.fail_close_on_sync_proof_failure);
 
             if (config_save(config) != CONFIG_SUCCESS)
             {

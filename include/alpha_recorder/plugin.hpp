@@ -78,6 +78,7 @@ namespace alpha_recorder::obs
         FinalizationFormat finalization_format = FinalizationFormat::MaskPngMov;
         HevcEncoderSettings hevc_encoder{};
         bool diagnostic_logging = false;
+        bool fail_close_on_sync_proof_failure = false;
     };
 
     struct FinalizationFormatOption
@@ -147,6 +148,11 @@ namespace alpha_recorder::obs
         return "diagnostic_logging";
     }
 
+    [[nodiscard]] inline constexpr std::string_view settings_fail_close_on_sync_proof_failure_key() noexcept
+    {
+        return "fail_close_on_sync_proof_failure";
+    }
+
     [[nodiscard]] inline constexpr FinalizationFormat finalization_format_default() noexcept
     {
         return FinalizationFormat::MaskPngMov;
@@ -168,7 +174,7 @@ namespace alpha_recorder::obs
 
     [[nodiscard]] inline constexpr Settings default_settings() noexcept
     {
-        return Settings{true, finalization_format_default(), HevcEncoderSettings{}, false};
+        return Settings{true, finalization_format_default(), HevcEncoderSettings{}, false, false};
     }
 
     [[nodiscard]] inline std::uint64_t frame_pts_from_elapsed_ns(std::uint64_t elapsed_ns,

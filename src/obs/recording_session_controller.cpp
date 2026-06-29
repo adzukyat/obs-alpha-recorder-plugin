@@ -297,6 +297,16 @@ namespace
              error ? error.message().c_str() : "");
     }
 
+    std::string nonfatal_sync_log_reason(std::string reason)
+    {
+        constexpr std::string_view prefix = "Alpha Recorder ";
+        if (reason.rfind(prefix, 0U) == 0U)
+        {
+            reason.erase(0U, prefix.size());
+        }
+        return reason;
+    }
+
     bool settings_use_gpu_texture_path(const alpha_recorder::obs::Settings &settings) noexcept
     {
         return alpha_recorder::obs::finalization_format_uses_gpu_texture_path(settings.finalization_format);
@@ -930,6 +940,7 @@ namespace
             bool finalize_failed = false;
             bool data_capture_end_requested = false;
             std::string finalize_failure_reason;
+            const bool strict_sync_proof = settings_.fail_close_on_sync_proof_failure;
 
             const auto solve_deadline =
                 std::chrono::steady_clock::now() + std::chrono::milliseconds(kGpuTextureVisibleRangeDrainWaitMs);
@@ -952,18 +963,84 @@ namespace
 
             if (!visible_range_certified)
             {
-                finalize_failed = true;
-                if (error_message != nullptr)
+                const std::string sync_failure_reason =
+                    range_error.empty()
+                        ? "Alpha Recorder could not compute the GPU texture alpha visible range."
+                        : range_error;
+                const bool has_partial_visible_range = visible_range.duration > 0;
+                if (strict_sync_proof)
                 {
-                    *error_message = range_error.empty()
-                                         ? "Alpha Recorder could not compute the GPU texture alpha visible range."
-                                         : range_error;
+                    finalize_failed = true;
+                    if (error_message != nullptr)
+                    {
+                        *error_message = sync_failure_reason;
+                    }
+                }
+                else
+                {
+                    const std::string log_reason = nonfatal_sync_log_reason(sync_failure_reason);
+                    blog(LOG_WARNING,
+                         "[alpha_recorder] sync proof not certified; publishing GPU texture alpha MP4 %s: path=\"%s\" final=\"%s\" media_time=%lld duration=%lld reason=\"%s\"",
+                         has_partial_visible_range ? "with a best-effort edit range" : "without an edit range",
+                         actual_writer_path.generic_string().c_str(),
+                         final_writer_path.generic_string().c_str(),
+                         static_cast<long long>(visible_range.media_time),
+                         static_cast<long long>(visible_range.duration),
+                         log_reason.c_str());
+                    if (settings_.diagnostic_logging)
+                    {
+                        alpha_recorder::obs::append_diagnostic_log_line(
+                            std::string{
+                                "Alpha Recorder sync proof was not certified; publishing "} +
+                            (has_partial_visible_range ? "with a best-effort edit range" : "without an edit range") +
+                            ": path=\"" + actual_writer_path.generic_string() + "\" final=\"" +
+                            final_writer_path.generic_string() + "\" media_time=\"" +
+                            std::to_string(visible_range.media_time) + "\" duration=\"" +
+                            std::to_string(visible_range.duration) + "\" reason=\"" +
+                            sync_failure_reason + "\"");
+                    }
                 }
             }
-            if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_set_visible_range(
-                                      gpu_texture_output_, visible_range, error_message))
+            if (!finalize_failed && visible_range.duration > 0)
             {
-                finalize_failed = true;
+                std::string visible_range_error;
+                if (!alpha_recorder::obs::gpu_texture_recording_output_set_visible_range(
+                        gpu_texture_output_, visible_range, &visible_range_error))
+                {
+                    if (strict_sync_proof)
+                    {
+                        finalize_failed = true;
+                        if (error_message != nullptr)
+                        {
+                            *error_message = visible_range_error.empty()
+                                                 ? "Alpha Recorder could not apply the GPU texture alpha visible range."
+                                                 : visible_range_error;
+                        }
+                    }
+                    else
+                    {
+                        const std::string sync_failure_reason =
+                            visible_range_error.empty()
+                                ? "Alpha Recorder could not apply the GPU texture alpha visible range."
+                                : visible_range_error;
+                        visible_range_certified = false;
+                        const std::string log_reason = nonfatal_sync_log_reason(sync_failure_reason);
+                        blog(LOG_WARNING,
+                             "[alpha_recorder] sync proof edit range not applied; publishing GPU texture alpha MP4 without an edit range: path=\"%s\" final=\"%s\" reason=\"%s\"",
+                             actual_writer_path.generic_string().c_str(),
+                             final_writer_path.generic_string().c_str(),
+                             log_reason.c_str());
+                        if (settings_.diagnostic_logging)
+                        {
+                            alpha_recorder::obs::append_diagnostic_log_line(
+                                std::string{
+                                    "Alpha Recorder sync proof edit range was not applied; publishing without an edit range: path=\""} +
+                                actual_writer_path.generic_string() + "\" final=\"" +
+                                final_writer_path.generic_string() + "\" reason=\"" +
+                                sync_failure_reason + "\"");
+                        }
+                    }
+                }
             }
             if (!finalize_failed)
             {

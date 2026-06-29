@@ -2037,10 +2037,16 @@ namespace alpha_recorder::obs
                 : alpha_packets_with_generation;
         if (solve.error != alpha_recorder::obs::TimelineSolveError::None)
         {
+            if (solve.solution.range.duration > 0)
+            {
+                range = solve.solution.range;
+            }
             assign_error(error_message, alpha_recorder::obs::timeline_solve_error_message(solve.error));
             blog(LOG_WARNING,
-                 "[alpha_recorder_gpu_texture] timeline solve failed error=%s main_packets=%llu alpha_packets=%llu alpha_packets_with_input_cts=%llu alpha_input_cts_range=%llu..%llu alpha_sys_dts_usec_range=%lld..%lld alpha_packets_with_generation=%llu alpha_generation_range=%llu..%llu alpha_renders=%llu alpha_render_cts_range=%llu..%llu phase=%s alpha_epoch_source=%s alpha_latency_frames=%llu alpha_latency_ns=%llu alpha_epoch_candidates=%llu",
+                 "[alpha_recorder_gpu_texture] timeline solve failed error=%s partial_media_time=%lld partial_duration=%lld main_packets=%llu alpha_packets=%llu alpha_packets_with_input_cts=%llu alpha_input_cts_range=%llu..%llu alpha_sys_dts_usec_range=%lld..%lld alpha_packets_with_generation=%llu alpha_generation_range=%llu..%llu alpha_renders=%llu alpha_render_cts_range=%llu..%llu phase=%s alpha_epoch_source=%s alpha_latency_frames=%llu alpha_latency_ns=%llu alpha_epoch_candidates=%llu",
                  alpha_recorder::obs::timeline_solve_error_name(solve.error),
+                 static_cast<long long>(solve.solution.range.media_time),
+                 static_cast<long long>(solve.solution.range.duration),
                  static_cast<unsigned long long>(main_packets.size()),
                  static_cast<unsigned long long>(context->alpha_packet_records.size()),
                  static_cast<unsigned long long>(alpha_packets_with_input_cts),

@@ -920,6 +920,38 @@ namespace alpha_recorder::obs
             result.error = TimelineSolveError::MissingMainPacketTiming;
             return result;
         }
+
+        std::uint64_t visible_packet_count = 0U;
+        while (visible_packet_count < main_packet_count &&
+               visible_packet_count <=
+                   static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / alpha_step))
+        {
+            const std::int64_t pts =
+                alpha_visible_pts + static_cast<std::int64_t>(visible_packet_count) * alpha_step;
+            if (alpha_pts.find(pts) == alpha_pts.end())
+            {
+                break;
+            }
+            ++visible_packet_count;
+        }
+        if (visible_packet_count > 0U)
+        {
+            const std::int64_t last_visible_alpha_pts =
+                alpha_visible_pts + static_cast<std::int64_t>(visible_packet_count - 1U) * alpha_step;
+            result.solution.range.media_time = alpha_visible_pts;
+            result.solution.range.duration = last_visible_alpha_pts + alpha_step - alpha_visible_pts;
+            result.solution.main_generation = main_generation;
+            result.solution.alpha_generation = main_generation;
+            result.solution.alpha_pts_step = alpha_step;
+            result.solution.first_visible_alpha_pts = alpha_visible_pts;
+            result.solution.main_packet_count = main_packet_count;
+            result.solution.alpha_packet_count = static_cast<std::uint64_t>(alpha_sorted.size());
+            result.solution.alpha_packets_with_generation = alpha_packets_with_generation;
+            result.solution.alpha_epoch_source = generation_resolution.source;
+            result.solution.alpha_latency_frames = generation_resolution.latency_frames;
+            result.solution.alpha_latency_ns = generation_resolution.latency_ns;
+            result.solution.alpha_epoch_candidate_count = generation_resolution.candidate_count;
+        }
         if (!pts_range_present(alpha_pts, alpha_visible_pts, alpha_step, main_packet_count))
         {
             result.error = TimelineSolveError::MissingTailCoverage;
@@ -947,10 +979,9 @@ namespace alpha_recorder::obs
             return result;
         }
 
-        const std::int64_t last_visible_alpha_pts =
-            alpha_visible_pts + static_cast<std::int64_t>(main_packet_count - 1U) * alpha_step;
         result.solution.range.media_time = alpha_visible_pts;
-        result.solution.range.duration = last_visible_alpha_pts + alpha_step - alpha_visible_pts;
+        result.solution.range.duration =
+            static_cast<std::int64_t>(main_packet_count) * alpha_step;
         result.solution.main_generation = main_generation;
         result.solution.alpha_generation = main_generation;
         result.solution.alpha_pts_step = alpha_step;

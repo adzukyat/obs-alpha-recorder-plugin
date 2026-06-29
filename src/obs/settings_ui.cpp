@@ -481,6 +481,9 @@ namespace
         config_set_bool(config, alpha_recorder::obs::settings_section().data(),
                         alpha_recorder::obs::settings_diagnostic_logging_key().data(),
                         normalized_settings.diagnostic_logging);
+        config_set_bool(config, alpha_recorder::obs::settings_section().data(),
+                        alpha_recorder::obs::settings_fail_close_on_sync_proof_failure_key().data(),
+                        normalized_settings.fail_close_on_sync_proof_failure);
 
         if (config_save(config) != CONFIG_SUCCESS)
         {
@@ -674,17 +677,24 @@ namespace
 
             mainLayout->addWidget(hevcGroupBox_);
 
-            auto *diagnosticsGroupBox = new QGroupBox("Diagnostics", this);
-            auto *diagnosticsLayout = new QHBoxLayout(diagnosticsGroupBox);
-            diagnosticsLayout->setContentsMargins(14, 10, 14, 10);
-            diagnosticsLayout->setSpacing(10);
+            auto *debugGroupBox = new QGroupBox("Debug", this);
+            auto *debugLayout = new QVBoxLayout(debugGroupBox);
+            debugLayout->setContentsMargins(14, 10, 14, 10);
+            debugLayout->setSpacing(8);
+            auto *diagnosticLogRow = new QHBoxLayout();
+            diagnosticLogRow->setContentsMargins(0, 0, 0, 0);
+            diagnosticLogRow->setSpacing(10);
             diagnosticLogCheckBox_ = new QCheckBox("Diagnostic Log", this);
             diagnosticLogCheckBox_->setChecked(settings.diagnostic_logging);
+            failCloseOnSyncProofFailureCheckBox_ = new QCheckBox("Fail close on sync proof failure", this);
+            failCloseOnSyncProofFailureCheckBox_->setChecked(settings.fail_close_on_sync_proof_failure);
             auto *showDiagnosticLogButton = new QPushButton("Show Log Folder", this);
-            diagnosticsLayout->addWidget(diagnosticLogCheckBox_);
-            diagnosticsLayout->addStretch(1);
-            diagnosticsLayout->addWidget(showDiagnosticLogButton);
-            mainLayout->addWidget(diagnosticsGroupBox);
+            diagnosticLogRow->addWidget(diagnosticLogCheckBox_);
+            diagnosticLogRow->addStretch(1);
+            diagnosticLogRow->addWidget(showDiagnosticLogButton);
+            debugLayout->addLayout(diagnosticLogRow);
+            debugLayout->addWidget(failCloseOnSyncProofFailureCheckBox_);
+            mainLayout->addWidget(debugGroupBox);
             connect(showDiagnosticLogButton, &QPushButton::clicked, this, [this]() {
                 show_diagnostic_log_file(this);
             });
@@ -770,6 +780,7 @@ namespace
             settings.hevc_encoder.nvenc_split_encode = selected_split_encode_mode();
             settings.hevc_encoder.nvenc_gpu_index = nvencGpuSpinBox_->value();
             settings.diagnostic_logging = diagnosticLogCheckBox_->isChecked();
+            settings.fail_close_on_sync_proof_failure = failCloseOnSyncProofFailureCheckBox_->isChecked();
 
             return settings;
         }
@@ -1194,6 +1205,7 @@ namespace
         QLabel *splitEncodeRowLabel_ = nullptr;
         QComboBox *splitEncodeCombo_ = nullptr;
         QCheckBox *diagnosticLogCheckBox_ = nullptr;
+        QCheckBox *failCloseOnSyncProofFailureCheckBox_ = nullptr;
         VersionCheckState versionCheckState_{};
         std::thread versionCheckThread_{};
     };
