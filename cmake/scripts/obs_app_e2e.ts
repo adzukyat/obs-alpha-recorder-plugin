@@ -41,6 +41,15 @@ type LogSink = {
   write(text: string): unknown;
 };
 
+type AlphaRecorderFailureWatch = {
+  portableConfig: string;
+  artifactRoot: string;
+  obsPid?: number;
+  checkpoint?: ObsLogCheckpoint;
+  lastWindowScanMs?: number;
+  lastWindowFailure?: string | null;
+};
+
 const severeSkippedFramePercent = 5;
 const severeRenderLagPercent = 20;
 const severeSkippedFrameCount = 30;
@@ -245,13 +254,22 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
-async function delayUnlessOverloaded(ms: number, overload: OverloadMonitor): Promise<void> {
+async function delayUnlessOverloaded(
+  ms: number,
+  overload: OverloadMonitor,
+  failureWatch?: AlphaRecorderFailureWatch,
+): Promise<void> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (overload.seen) {
       return;
     }
-    await delay(Math.min(250, deadline - Date.now()));
+    throwIfAlphaRecorderFailureDetected(failureWatch);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      break;
+    }
+    await delay(Math.min(250, remainingMs));
   }
 }
 
@@ -387,12 +405,31 @@ function scanObsLogsForOverload(portableConfig: string, overload: OverloadMonito
   }
 }
 
-function findAlphaRecorderError(portableConfig: string): string | null {
+function isAlphaRecorderFailureLine(line: string): boolean {
+  if (!line.includes("Alpha Recorder")) {
+    return false;
+  }
+  if (
+    line.includes("Alpha Recorder performance telemetry:") ||
+    line.includes("Alpha Recorder segment start:") ||
+    line.includes("Alpha Recorder GPU texture telemetry:") ||
+    line.includes("Alpha Recorder GPU texture bound temporary output")
+  ) {
+    return false;
+  }
+
+  return /Alpha Recorder.*(?:could not|failed|aborted|rejected|error|removed failed)/i.test(line);
+}
+
+function findAlphaRecorderLogError(portableConfig: string, checkpoint?: ObsLogCheckpoint): string | null {
   for (const logFile of obsLogFiles(portableConfig)) {
-    const text = readFileSync(logFile, "utf8");
+    const bytes = readFileSync(logFile);
+    const checkpointSize = checkpoint?.get(logFile) ?? 0;
+    const start = checkpointSize <= bytes.length ? checkpointSize : 0;
+    const text = bytes.subarray(start).toString("utf8");
     const line = text
       .split(/\r?\n/)
-      .find((candidate) => /Alpha Recorder (?:could not|failed|aborted|rejected)/i.test(candidate));
+      .find((candidate) => isAlphaRecorderFailureLine(candidate));
     if (line != null) {
       return `${basename(logFile)}: ${line.trim()}`;
     }
@@ -400,13 +437,94 @@ function findAlphaRecorderError(portableConfig: string): string | null {
   return null;
 }
 
-function throwIfAlphaRecorderLoggedError(portableConfig: string, artifactRoot: string): void {
-  const line = findAlphaRecorderError(portableConfig);
-  if (line == null) {
+function findAlphaRecorderDialogTitle(obsPid?: number): string | null {
+  if (platform !== "win32" || obsPid == null || obsPid <= 0) {
+    return null;
+  }
+
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$code = @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class AlphaRecorderWindowEnum {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+}
+'@
+Add-Type -TypeDefinition $code | Out-Null
+$target = [uint32]${obsPid}
+$titles = New-Object System.Collections.Generic.List[string]
+$callback = [AlphaRecorderWindowEnum+EnumWindowsProc]{
+    param([IntPtr]$hWnd, [IntPtr]$lParam)
+    [uint32]$pid = 0
+    [AlphaRecorderWindowEnum]::GetWindowThreadProcessId($hWnd, [ref]$pid) | Out-Null
+    if ($pid -eq $target -and [AlphaRecorderWindowEnum]::IsWindowVisible($hWnd)) {
+        $builder = New-Object System.Text.StringBuilder 512
+        [AlphaRecorderWindowEnum]::GetWindowText($hWnd, $builder, $builder.Capacity) | Out-Null
+        $title = $builder.ToString()
+        if ($title) { $titles.Add($title) | Out-Null }
+    }
+    return $true
+}
+[AlphaRecorderWindowEnum]::EnumWindows($callback, [IntPtr]::Zero) | Out-Null
+$titles
+`;
+  const result = spawnSync({
+    cmd: ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+    stdout: "pipe",
+    stderr: "ignore",
+    timeout: 3000,
+  });
+  if (result.exitCode !== 0) {
+    return null;
+  }
+
+  const title = new TextDecoder()
+    .decode(result.stdout)
+    .split(/\r?\n/)
+    .map((candidate) => candidate.trim())
+    .find((candidate) => /^Alpha Recorder$/i.test(candidate) || /Alpha Recorder.*(?:error|failed|could not|aborted)/i.test(candidate));
+  return title == null ? null : `OBS dialog title: ${title}`;
+}
+
+function findAlphaRecorderFailure(watch?: AlphaRecorderFailureWatch): string | null {
+  if (watch == null) {
+    return null;
+  }
+
+  const logError = findAlphaRecorderLogError(watch.portableConfig, watch.checkpoint);
+  if (logError != null) {
+    return logError;
+  }
+
+  const now = Date.now();
+  if (watch.lastWindowScanMs == null || now - watch.lastWindowScanMs >= 1000) {
+    watch.lastWindowScanMs = now;
+    watch.lastWindowFailure = findAlphaRecorderDialogTitle(watch.obsPid);
+  }
+  return watch.lastWindowFailure ?? null;
+}
+
+function throwIfAlphaRecorderFailureDetected(watch?: AlphaRecorderFailureWatch): void {
+  const failure = findAlphaRecorderFailure(watch);
+  if (failure == null) {
     return;
   }
 
-  throw new Error(`OBS logged an Alpha Recorder error during OBS app E2E: ${line}. Artifacts: ${artifactRoot}`);
+  throw new Error(`OBS reported an Alpha Recorder error during OBS app E2E: ${failure}. Artifacts: ${watch?.artifactRoot ?? "<unknown>"}`);
+}
+
+function throwIfAlphaRecorderLoggedError(
+  portableConfig: string,
+  artifactRoot: string,
+  checkpoint?: ObsLogCheckpoint,
+): void {
+  throwIfAlphaRecorderFailureDetected({ portableConfig, artifactRoot, checkpoint });
 }
 
 type AlphaRecorderTelemetryLine = {
@@ -696,15 +814,15 @@ async function drainObsProcessRelays(relays: Promise<void>[], abortController: A
 
 class ObsWebSocket {
   private socket: WebSocket;
-  private pending: Array<(value: unknown) => void> = [];
+  private pending: Array<{ resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
   private requestCounter = 0;
 
   private constructor(socket: WebSocket) {
     this.socket = socket;
     this.socket.addEventListener("message", (event) => {
-      const resolver = this.pending.shift();
-      if (resolver) {
-        resolver(JSON.parse(String(event.data)));
+      const pending = this.pending.shift();
+      if (pending) {
+        pending.resolve(JSON.parse(String(event.data)));
       }
     });
   }
@@ -729,7 +847,7 @@ class ObsWebSocket {
         });
 
         const client = new ObsWebSocket(socket);
-        const hello = await client.receive();
+        const hello = await client.receive(5000);
         if ((hello as any).op !== 0) {
           throw new Error(`Expected obs-websocket Hello, got ${JSON.stringify(hello)}`);
         }
@@ -741,7 +859,7 @@ class ObsWebSocket {
         }
 
         client.send({ op: 1, d: identify });
-        const identified = await client.receive();
+        const identified = await client.receive(5000);
         if ((identified as any).op !== 2) {
           throw new Error(`Failed to identify with obs-websocket: ${JSON.stringify(identified)}`);
         }
@@ -764,17 +882,34 @@ class ObsWebSocket {
     this.socket.send(JSON.stringify(message));
   }
 
-  receive(): Promise<unknown> {
-    return new Promise((resolveReceive) => this.pending.push(resolveReceive));
+  receive(timeoutMs = 30000): Promise<unknown> {
+    let pending!: { resolve: (value: unknown) => void; reject: (error: unknown) => void };
+    const promise = new Promise<unknown>((resolveReceive, rejectReceive) => {
+      pending = { resolve: resolveReceive, reject: rejectReceive };
+      this.pending.push(pending);
+    });
+    const timer = setTimeout(() => {
+      const index = this.pending.indexOf(pending);
+      if (index >= 0) {
+        this.pending.splice(index, 1);
+      }
+      pending.reject(new Error("obs-websocket receive timed out"));
+    }, timeoutMs);
+    return promise.finally(() => clearTimeout(timer));
   }
 
-  async request(requestType: string, requestData: Record<string, unknown> = {}): Promise<any> {
+  async request(requestType: string, requestData: Record<string, unknown> = {}, timeoutMs = 30000): Promise<any> {
     this.requestCounter += 1;
     const requestId = `alpha-recorder-e2e-${this.requestCounter}`;
     this.send({ op: 6, d: { requestType, requestId, requestData } });
 
+    const deadline = Date.now() + timeoutMs;
     while (true) {
-      const message = (await this.receive()) as any;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(`OBS request ${requestType} timed out`);
+      }
+      const message = (await this.receive(remainingMs)) as any;
       if (message.op !== 7 || message.d?.requestId !== requestId) {
         continue;
       }
@@ -786,11 +921,17 @@ class ObsWebSocket {
   }
 }
 
-async function waitForRecordState(socket: ObsWebSocket, active: boolean, timeoutSeconds = 30): Promise<void> {
+async function waitForRecordState(
+  socket: ObsWebSocket,
+  active: boolean,
+  timeoutSeconds = 30,
+  failureWatch?: AlphaRecorderFailureWatch,
+): Promise<void> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let lastStatus: unknown = undefined;
   while (Date.now() < deadline) {
-    const status = await socket.request("GetRecordStatus");
+    throwIfAlphaRecorderFailureDetected(failureWatch);
+    const status = await socket.request("GetRecordStatus", {}, 5000);
     lastStatus = status;
     if (Boolean(status.outputActive) === active) {
       return;
@@ -860,16 +1001,27 @@ async function waitForAlphaOutputSettled(
   artifactRoot: string,
   alphaPath: string,
   timeoutSeconds: number,
+  failureWatch?: AlphaRecorderFailureWatch,
 ): Promise<void> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let lastInvalidArtifacts: string[] = [];
+  let cleanMissingSince: number | null = null;
   while (Date.now() < deadline) {
+    throwIfAlphaRecorderFailureDetected(failureWatch);
     lastInvalidArtifacts = invalidAlphaArtifacts(artifactRoot);
     if (existsSync(alphaPath) && statSync(alphaPath).size > 0 && lastInvalidArtifacts.length === 0) {
       return;
     }
     if (!existsSync(alphaPath) && lastInvalidArtifacts.length === 0) {
-      return;
+      cleanMissingSince ??= Date.now();
+      if (Date.now() - cleanMissingSince >= 3000) {
+        throw new Error(
+          `Alpha Recorder did not publish an alpha output and left no temporary failure artifact: alpha=${alphaPath}; ` +
+            `Artifacts: ${artifactRoot}`,
+        );
+      }
+    } else {
+      cleanMissingSince = null;
     }
     await delay(500);
   }
@@ -1539,6 +1691,7 @@ async function verifyRecordingOutputs(
   stageBin: string,
   repoRoot: string,
   artifactRoot: string,
+  portableConfig: string,
   rgbPath: string,
   expectedFinalizationFormat: string,
   rgbEncoder: string,
@@ -1561,7 +1714,10 @@ async function verifyRecordingOutputs(
   const alphaPath = alphaPathForRgb(rgbPath, expectedFinalizationFormat);
 
   await waitForPath(rgbPath, 30);
-  await waitForPath(alphaPath, 120);
+  if (!existsSync(alphaPath) || statSync(alphaPath).size <= 0) {
+    throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot);
+    throw new Error(`Alpha Recorder did not publish an alpha output: alpha=${alphaPath}; Artifacts: ${artifactRoot}`);
+  }
   assertNoInvalidAlphaArtifacts(artifactRoot);
 
   const ffprobe = findTool(stageBin, repoRoot, "ffprobe");
@@ -1937,30 +2093,38 @@ finalization_format=${args.finalizationFormat}
       const label = attempt.kind === "sync" ? `sync ${attempt.attemptIndex}/${args.syncAttempts}` : "durability";
       console.log(`Running OBS app E2E ${label} recording for ${durationSeconds}s...`);
       const attemptLogCheckpoint = createObsLogCheckpoint(portableConfig);
+      const attemptFailureWatch: AlphaRecorderFailureWatch = {
+        portableConfig,
+        artifactRoot,
+        obsPid: obs.pid,
+        checkpoint: attemptLogCheckpoint,
+      };
       resetOverloadMonitor(overload);
       await socket.request("StartRecord");
-      await waitForRecordState(socket, true);
+      await waitForRecordState(socket, true, 30, attemptFailureWatch);
       if (args.allowOverload) {
-        await delay(durationSeconds * 1000);
+        await delayUnlessOverloaded(durationSeconds * 1000, { seen: false, firstLine: "" }, attemptFailureWatch);
       } else {
-        await delayUnlessOverloaded(durationSeconds * 1000, overload);
+        await delayUnlessOverloaded(durationSeconds * 1000, overload, attemptFailureWatch);
         await stopRecordingAfterOverload(socket, overload);
         throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps, false);
       }
+      throwIfAlphaRecorderFailureDetected(attemptFailureWatch);
       const stopResponse = await socket.request("StopRecord");
-      await waitForRecordState(socket, false, stopWaitTimeoutSeconds(durationSeconds));
+      await waitForRecordState(socket, false, stopWaitTimeoutSeconds(durationSeconds), attemptFailureWatch);
       const rgbPath = String(stopResponse?.outputPath ?? "");
       if (rgbPath) {
         await waitForAlphaOutputSettled(
           artifactRoot,
           alphaPathForRgb(rgbPath, expectedFinalizationFormat),
           stopWaitTimeoutSeconds(durationSeconds),
+          attemptFailureWatch,
         );
       }
       scanObsLogsForOverload(portableConfig, overload, attemptLogCheckpoint);
       const attemptOverloaded = overload.seen;
       throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps, args.allowOverload);
-      throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot);
+      throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot, attemptLogCheckpoint);
       recordedAttempts.push({ ...attempt, rgbPath, overloaded: attemptOverloaded });
     }
 
@@ -1973,6 +2137,7 @@ finalization_format=${args.finalizationFormat}
         stageBin,
         args.repoRoot,
         artifactRoot,
+        portableConfig,
         attempt.rgbPath,
         expectedFinalizationFormat,
         args.rgbEncoder,
