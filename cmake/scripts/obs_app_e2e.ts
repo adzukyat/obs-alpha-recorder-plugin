@@ -25,7 +25,6 @@ type Args = {
   hevcPreset: string;
   hevcNvencTune: string;
   hevcGopSize: number;
-  hevcBFrames: number;
   keepObsOpen: boolean;
   allowOverload: boolean;
 };
@@ -73,7 +72,6 @@ function parseArgs(argv: string[]): Args {
     hevcPreset: "nvenc_p3",
     hevcNvencTune: "hq",
     hevcGopSize: 0,
-    hevcBFrames: 0,
     keepObsOpen: false,
     allowOverload: false,
   };
@@ -162,10 +160,6 @@ function parseArgs(argv: string[]): Args {
         args.hevcGopSize = Number(value);
         ++index;
         break;
-      case "--hevc-b-frames":
-        args.hevcBFrames = Number(value);
-        ++index;
-        break;
       case "--keep-obs-open":
         args.keepObsOpen = true;
         break;
@@ -185,7 +179,6 @@ function parseArgs(argv: string[]): Args {
   args.durabilityRecordSeconds = Math.max(1, Math.floor(args.durabilityRecordSeconds));
   args.hevcQualityCq = Math.max(0, Math.min(51, Math.floor(args.hevcQualityCq)));
   args.hevcGopSize = Math.max(0, Math.min(1000, Math.floor(args.hevcGopSize)));
-  args.hevcBFrames = Math.max(0, Math.min(4, Math.floor(args.hevcBFrames)));
 
   return args;
 }
@@ -2031,7 +2024,6 @@ finalization_format=${args.finalizationFormat}
         hevc_preset: args.hevcPreset,
         hevc_nvenc_tune: args.hevcNvencTune,
         hevc_gop_size: args.hevcGopSize,
-        hevc_b_frames: args.hevcBFrames,
         diagnostic_logging: args.allowOverload,
       },
     });
@@ -2051,12 +2043,10 @@ finalization_format=${args.finalizationFormat}
       throw new Error(`Alpha Recorder did not accept finalization_format=${args.finalizationFormat}: ${JSON.stringify(settings)}`);
     }
     if (
-      Number(settings.responseData?.hevc_gop_size) !== args.hevcGopSize ||
-      Number(settings.responseData?.hevc_b_frames) !== args.hevcBFrames
+      Number(settings.responseData?.hevc_gop_size) !== args.hevcGopSize
     ) {
       throw new Error(
-        `Alpha Recorder did not accept HEVC timing settings: expected gop=${args.hevcGopSize} ` +
-          `b_frames=${args.hevcBFrames}; got ${JSON.stringify(settings.responseData)}`,
+        `Alpha Recorder did not accept HEVC GOP setting: expected gop=${args.hevcGopSize}; got ${JSON.stringify(settings.responseData)}`,
       );
     }
 
@@ -2174,7 +2164,6 @@ finalization_format=${args.finalizationFormat}
             preset: args.hevcPreset,
             nvencTune: args.hevcNvencTune,
             gopSize: args.hevcGopSize,
-            bFrames: args.hevcBFrames,
           },
           width: args.width,
           height: args.height,

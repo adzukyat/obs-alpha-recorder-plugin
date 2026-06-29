@@ -952,9 +952,6 @@ technique DrawRed
         context->hevc_encoder.gop_size =
             alpha_recorder::obs::clamp_hevc_gop_size(static_cast<std::uint32_t>(std::max<long long>(
                 0, obs_data_get_int(settings, "hevc_gop_size"))));
-        context->hevc_encoder.b_frames =
-            alpha_recorder::obs::clamp_hevc_b_frames(static_cast<std::uint32_t>(std::max<long long>(
-                0, obs_data_get_int(settings, "hevc_b_frames"))));
         context->hevc_encoder.adaptive_quantization =
             obs_data_get_bool(settings, "hevc_adaptive_quantization");
         context->hevc_encoder.nvenc_gpu_index =
@@ -1023,8 +1020,7 @@ technique DrawRed
         const std::uint32_t gop_frames = configured_gop_frames(context);
         const std::uint32_t keyint_sec = configured_keyint_seconds(context);
         const std::uint32_t cqp = profile_cqp(context.hevc_encoder);
-        const std::uint32_t b_frames = lossless ? 0U : alpha_recorder::obs::clamp_hevc_b_frames(
-                                                            context.hevc_encoder.b_frames);
+        const std::uint32_t b_frames = 0U;
 
         obs_data_set_int(settings, "bitrate", 40000);
         obs_data_set_int(settings, "max_bitrate", 40000);
@@ -1397,7 +1393,7 @@ technique DrawRed
         }
 
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u b_frames=%u preset=%s tune=%s split=%s gpu=%d phase=%s",
+             "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u preset=%s tune=%s split=%s gpu=%d phase=%s",
              context->path.generic_string().c_str(),
              context->encoder_id.c_str(),
              backend_name(backend_for_encoder_id(context->encoder_id)),
@@ -1407,7 +1403,6 @@ technique DrawRed
              context->fps_den,
              profile_cqp(context->hevc_encoder),
              configured_gop_frames(*context),
-             context->hevc_encoder.b_frames,
              short_nvenc_preset(context->hevc_encoder.preset),
              alpha_recorder::obs::hevc_nvenc_tune_config_value(context->hevc_encoder.nvenc_tune).data(),
              alpha_recorder::obs::hevc_nvenc_split_encode_config_value(

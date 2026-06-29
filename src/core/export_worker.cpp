@@ -255,16 +255,6 @@ namespace alpha_recorder::obs
             return static_cast<int>(requested_gop == 0U ? default_gop : requested_gop);
         }
 
-        int configured_b_frames(const AlphaMaskVideoWriterConfig &config) noexcept
-        {
-            if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
-            {
-                return 0;
-            }
-
-            return static_cast<int>(clamp_hevc_b_frames(config.hevc_encoder.b_frames));
-        }
-
         int hevc_nvenc_split_encode_value(HevcNvencSplitEncodeMode mode) noexcept
         {
             switch (mode)
@@ -333,7 +323,7 @@ namespace alpha_recorder::obs
 
             case FinalizationFormat::MaskHevcNvenc:
                 encoder.gop_size = configured_gop_size(config);
-                encoder.max_b_frames = configured_b_frames(config);
+                encoder.max_b_frames = 0;
                 encoder.pix_fmt = AV_PIX_FMT_YUV420P;
                 if (config.hevc_encoder.nvenc_gpu_index >= 0 &&
                     !set_encoder_int_option(encoder, "gpu", config.hevc_encoder.nvenc_gpu_index, false, error_message))
@@ -371,7 +361,7 @@ namespace alpha_recorder::obs
 
             case FinalizationFormat::MaskHevcAmf:
                 encoder.gop_size = configured_gop_size(config);
-                encoder.max_b_frames = configured_b_frames(config);
+                encoder.max_b_frames = 0;
                 encoder.pix_fmt = AV_PIX_FMT_YUV420P;
                 (void)av_opt_set(encoder.priv_data, "usage", "transcoding", 0);
                 if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)

@@ -469,8 +469,6 @@ namespace
                           alpha_recorder::obs::hevc_nvenc_tune_config_value(normalized_settings.hevc_encoder.nvenc_tune).data());
         config_set_int(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_gop_size_key().data(),
                        static_cast<int>(alpha_recorder::obs::clamp_hevc_gop_size(normalized_settings.hevc_encoder.gop_size)));
-        config_set_int(config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_hevc_b_frames_key().data(),
-                       static_cast<int>(alpha_recorder::obs::clamp_hevc_b_frames(normalized_settings.hevc_encoder.b_frames)));
         config_set_bool(config, alpha_recorder::obs::settings_section().data(),
                         alpha_recorder::obs::settings_hevc_adaptive_quantization_key().data(),
                         normalized_settings.hevc_encoder.adaptive_quantization);
@@ -662,11 +660,10 @@ namespace
             advancedLayout->setColumnMinimumWidth(2, 120);
             advancedLayout->setColumnMinimumWidth(3, 90);
             gopSpinBox_ = add_advanced_spinbox(advancedLayout, 0, "GOP", 0, 1000, "Auto");
-            bFramesSpinBox_ = add_advanced_spinbox(advancedLayout, 1, "B-frames", 0, 4, nullptr);
-            aqCombo_ = add_advanced_combo(advancedLayout, 2, "AQ");
-            nvencGpuSpinBox_ = add_advanced_spinbox(advancedLayout, 3, "NVENC GPU", -1,
+            aqCombo_ = add_advanced_combo(advancedLayout, 1, "AQ");
+            nvencGpuSpinBox_ = add_advanced_spinbox(advancedLayout, 2, "NVENC GPU", -1,
                                                     std::numeric_limits<int>::max(), "Any", &nvencGpuRowLabel_);
-            splitEncodeCombo_ = add_advanced_combo(advancedLayout, 4, "Split Encode", &splitEncodeRowLabel_);
+            splitEncodeCombo_ = add_advanced_combo(advancedLayout, 3, "Split Encode", &splitEncodeRowLabel_);
             splitEncodeCombo_->clear();
             splitEncodeCombo_->addItem("Auto", static_cast<int>(alpha_recorder::obs::HevcNvencSplitEncodeMode::Auto));
             splitEncodeCombo_->addItem("Disabled", static_cast<int>(alpha_recorder::obs::HevcNvencSplitEncodeMode::Disabled));
@@ -700,7 +697,6 @@ namespace
             qualitySlider_->setValue(static_cast<int>(initialCq));
             qualitySpinBox_->setValue(static_cast<int>(initialCq));
             gopSpinBox_->setValue(static_cast<int>(alpha_recorder::obs::clamp_hevc_gop_size(settings.hevc_encoder.gop_size)));
-            bFramesSpinBox_->setValue(static_cast<int>(alpha_recorder::obs::clamp_hevc_b_frames(settings.hevc_encoder.b_frames)));
             aqCombo_->setCurrentIndex(settings.hevc_encoder.adaptive_quantization ? 1 : 0);
             nvencGpuSpinBox_->setValue(alpha_recorder::obs::normalize_hevc_nvenc_gpu_index(settings.hevc_encoder.nvenc_gpu_index));
             select_split_encode_mode(settings.hevc_encoder.nvenc_split_encode);
@@ -770,7 +766,6 @@ namespace
             settings.hevc_encoder.preset = selected_hevc_preset();
             settings.hevc_encoder.nvenc_tune = selected_nvenc_tune();
             settings.hevc_encoder.gop_size = static_cast<std::uint32_t>(gopSpinBox_->value());
-            settings.hevc_encoder.b_frames = static_cast<std::uint32_t>(bFramesSpinBox_->value());
             settings.hevc_encoder.adaptive_quantization = aqCombo_->currentIndex() == 1;
             settings.hevc_encoder.nvenc_split_encode = selected_split_encode_mode();
             settings.hevc_encoder.nvenc_gpu_index = nvencGpuSpinBox_->value();
@@ -946,7 +941,6 @@ namespace
             alpha_recorder::obs::HevcEncoderPreset amf_preset;
             alpha_recorder::obs::HevcNvencTune nvenc_tune;
             std::uint32_t gop_size;
-            std::uint32_t b_frames;
             bool adaptive_quantization;
         };
 
@@ -956,20 +950,20 @@ namespace
             {
             case alpha_recorder::obs::HevcQualityProfile::Lossless:
                 return {0U, alpha_recorder::obs::HevcEncoderPreset::NvencLossless, alpha_recorder::obs::HevcEncoderPreset::AmfQuality,
-                        alpha_recorder::obs::HevcNvencTune::Lossless, 0U, 0U, false};
+                        alpha_recorder::obs::HevcNvencTune::Lossless, 0U, false};
             case alpha_recorder::obs::HevcQualityProfile::HighQuality:
                 return {19U, alpha_recorder::obs::HevcEncoderPreset::NvencP5, alpha_recorder::obs::HevcEncoderPreset::AmfQuality,
-                        alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, 2U, true};
+                        alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, true};
             case alpha_recorder::obs::HevcQualityProfile::Balanced:
                 return {23U, alpha_recorder::obs::HevcEncoderPreset::NvencP3, alpha_recorder::obs::HevcEncoderPreset::AmfBalanced,
-                        alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, 1U, true};
+                        alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, true};
             case alpha_recorder::obs::HevcQualityProfile::Fast:
                 return {28U, alpha_recorder::obs::HevcEncoderPreset::NvencP2, alpha_recorder::obs::HevcEncoderPreset::AmfSpeed,
-                        alpha_recorder::obs::HevcNvencTune::LowLatency, 0U, 0U, false};
+                        alpha_recorder::obs::HevcNvencTune::LowLatency, 0U, false};
             }
 
             return {19U, alpha_recorder::obs::HevcEncoderPreset::NvencP3, alpha_recorder::obs::HevcEncoderPreset::AmfBalanced,
-                    alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, 1U, true};
+                    alpha_recorder::obs::HevcNvencTune::HighQuality, 0U, true};
         }
 
         void apply_hevc_profile_defaults(alpha_recorder::obs::HevcQualityProfile profile)
@@ -991,7 +985,6 @@ namespace
             }
             select_nvenc_tune(defaults.nvenc_tune);
             gopSpinBox_->setValue(static_cast<int>(defaults.gop_size));
-            bFramesSpinBox_->setValue(static_cast<int>(defaults.b_frames));
             aqCombo_->setCurrentIndex(defaults.adaptive_quantization ? 1 : 0);
         }
 
@@ -1175,7 +1168,6 @@ namespace
             splitEncodeCombo_->setVisible(nvencSelected);
             splitEncodeCombo_->setEnabled(nvencSelected);
             gopSpinBox_->setEnabled(qualityEnabled);
-            bFramesSpinBox_->setEnabled(qualityEnabled);
             aqCombo_->setEnabled(qualityEnabled);
             advancedFrame_->setVisible(hevcSelected && advancedCheckBox_->isChecked());
             QTimer::singleShot(0, this, [this]() {
@@ -1196,7 +1188,6 @@ namespace
         QCheckBox *advancedCheckBox_ = nullptr;
         QFrame *advancedFrame_ = nullptr;
         QSpinBox *gopSpinBox_ = nullptr;
-        QSpinBox *bFramesSpinBox_ = nullptr;
         QComboBox *aqCombo_ = nullptr;
         QLabel *nvencGpuRowLabel_ = nullptr;
         QSpinBox *nvencGpuSpinBox_ = nullptr;

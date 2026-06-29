@@ -67,12 +67,6 @@ namespace alpha_recorder::obs
                 settings.gop_size = clamp_hevc_gop_size(static_cast<std::uint32_t>(stored_gop < 0 ? 0 : stored_gop));
             }
 
-            if (config_has_user_value(config, settings_section().data(), settings_hevc_b_frames_key().data()))
-            {
-                const std::int64_t stored_b_frames = config_get_int(config, settings_section().data(), settings_hevc_b_frames_key().data());
-                settings.b_frames = clamp_hevc_b_frames(static_cast<std::uint32_t>(stored_b_frames < 0 ? 0 : stored_b_frames));
-            }
-
             if (config_has_user_value(config, settings_section().data(), settings_hevc_adaptive_quantization_key().data()))
             {
                 settings.adaptive_quantization =

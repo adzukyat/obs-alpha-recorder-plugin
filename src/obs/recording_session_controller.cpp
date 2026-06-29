@@ -332,8 +332,6 @@ namespace
                                 .data());
         obs_data_set_int(data, alpha_recorder::obs::settings_hevc_gop_size_key().data(),
                          settings.hevc_encoder.gop_size);
-        obs_data_set_int(data, alpha_recorder::obs::settings_hevc_b_frames_key().data(),
-                         settings.hevc_encoder.b_frames);
         obs_data_set_bool(data, alpha_recorder::obs::settings_hevc_adaptive_quantization_key().data(),
                           settings.hevc_encoder.adaptive_quantization);
         obs_data_set_string(data, alpha_recorder::obs::settings_hevc_nvenc_split_encode_key().data(),
@@ -1112,7 +1110,7 @@ namespace
                                                                         config.fps_den);
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} alignment_queue={alpha_limit_frames=%zu output_limit_frames=%zu encoded_reorder_frames=%zu plausible_delta_ns=%llu} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u b_frames=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
+                "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} alignment_queue={alpha_limit_frames=%zu output_limit_frames=%zu encoded_reorder_frames=%zu plausible_delta_ns=%llu} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
                 mask_path.generic_string().c_str(),
                 std::string{alpha_recorder::obs::finalization_format_config_value(config.finalization_format)}.c_str(),
                 config.width, config.height, config.fps_num, config.fps_den,
@@ -1124,7 +1122,7 @@ namespace
                 config.hevc_encoder.quality_cq,
                 std::string{alpha_recorder::obs::hevc_encoder_preset_config_value(config.hevc_encoder.preset)}.c_str(),
                 std::string{alpha_recorder::obs::hevc_nvenc_tune_config_value(config.hevc_encoder.nvenc_tune)}.c_str(),
-                config.hevc_encoder.gop_size, config.hevc_encoder.b_frames,
+                config.hevc_encoder.gop_size,
                 bool_text(config.hevc_encoder.adaptive_quantization),
                 std::string{alpha_recorder::obs::hevc_nvenc_split_encode_config_value(config.hevc_encoder.nvenc_split_encode)}.c_str(),
                 static_cast<int>(config.hevc_encoder.nvenc_gpu_index));

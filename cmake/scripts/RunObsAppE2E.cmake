@@ -22,7 +22,6 @@ set(HEVC_QUALITY_CQ 19 CACHE STRING "Alpha Recorder HEVC CQ value")
 set(HEVC_PRESET "nvenc_p3" CACHE STRING "Alpha Recorder HEVC preset")
 set(HEVC_NVENC_TUNE "hq" CACHE STRING "Alpha Recorder NVENC tune")
 set(HEVC_GOP_SIZE 0 CACHE STRING "Alpha Recorder HEVC GOP size in frames, or 0 for auto")
-set(HEVC_B_FRAMES 0 CACHE STRING "Alpha Recorder HEVC B-frame count")
 set(SKIP_BUILD OFF CACHE BOOL "Skip plugin build before OBS app E2E")
 set(SKIP_STAGE OFF CACHE BOOL "Skip staging before OBS app E2E")
 set(KEEP_OBS_OPEN OFF CACHE BOOL "Keep OBS open after the E2E run")
@@ -106,7 +105,6 @@ set(args
     "--hevc-preset" "${HEVC_PRESET}"
     "--hevc-nvenc-tune" "${HEVC_NVENC_TUNE}"
     "--hevc-gop-size" "${HEVC_GOP_SIZE}"
-    "--hevc-b-frames" "${HEVC_B_FRAMES}"
 )
 if(KEEP_OBS_OPEN)
     list(APPEND args "--keep-obs-open")

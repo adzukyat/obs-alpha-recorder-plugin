@@ -67,7 +67,6 @@ namespace alpha_recorder::obs
         HevcEncoderPreset preset = HevcEncoderPreset::NvencP3;
         HevcNvencTune nvenc_tune = HevcNvencTune::HighQuality;
         std::uint32_t gop_size = 0;
-        std::uint32_t b_frames = 0;
         bool adaptive_quantization = false;
         HevcNvencSplitEncodeMode nvenc_split_encode = HevcNvencSplitEncodeMode::Auto;
         std::int32_t nvenc_gpu_index = -1;
@@ -126,11 +125,6 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline constexpr std::string_view settings_hevc_gop_size_key() noexcept
     {
         return "hevc_gop_size";
-    }
-
-    [[nodiscard]] inline constexpr std::string_view settings_hevc_b_frames_key() noexcept
-    {
-        return "hevc_b_frames";
     }
 
     [[nodiscard]] inline constexpr std::string_view settings_hevc_adaptive_quantization_key() noexcept
@@ -523,11 +517,6 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_gop_size(std::uint32_t gop_size) noexcept
     {
         return gop_size > 1000U ? 1000U : gop_size;
-    }
-
-    [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_b_frames(std::uint32_t b_frames) noexcept
-    {
-        return b_frames > 4U ? 4U : b_frames;
     }
 
     [[nodiscard]] inline constexpr bool try_normalize_hevc_nvenc_gpu_index(std::int64_t gpu_index,
