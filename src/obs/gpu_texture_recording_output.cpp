@@ -747,17 +747,6 @@ technique DrawRed
         record.sys_dts_usec = packet.sys_dts_usec;
     }
 
-    void erase_packet_record_by_pts(std::vector<alpha_recorder::obs::GpuTexturePacketRecord> &records,
-                                    std::int64_t pts) noexcept
-    {
-        const auto old_end = records.end();
-        records.erase(std::remove_if(records.begin(), records.end(),
-                                     [pts](const alpha_recorder::obs::GpuTexturePacketRecord &record) {
-                                         return record.pts == pts;
-                                     }),
-                      old_end);
-    }
-
     void *program_alpha_create(obs_data_t *settings, obs_source_t *)
     {
         auto *source = new ProgramAlphaSource{};
@@ -966,9 +955,6 @@ technique DrawRed
         context->hevc_encoder.b_frames =
             alpha_recorder::obs::clamp_hevc_b_frames(static_cast<std::uint32_t>(std::max<long long>(
                 0, obs_data_get_int(settings, "hevc_b_frames"))));
-        context->hevc_encoder.lookahead =
-            alpha_recorder::obs::clamp_hevc_lookahead(static_cast<std::uint32_t>(std::max<long long>(
-                0, obs_data_get_int(settings, "hevc_lookahead"))));
         context->hevc_encoder.adaptive_quantization =
             obs_data_get_bool(settings, "hevc_adaptive_quantization");
         context->hevc_encoder.nvenc_gpu_index =
@@ -1057,7 +1043,7 @@ technique DrawRed
                                     context.hevc_encoder.nvenc_tune)
                                     .data());
             obs_data_set_string(settings, "multipass", "disabled");
-            obs_data_set_bool(settings, "lookahead", context.hevc_encoder.lookahead > 0U);
+            obs_data_set_bool(settings, "lookahead", false);
             obs_data_set_bool(settings, "adaptive_quantization", context.hevc_encoder.adaptive_quantization);
             obs_data_set_bool(settings, "repeat_headers", true);
             obs_data_set_int(settings, "split_encode", split_encode_value(context.hevc_encoder.nvenc_split_encode));
@@ -1075,7 +1061,7 @@ technique DrawRed
             obs_data_set_int(settings, "bf", static_cast<long long>(b_frames));
             obs_data_set_string(settings, "preset", amf_preset_value(context.hevc_encoder.preset));
             obs_data_set_string(settings, "profile", "main");
-            obs_data_set_bool(settings, "pre_analysis", context.hevc_encoder.lookahead > 0U);
+            obs_data_set_bool(settings, "pre_analysis", false);
             obs_data_set_bool(settings, "repeat_headers", true);
             break;
 
@@ -1221,26 +1207,9 @@ technique DrawRed
         }
 
         std::lock_guard<std::mutex> lock(context->mutex);
-        if (context->stop_state == GpuTextureOutputStopState::StopRequested &&
-            context->has_stop_ts &&
-            packet->sys_dts_usec >= static_cast<std::int64_t>(context->stop_ts_ns / 1000U))
-        {
-            erase_packet_record_by_pts(context->alpha_packet_records, packet->pts);
-            context->stop_state = GpuTextureOutputStopState::StopBoundaryReached;
-            context->packets_at_stop_boundary =
-                static_cast<std::uint64_t>(context->alpha_packet_records.size());
-            context->state_cv.notify_all();
-            blog(LOG_INFO,
-                 "[alpha_recorder_gpu_texture] stop boundary reached stop_ts_usec=%lld boundary_sys_dts_usec=%lld boundary_pts=%lld packets_before_boundary=%llu",
-                 static_cast<long long>(context->stop_ts_ns / 1000U),
-                 static_cast<long long>(packet->sys_dts_usec),
-                 static_cast<long long>(packet->pts),
-                 static_cast<unsigned long long>(context->packets_at_stop_boundary));
-            return;
-        }
-
         if (context->stop_state != GpuTextureOutputStopState::Running &&
-            context->stop_state != GpuTextureOutputStopState::StopRequested)
+            context->stop_state != GpuTextureOutputStopState::StopRequested &&
+            context->stop_state != GpuTextureOutputStopState::EndDataCaptureRequested)
         {
             return;
         }
@@ -1467,7 +1436,7 @@ technique DrawRed
             previous_state = context->stop_state;
             if (context->stop_state == GpuTextureOutputStopState::Running)
             {
-                context->stop_state = GpuTextureOutputStopState::StopBoundaryReached;
+                context->stop_state = GpuTextureOutputStopState::StopRequested;
                 context->packets_at_stop_request =
                     static_cast<std::uint64_t>(context->alpha_packet_records.size());
                 context->packets_at_stop_boundary = context->packets_at_stop_request;
@@ -1506,7 +1475,8 @@ technique DrawRed
 
         std::lock_guard<std::mutex> lock(context->mutex);
         if (context->stop_state != GpuTextureOutputStopState::Running &&
-            context->stop_state != GpuTextureOutputStopState::StopRequested)
+            context->stop_state != GpuTextureOutputStopState::StopRequested &&
+            context->stop_state != GpuTextureOutputStopState::EndDataCaptureRequested)
         {
             return;
         }
@@ -1526,6 +1496,7 @@ technique DrawRed
             obs_output_set_last_error(context->output, error_message.c_str());
             blog(LOG_ERROR, "[alpha_recorder_gpu_texture] %s", error_message.c_str());
         }
+        context->state_cv.notify_all();
     }
 
     std::uint64_t gpu_texture_recording_total_bytes(void *data)
@@ -1702,7 +1673,8 @@ namespace alpha_recorder::obs
                 lock,
                 std::chrono::milliseconds{timeout_ms},
                 [&context]() {
-                    return context->stop_state == GpuTextureOutputStopState::StopBoundaryReached ||
+                    return context->stop_state == GpuTextureOutputStopState::StopRequested ||
+                           context->stop_state == GpuTextureOutputStopState::StopBoundaryReached ||
                            context->stop_state == GpuTextureOutputStopState::MuxFinalized ||
                            context->stop_state == GpuTextureOutputStopState::EndDataCaptureRequested ||
                            context->stop_state == GpuTextureOutputStopState::OutputDeactivated ||
@@ -1917,10 +1889,13 @@ namespace alpha_recorder::obs
         {
             return context->sink.stats().finalized;
         }
-        if (context->stop_state != GpuTextureOutputStopState::StopBoundaryReached)
+        if (context->stop_state != GpuTextureOutputStopState::StopRequested &&
+            context->stop_state != GpuTextureOutputStopState::StopBoundaryReached &&
+            context->stop_state != GpuTextureOutputStopState::EndDataCaptureRequested &&
+            context->stop_state != GpuTextureOutputStopState::OutputDeactivated)
         {
             assign_error(error_message,
-                         std::string{"Alpha Recorder GPU texture output cannot finalize before the stop boundary; state="} +
+                         std::string{"Alpha Recorder GPU texture output cannot finalize before drain starts; state="} +
                              stop_state_name(context->stop_state));
             return false;
         }

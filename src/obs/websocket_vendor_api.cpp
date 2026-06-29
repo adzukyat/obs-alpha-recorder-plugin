@@ -59,7 +59,6 @@ namespace alpha_recorder::obs
                                 hevc_nvenc_tune_config_value(settings.hevc_encoder.nvenc_tune).data());
             obs_data_set_int(response, settings_hevc_gop_size_key().data(), settings.hevc_encoder.gop_size);
             obs_data_set_int(response, settings_hevc_b_frames_key().data(), settings.hevc_encoder.b_frames);
-            obs_data_set_int(response, settings_hevc_lookahead_key().data(), settings.hevc_encoder.lookahead);
             obs_data_set_bool(response, settings_hevc_adaptive_quantization_key().data(),
                               settings.hevc_encoder.adaptive_quantization);
             obs_data_set_string(response, settings_hevc_nvenc_split_encode_key().data(),
@@ -191,13 +190,6 @@ namespace alpha_recorder::obs
                     clamp_hevc_b_frames(static_cast<std::uint32_t>(requested_b_frames < 0 ? 0 : requested_b_frames));
             }
 
-            if (request != nullptr && obs_data_has_user_value(request, settings_hevc_lookahead_key().data()))
-            {
-                const long long requested_lookahead = obs_data_get_int(request, settings_hevc_lookahead_key().data());
-                settings.hevc_encoder.lookahead =
-                    clamp_hevc_lookahead(static_cast<std::uint32_t>(requested_lookahead < 0 ? 0 : requested_lookahead));
-            }
-
             if (request != nullptr && obs_data_has_user_value(request, settings_hevc_adaptive_quantization_key().data()))
             {
                 settings.hevc_encoder.adaptive_quantization =
@@ -247,7 +239,6 @@ namespace alpha_recorder::obs
                               hevc_nvenc_tune_config_value(settings.hevc_encoder.nvenc_tune).data());
             config_set_int(config, settings_section().data(), settings_hevc_gop_size_key().data(), settings.hevc_encoder.gop_size);
             config_set_int(config, settings_section().data(), settings_hevc_b_frames_key().data(), settings.hevc_encoder.b_frames);
-            config_set_int(config, settings_section().data(), settings_hevc_lookahead_key().data(), settings.hevc_encoder.lookahead);
             config_set_bool(config, settings_section().data(), settings_hevc_adaptive_quantization_key().data(),
                             settings.hevc_encoder.adaptive_quantization);
             config_set_string(config, settings_section().data(), settings_hevc_nvenc_split_encode_key().data(),

@@ -127,7 +127,9 @@ namespace alpha_recorder::obs
         }
 
         impl_->mp4_muxer =
-            mp4_mux_create(output, &impl_->mp4_serializer, MP4_VIDEO_ONLY_TRACKS, FLAVOR_MP4);
+            mp4_mux_create(output, &impl_->mp4_serializer,
+                           static_cast<mp4_mux_flags>(MP4_VIDEO_ONLY_TRACKS | MP4_USE_NEGATIVE_CTS),
+                           FLAVOR_MP4);
         if (impl_->mp4_muxer == nullptr)
         {
             assign_error(error_message, "could not create the Direct MP4 muxer");

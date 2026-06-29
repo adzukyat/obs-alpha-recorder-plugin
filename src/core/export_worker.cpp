@@ -362,10 +362,6 @@ namespace alpha_recorder::obs
                 (void)av_opt_set_int(encoder.priv_data, "cq", profile_default_cq(config.hevc_encoder.quality_profile,
                                                                                   config.hevc_encoder.quality_cq),
                                      0);
-                if (const std::uint32_t lookahead = clamp_hevc_lookahead(config.hevc_encoder.lookahead); lookahead > 0U)
-                {
-                    (void)av_opt_set_int(encoder.priv_data, "rc-lookahead", lookahead, 0);
-                }
                 if (config.hevc_encoder.adaptive_quantization)
                 {
                     (void)av_opt_set_int(encoder.priv_data, "spatial-aq", 1, 0);
@@ -394,11 +390,6 @@ namespace alpha_recorder::obs
                 (void)av_opt_set_int(encoder.priv_data, "qp_p", profile_default_cq(config.hevc_encoder.quality_profile,
                                                                                    config.hevc_encoder.quality_cq),
                                      0);
-                if (const std::uint32_t lookahead = clamp_hevc_lookahead(config.hevc_encoder.lookahead); lookahead > 0U)
-                {
-                    (void)av_opt_set(encoder.priv_data, "preanalysis", "true", 0);
-                    (void)av_opt_set_int(encoder.priv_data, "pa_lookahead_buffer_depth", lookahead, 0);
-                }
                 if (config.hevc_encoder.adaptive_quantization)
                 {
                     (void)av_opt_set(encoder.priv_data, "vbaq", "true", 0);

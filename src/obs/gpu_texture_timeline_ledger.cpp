@@ -60,6 +60,35 @@ namespace alpha_recorder::obs
             return step;
         }
 
+        [[nodiscard]] std::int64_t sys_dts_presentation_bias(
+            const std::vector<GpuTexturePacketRecord> &packets,
+            std::int64_t pts_step,
+            std::uint64_t latency_frames) noexcept
+        {
+            if (pts_step <= 0)
+            {
+                return 0;
+            }
+
+            for (const GpuTexturePacketRecord &packet : packets)
+            {
+                if (packet.pts > packet.dts)
+                {
+                    return latency_frames >= 16U ? -pts_step : pts_step;
+                }
+            }
+            return 0;
+        }
+
+        [[nodiscard]] bool has_reordered_packets(
+            const std::vector<GpuTexturePacketRecord> &packets) noexcept
+        {
+            return std::any_of(packets.begin(), packets.end(),
+                               [](const GpuTexturePacketRecord &packet) {
+                                   return packet.pts != packet.dts;
+                               });
+        }
+
         [[nodiscard]] std::uint64_t timestamp_delta_ns(std::uint64_t lhs,
                                                        std::uint64_t rhs) noexcept
         {
@@ -250,55 +279,138 @@ namespace alpha_recorder::obs
             return match;
         }
 
-        void fill_trailing_alpha_generations_from_render_ledger(
+        [[nodiscard]] bool assign_packet_generation_from_render(
             const std::vector<ProgramRenderRecord> &renders,
-            std::vector<GpuTexturePacketRecord> &packets) noexcept
+            GpuTexturePacketRecord &packet,
+            std::uint64_t generation) noexcept
         {
-            if (packets.empty())
+            bool ambiguous = false;
+            const ProgramRenderRecord *render =
+                find_render_by_emitted_generation(renders, generation, ambiguous);
+            if (ambiguous)
+            {
+                packet.ambiguous_generation = true;
+                return false;
+            }
+            if (render == nullptr)
+            {
+                return false;
+            }
+
+            packet.input_generation = render->generation;
+            packet.emitted_generation = render->emitted_generation;
+            packet.has_generation = true;
+            packet.ambiguous_generation = false;
+            return true;
+        }
+
+        void fill_alpha_generations_from_render_ledger(
+            const std::vector<ProgramRenderRecord> &renders,
+            std::vector<GpuTexturePacketRecord> &packets,
+            std::int64_t pts_step) noexcept
+        {
+            if (packets.empty() || pts_step <= 0)
             {
                 return;
             }
 
-            std::size_t last_proven_index = packets.size();
+            std::size_t first_proven_index = packets.size();
             for (std::size_t index = 0U; index < packets.size(); ++index)
             {
                 if (packets[index].has_generation)
                 {
-                    last_proven_index = index;
+                    first_proven_index = index;
+                    break;
                 }
             }
-            if (last_proven_index == packets.size() || last_proven_index + 1U >= packets.size())
+            if (first_proven_index == packets.size())
             {
                 return;
             }
 
-            std::uint64_t next_generation = packets[last_proven_index].emitted_generation + 1U;
-            for (std::size_t index = last_proven_index + 1U; index < packets.size(); ++index)
+            for (std::size_t index = first_proven_index; index > 0U; --index)
+            {
+                GpuTexturePacketRecord &anchor = packets[index];
+                GpuTexturePacketRecord &target = packets[index - 1U];
+                if (!anchor.has_generation || target.has_generation)
+                {
+                    continue;
+                }
+                if (anchor.pts - target.pts != pts_step || anchor.emitted_generation == 0U)
+                {
+                    return;
+                }
+                if (!assign_packet_generation_from_render(renders, target,
+                                                          anchor.emitted_generation - 1U))
+                {
+                    return;
+                }
+            }
+
+            std::size_t previous_proven_index = packets.size();
+            for (std::size_t index = 0U; index < packets.size(); ++index)
             {
                 if (packets[index].has_generation)
                 {
-                    next_generation = packets[index].emitted_generation + 1U;
+                    if (previous_proven_index != packets.size() &&
+                        index > previous_proven_index + 1U)
+                    {
+                        const GpuTexturePacketRecord &previous = packets[previous_proven_index];
+                        const GpuTexturePacketRecord &next = packets[index];
+                        const std::int64_t pts_distance = next.pts - previous.pts;
+                        if (pts_distance <= 0 || pts_distance % pts_step != 0)
+                        {
+                            previous_proven_index = index;
+                            continue;
+                        }
+
+                        const std::uint64_t slot_distance =
+                            static_cast<std::uint64_t>(pts_distance / pts_step);
+                        const std::uint64_t generation_distance =
+                            next.emitted_generation >= previous.emitted_generation
+                                ? next.emitted_generation - previous.emitted_generation
+                                : 0U;
+                        if (slot_distance == generation_distance)
+                        {
+                            for (std::size_t fill = previous_proven_index + 1U; fill < index; ++fill)
+                            {
+                                const std::int64_t fill_pts_distance =
+                                    packets[fill].pts - previous.pts;
+                                if (fill_pts_distance <= 0 || fill_pts_distance % pts_step != 0)
+                                {
+                                    break;
+                                }
+                                const std::uint64_t fill_generation =
+                                    previous.emitted_generation +
+                                    static_cast<std::uint64_t>(fill_pts_distance / pts_step);
+                                if (!assign_packet_generation_from_render(renders, packets[fill],
+                                                                          fill_generation))
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    previous_proven_index = index;
                     continue;
                 }
 
-                bool ambiguous = false;
-                const ProgramRenderRecord *render =
-                    find_render_by_emitted_generation(renders, next_generation, ambiguous);
-                if (ambiguous)
+                if (previous_proven_index == packets.size())
                 {
-                    packets[index].ambiguous_generation = true;
+                    continue;
+                }
+                const GpuTexturePacketRecord &previous = packets[previous_proven_index];
+                const std::int64_t pts_distance = packets[index].pts - previous.pts;
+                if (pts_distance <= 0 || pts_distance % pts_step != 0)
+                {
+                    continue;
+                }
+                const std::uint64_t generation =
+                    previous.emitted_generation + static_cast<std::uint64_t>(pts_distance / pts_step);
+                if (!assign_packet_generation_from_render(renders, packets[index], generation))
+                {
                     return;
                 }
-                if (render == nullptr)
-                {
-                    return;
-                }
-
-                packets[index].input_generation = render->generation;
-                packets[index].emitted_generation = render->emitted_generation;
-                packets[index].has_generation = true;
-                packets[index].ambiguous_generation = false;
-                ++next_generation;
             }
         }
 
@@ -317,6 +429,7 @@ namespace alpha_recorder::obs
             std::int64_t alpha_step,
             std::uint64_t latency_frames,
             std::uint64_t interval_ns,
+            std::int64_t presentation_bias,
             bool &valid) noexcept
         {
             valid = true;
@@ -345,7 +458,7 @@ namespace alpha_recorder::obs
                 }
 
                 bool ambiguous_target = false;
-                const std::int64_t target_pts = packet.pts - pts_delay;
+                const std::int64_t target_pts = packet.pts - pts_delay + presentation_bias;
                 const GpuTexturePacketRecord *target =
                     find_packet_by_pts(alpha_packets, target_pts, ambiguous_target);
                 if (ambiguous_target)
@@ -477,9 +590,11 @@ namespace alpha_recorder::obs
             for (std::uint64_t candidate = search_first; candidate <= search_last; ++candidate)
             {
                 bool valid_candidate = false;
+                const std::int64_t presentation_bias =
+                    sys_dts_presentation_bias(alpha_packets, alpha_step, candidate);
                 const std::uint64_t assignment_count =
                     count_sys_dts_latency_assignments(input, alpha_packets, alpha_step, candidate,
-                                                      interval_ns, valid_candidate);
+                                                      interval_ns, presentation_bias, valid_candidate);
                 if (!valid_candidate || assignment_count == 0U)
                 {
                     continue;
@@ -504,6 +619,8 @@ namespace alpha_recorder::obs
             }
 
             const std::int64_t pts_delay = static_cast<std::int64_t>(latency_frames) * alpha_step;
+            const std::int64_t presentation_bias =
+                sys_dts_presentation_bias(alpha_packets, alpha_step, latency_frames);
             const std::uint64_t rounded_latency_ns = latency_frames * interval_ns;
             std::uint64_t assignment_count = 0U;
             result.latency_frames = latency_frames;
@@ -524,7 +641,7 @@ namespace alpha_recorder::obs
                     return result;
                 }
 
-                const std::int64_t target_pts = packet.pts - pts_delay;
+                const std::int64_t target_pts = packet.pts - pts_delay + presentation_bias;
                 bool ambiguous_target = false;
                 GpuTexturePacketRecord *target =
                     find_packet_by_pts(alpha_packets, target_pts, ambiguous_target);
@@ -577,7 +694,7 @@ namespace alpha_recorder::obs
                 return result;
             }
 
-            fill_trailing_alpha_generations_from_render_ledger(input.alpha_renders, alpha_packets);
+            fill_alpha_generations_from_render_ledger(input.alpha_renders, alpha_packets, alpha_step);
             result.source = AlphaEpochSource::SysDts;
             return result;
         }
@@ -717,6 +834,18 @@ namespace alpha_recorder::obs
             result.solution.alpha_latency_ns = generation_resolution.latency_ns;
             result.solution.alpha_epoch_candidate_count = generation_resolution.candidate_count;
             result.error = generation_resolution.error;
+            return result;
+        }
+        if (generation_resolution.source == AlphaEpochSource::SysDts &&
+            has_reordered_packets(alpha_sorted) &&
+            (input.main_phase == MainContentPhase::LiveProgramGeneration ||
+             generation_resolution.latency_frames >= 16U))
+        {
+            result.solution.alpha_epoch_source = generation_resolution.source;
+            result.solution.alpha_latency_frames = generation_resolution.latency_frames;
+            result.solution.alpha_latency_ns = generation_resolution.latency_ns;
+            result.solution.alpha_epoch_candidate_count = generation_resolution.candidate_count;
+            result.error = TimelineSolveError::UnsupportedObsTimingModel;
             return result;
         }
 

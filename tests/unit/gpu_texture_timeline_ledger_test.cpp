@@ -1,6 +1,7 @@
 #include "gpu_texture_timeline_ledger.hpp"
 
 #include <iostream>
+#include <limits>
 
 namespace
 {
@@ -55,10 +56,14 @@ namespace
 
     alpha_recorder::obs::GpuTexturePacketRecord alpha_sys_dts_packet(std::int64_t pts,
                                                                      std::int64_t sys_dts_usec,
-                                                                     std::int64_t dts = 0,
+                                                                     std::int64_t dts = std::numeric_limits<std::int64_t>::min(),
                                                                      std::int32_t timebase_num = 1,
                                                                      std::int32_t timebase_den = 1)
     {
+        if (dts == std::numeric_limits<std::int64_t>::min())
+        {
+            dts = pts;
+        }
         return alpha_recorder::obs::GpuTexturePacketRecord{pts,
                                                            dts,
                                                            timebase_num,
@@ -215,6 +220,46 @@ int main()
         input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
         input.fps_num = 1;
         input.fps_den = 1;
+        input.main_packets = {
+            main_packet(0, 4000, 0, 1, 1),
+            main_packet(1, 5000, 1, 1, 1),
+            main_packet(2, 6000, 2, 1, 1),
+        };
+        input.alpha_packets = {
+            alpha_packet(0, 1000, 0, -2, 1, 1),
+            alpha_packet(1, 2000, 1, -1, 1, 1),
+            alpha_packet(2, 3000, 2, 0, 1, 1),
+            alpha_packet(3, 4000, 3, 1, 1, 1),
+            alpha_packet(4, 5000, 4, 2, 1, 1),
+            alpha_packet(5, 6000, 5, 3, 1, 1),
+        };
+        input.alpha_renders = {
+            render(0, 1000, 0),
+            render(1, 2000, 1),
+            render(2, 3000, 2),
+            render(3, 4000, 3),
+            render(4, 5000, 4),
+            render(5, 6000, 5),
+        };
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (result.error != alpha_recorder::obs::TimelineSolveError::None ||
+            result.solution.first_visible_alpha_pts != 3 ||
+            result.solution.range.media_time != 3 ||
+            result.solution.range.duration != 3)
+        {
+            std::cerr << "B-frame edit media_time compensation failed\n";
+            return 16;
+        }
+    }
+
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.fps_num = 1;
+        input.fps_den = 1;
         input.main_packets = {main_packet(0, 1000000000, 0, 1, 1),
                               main_packet(1, 2000000000, 1, 1, 1),
                               main_packet(2, 3000000000, 2, 1, 1)};
@@ -246,7 +291,11 @@ int main()
         if (result.solution.range.media_time != 0 || result.solution.alpha_latency_frames != 2 ||
             result.solution.alpha_epoch_source != alpha_recorder::obs::AlphaEpochSource::SysDts)
         {
-            std::cerr << "sys_dts epoch solve used the wrong dynamic latency\n";
+            std::cerr << "sys_dts epoch solve used the wrong dynamic latency: media_time="
+                      << result.solution.range.media_time << " latency="
+                      << result.solution.alpha_latency_frames << " source="
+                      << alpha_recorder::obs::alpha_epoch_source_name(result.solution.alpha_epoch_source)
+                      << '\n';
             return 13;
         }
     }

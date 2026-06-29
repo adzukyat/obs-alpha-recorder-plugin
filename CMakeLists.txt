@@ -781,8 +781,8 @@ if(_alpha_recorder_build_full_targets)
     set(_alpha_recorder_obs_app_e2e_skipped_targets)
 
     function(alpha_recorder_add_obs_app_e2e_target target_name stage_suffix)
-        set(options)
-        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS MAX_RECORD_SECONDS SYNC_RECORD_SECONDS SYNC_ATTEMPTS DURABILITY_RECORD_SECONDS)
+        set(options ALLOW_OVERLOAD EXPERIMENTAL)
+        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS MAX_RECORD_SECONDS SYNC_RECORD_SECONDS SYNC_ATTEMPTS DURABILITY_RECORD_SECONDS HEVC_GOP_SIZE HEVC_B_FRAMES)
         set(multi_value_args)
         cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
@@ -816,6 +816,17 @@ if(_alpha_recorder_build_full_targets)
         if(NOT ARG_DURABILITY_RECORD_SECONDS)
             set(ARG_DURABILITY_RECORD_SECONDS "30")
         endif()
+        if(NOT ARG_HEVC_GOP_SIZE)
+            set(ARG_HEVC_GOP_SIZE "0")
+        endif()
+        if(NOT ARG_HEVC_B_FRAMES)
+            set(ARG_HEVC_B_FRAMES "0")
+        endif()
+        if(ARG_ALLOW_OVERLOAD)
+            set(ARG_ALLOW_OVERLOAD_VALUE "ON")
+        else()
+            set(ARG_ALLOW_OVERLOAD_VALUE "OFF")
+        endif()
 
         add_custom_target(${target_name}
             COMMAND ${CMAKE_COMMAND}
@@ -832,10 +843,15 @@ if(_alpha_recorder_build_full_targets)
                 "-DSYNC_RECORD_SECONDS=${ARG_SYNC_RECORD_SECONDS}"
                 "-DSYNC_ATTEMPTS=${ARG_SYNC_ATTEMPTS}"
                 "-DDURABILITY_RECORD_SECONDS=${ARG_DURABILITY_RECORD_SECONDS}"
+                "-DHEVC_GOP_SIZE=${ARG_HEVC_GOP_SIZE}"
+                "-DHEVC_B_FRAMES=${ARG_HEVC_B_FRAMES}"
+                "-DALLOW_OVERLOAD=${ARG_ALLOW_OVERLOAD_VALUE}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
             VERBATIM
         )
-        set(_alpha_recorder_obs_app_e2e_registered_targets ${_alpha_recorder_obs_app_e2e_registered_targets} ${target_name} PARENT_SCOPE)
+        if(NOT ARG_EXPERIMENTAL)
+            set(_alpha_recorder_obs_app_e2e_registered_targets ${_alpha_recorder_obs_app_e2e_registered_targets} ${target_name} PARENT_SCOPE)
+        endif()
     endfunction()
 
     function(alpha_recorder_skip_obs_app_e2e_target target_name reason)
@@ -856,8 +872,15 @@ if(_alpha_recorder_build_full_targets)
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER software
         )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc_b2_gop120 fhd60-rgb-sw-alpha-hevc-nvenc-b2-gop120
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            HEVC_GOP_SIZE 120
+            HEVC_B_FRAMES 2
+        )
     else()
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_nvenc_b2_gop120 "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
     endif()
     if(_alpha_recorder_obs_app_e2e_has_amf)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_hevc_amf fhd60-rgb-sw-alpha-hevc-amf
@@ -884,9 +907,17 @@ if(_alpha_recorder_build_full_targets)
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER nvenc_hevc
         )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_b2_gop120 fhd60-rgb-nvenc-hevc-alpha-hevc-nvenc-b2-gop120
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            HEVC_GOP_SIZE 120
+            HEVC_B_FRAMES 2
+            EXPERIMENTAL
+        )
     else()
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_b2_gop120 "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
     endif()
     if(_alpha_recorder_obs_app_e2e_has_amf)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov fhd60-rgb-amf-hevc-alpha-png-mov
@@ -946,6 +977,24 @@ if(_alpha_recorder_build_full_targets)
 
     alpha_recorder_add_obs_app_e2e_hardware_load_matrix(wqhd60 2560 1440 60)
     alpha_recorder_add_obs_app_e2e_hardware_load_matrix(4k30 3840 2160 30)
+    if(_alpha_recorder_obs_app_e2e_has_nvenc_rgb)
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_allow_overload_rgb_nvenc_hevc_alpha_hevc_nvenc 4k60-allow-overload-rgb-nvenc-hevc-alpha-hevc-nvenc
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            WIDTH 3840
+            HEIGHT 2160
+            FPS 60
+            SYNC_RECORD_SECONDS 4
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 12
+            HEVC_GOP_SIZE 120
+            HEVC_B_FRAMES 2
+            ALLOW_OVERLOAD
+            EXPERIMENTAL
+        )
+    else()
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_allow_overload_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
+    endif()
 
     string(REPLACE ";" "\n  " _alpha_recorder_obs_app_e2e_registered_summary "${_alpha_recorder_obs_app_e2e_registered_targets}")
     string(REPLACE ";" "\n  " _alpha_recorder_obs_app_e2e_skipped_summary "${_alpha_recorder_obs_app_e2e_skipped_targets}")

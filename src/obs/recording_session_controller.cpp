@@ -59,6 +59,7 @@ namespace
     using alpha_recorder::obs::timestamp_span_ms;
 
     constexpr std::uint32_t kGpuTextureDeactivateTimeoutMs = 10000U;
+    constexpr std::uint32_t kGpuTextureVisibleRangeDrainWaitMs = 1000U;
 
     std::filesystem::path path_from_utf8(const char *text)
     {
@@ -276,6 +277,26 @@ namespace
         return true;
     }
 
+    void remove_failed_gpu_texture_output(const std::filesystem::path &writer_path,
+                                          const std::filesystem::path &final_path,
+                                          const std::string &reason) noexcept
+    {
+        if (writer_path.empty())
+        {
+            return;
+        }
+
+        std::error_code error;
+        std::filesystem::remove(writer_path, error);
+        blog(error ? LOG_WARNING : LOG_INFO,
+             "Alpha Recorder removed failed GPU texture alpha MP4: path=\"%s\" final=\"%s\" removed=%s reason=\"%s\" remove_error=\"%s\"",
+             writer_path.generic_string().c_str(),
+             final_path.generic_string().c_str(),
+             error ? "false" : "true",
+             reason.c_str(),
+             error ? error.message().c_str() : "");
+    }
+
     bool settings_use_gpu_texture_path(const alpha_recorder::obs::Settings &settings) noexcept
     {
         return alpha_recorder::obs::finalization_format_uses_gpu_texture_path(settings.finalization_format);
@@ -313,8 +334,6 @@ namespace
                          settings.hevc_encoder.gop_size);
         obs_data_set_int(data, alpha_recorder::obs::settings_hevc_b_frames_key().data(),
                          settings.hevc_encoder.b_frames);
-        obs_data_set_int(data, alpha_recorder::obs::settings_hevc_lookahead_key().data(),
-                         settings.hevc_encoder.lookahead);
         obs_data_set_bool(data, alpha_recorder::obs::settings_hevc_adaptive_quantization_key().data(),
                           settings.hevc_encoder.adaptive_quantization);
         obs_data_set_string(data, alpha_recorder::obs::settings_hevc_nvenc_split_encode_key().data(),
@@ -820,10 +839,8 @@ namespace
                 return false;
             }
 
-            const bool initial_main_texture_encoded =
-                recording_path.empty() ? true : recording_texture_encoded_;
             obs_data_t *output_settings = make_gpu_texture_output_settings(
-                mask_path, video_info, settings_, initial_main_texture_encoded);
+                mask_path, video_info, settings_, recording_texture_encoded_);
             gpu_texture_output_ = obs_output_create(alpha_recorder::obs::gpu_texture_recording_output_id(),
                                                     "Alpha Recorder GPU Texture Recording",
                                                     output_settings,
@@ -914,20 +931,28 @@ namespace
             std::string range_error;
             bool finalize_failed = false;
             bool data_capture_end_requested = false;
+            std::string finalize_failure_reason;
 
-            alpha_recorder::obs::gpu_texture_recording_output_request_stop(gpu_texture_output_);
-            if (!alpha_recorder::obs::gpu_texture_recording_output_wait_stop_boundary(
-                    gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
+            const auto solve_deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(kGpuTextureVisibleRangeDrainWaitMs);
+            bool visible_range_certified = false;
+            do
             {
-                finalize_failed = true;
-            }
+                range_error.clear();
+                if (alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
+                        gpu_texture_output_,
+                        gpu_main_packets_,
+                        recording_texture_encoded_,
+                        visible_range,
+                        &range_error))
+                {
+                    visible_range_certified = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            } while (std::chrono::steady_clock::now() < solve_deadline);
 
-            if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
-                    gpu_texture_output_,
-                    gpu_main_packets_,
-                    recording_texture_encoded_,
-                    visible_range,
-                    &range_error))
+            if (!visible_range_certified)
             {
                 finalize_failed = true;
                 if (error_message != nullptr)
@@ -941,6 +966,15 @@ namespace
                                       gpu_texture_output_, visible_range, error_message))
             {
                 finalize_failed = true;
+            }
+            if (!finalize_failed)
+            {
+                alpha_recorder::obs::gpu_texture_recording_output_request_stop(gpu_texture_output_);
+                if (!alpha_recorder::obs::gpu_texture_recording_output_wait_stop_boundary(
+                        gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
+                {
+                    finalize_failed = true;
+                }
             }
             if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_finalize_mux(
                                       gpu_texture_output_, error_message))
@@ -959,9 +993,14 @@ namespace
             }
             if (finalize_failed)
             {
+                finalize_failure_reason =
+                    error_message != nullptr && !error_message->empty()
+                        ? *error_message
+                        : "Alpha Recorder failed to certify or finalize the GPU texture alpha MP4.";
                 if (!data_capture_end_requested)
                 {
                     std::string deactivate_error;
+                    alpha_recorder::obs::gpu_texture_recording_output_request_stop(gpu_texture_output_);
                     alpha_recorder::obs::gpu_texture_recording_output_end_data_capture(gpu_texture_output_);
                     (void)alpha_recorder::obs::gpu_texture_recording_output_wait_deactivated(
                         gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, &deactivate_error);
@@ -979,11 +1018,16 @@ namespace
                 !move_completed_gpu_texture_output(actual_writer_path, final_writer_path, error_message))
             {
                 finalize_failed = true;
+                finalize_failure_reason =
+                    error_message != nullptr && !error_message->empty()
+                        ? *error_message
+                        : "Alpha Recorder failed to publish the GPU texture alpha MP4.";
             }
-            if (finalize_failed && gpu_texture_output_is_temporary_)
+            if (finalize_failed)
             {
-                std::error_code remove_error;
-                std::filesystem::remove(actual_writer_path, remove_error);
+                remove_failed_gpu_texture_output(actual_writer_path,
+                                                 final_writer_path,
+                                                 finalize_failure_reason);
             }
             gpu_texture_output_path_.clear();
             gpu_texture_final_output_path_.clear();
@@ -1068,7 +1112,7 @@ namespace
                                                                         config.fps_den);
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} alignment_queue={alpha_limit_frames=%zu output_limit_frames=%zu encoded_reorder_frames=%zu plausible_delta_ns=%llu} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u b_frames=%u lookahead=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
+                "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} alignment_queue={alpha_limit_frames=%zu output_limit_frames=%zu encoded_reorder_frames=%zu plausible_delta_ns=%llu} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u b_frames=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
                 mask_path.generic_string().c_str(),
                 std::string{alpha_recorder::obs::finalization_format_config_value(config.finalization_format)}.c_str(),
                 config.width, config.height, config.fps_num, config.fps_den,
@@ -1080,7 +1124,7 @@ namespace
                 config.hevc_encoder.quality_cq,
                 std::string{alpha_recorder::obs::hevc_encoder_preset_config_value(config.hevc_encoder.preset)}.c_str(),
                 std::string{alpha_recorder::obs::hevc_nvenc_tune_config_value(config.hevc_encoder.nvenc_tune)}.c_str(),
-                config.hevc_encoder.gop_size, config.hevc_encoder.b_frames, config.hevc_encoder.lookahead,
+                config.hevc_encoder.gop_size, config.hevc_encoder.b_frames,
                 bool_text(config.hevc_encoder.adaptive_quantization),
                 std::string{alpha_recorder::obs::hevc_nvenc_split_encode_config_value(config.hevc_encoder.nvenc_split_encode)}.c_str(),
                 static_cast<int>(config.hevc_encoder.nvenc_gpu_index));

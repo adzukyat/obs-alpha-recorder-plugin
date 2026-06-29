@@ -837,6 +837,48 @@ async function waitForPath(path: string, timeoutSeconds: number): Promise<void> 
   throw new Error(`Timed out waiting for file: ${path}`);
 }
 
+function assertNoInvalidAlphaArtifacts(artifactRoot: string): void {
+  const invalidArtifacts = readdirSync(artifactRoot).filter(
+    (entry) => entry.includes(".alpha.tmp.") || entry.includes(".sync-invalid"),
+  );
+  if (invalidArtifacts.length > 0) {
+    throw new Error(`Invalid alpha artifacts were left in the recording directory: ${invalidArtifacts.join(", ")}`);
+  }
+}
+
+function alphaPathForRgb(rgbPath: string, expectedFinalizationFormat: string): string {
+  const basePath = rgbPath.replace(/\.[^.\\/]+$/, "");
+  const alphaExtension = expectedFinalizationFormat === "mask_png_mov" ? ".mov" : ".mp4";
+  return `${basePath}.alpha${alphaExtension}`;
+}
+
+function invalidAlphaArtifacts(artifactRoot: string): string[] {
+  return readdirSync(artifactRoot).filter((entry) => entry.includes(".alpha.tmp.") || entry.includes(".sync-invalid"));
+}
+
+async function waitForAlphaOutputSettled(
+  artifactRoot: string,
+  alphaPath: string,
+  timeoutSeconds: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let lastInvalidArtifacts: string[] = [];
+  while (Date.now() < deadline) {
+    lastInvalidArtifacts = invalidAlphaArtifacts(artifactRoot);
+    if (existsSync(alphaPath) && statSync(alphaPath).size > 0 && lastInvalidArtifacts.length === 0) {
+      return;
+    }
+    if (!existsSync(alphaPath) && lastInvalidArtifacts.length === 0) {
+      return;
+    }
+    await delay(500);
+  }
+  throw new Error(
+    `Timed out waiting for alpha output finalization: alpha=${alphaPath}; ` +
+      `invalidArtifacts=${lastInvalidArtifacts.join(", ") || "<none>"}`,
+  );
+}
+
 function findTool(stageBin: string, repoRoot: string, name: string): string {
   const candidates = [join(stageBin, name), join(stageBin, `${name}.exe`)];
   const depsRoot = join(repoRoot, "deps", "obs", "obs-studio", ".deps");
@@ -1345,7 +1387,9 @@ function verifyRgbAlphaFrameSync(
     overloadObserved &&
     bestCodeOffset.offset === 0 &&
     overloadTerminalFrameCodeOffset.offset === 0 &&
-    overloadTerminalFrameCodeOffset.total > 0;
+    overloadTerminalContentOffset.offset === 0 &&
+    overloadTerminalFrameCodeOffset.total > 0 &&
+    overloadTerminalContentOffset.total > 0;
 
   if (overloadObserved && !overloadOffsetStable) {
     throw new Error(
@@ -1362,7 +1406,7 @@ function verifyRgbAlphaFrameSync(
   if (
     overloadObserved &&
     overloadOffsetStable &&
-    (bestOffset.offset !== 0 || overloadTerminalContentOffset.offset !== 0)
+    bestOffset.offset !== 0
   ) {
     console.warn(
       `RGB/alpha mask bounds preferred a non-zero offset under overload, but frame-code offset remains zero: ` +
@@ -1514,12 +1558,11 @@ async function verifyRecordingOutputs(
     throw new Error("OBS did not report or create an RGB recording path");
   }
 
-  const basePath = rgbPath.replace(/\.[^.\\/]+$/, "");
-  const alphaExtension = expectedFinalizationFormat === "mask_png_mov" ? ".mov" : ".mp4";
-  const alphaPath = `${basePath}.alpha${alphaExtension}`;
+  const alphaPath = alphaPathForRgb(rgbPath, expectedFinalizationFormat);
 
   await waitForPath(rgbPath, 30);
   await waitForPath(alphaPath, 120);
+  assertNoInvalidAlphaArtifacts(artifactRoot);
 
   const ffprobe = findTool(stageBin, repoRoot, "ffprobe");
   const ffmpeg = findTool(stageBin, repoRoot, "ffmpeg");
@@ -1851,6 +1894,15 @@ finalization_format=${args.finalizationFormat}
     if (settings.responseData?.finalization_format !== expectedFinalizationFormat) {
       throw new Error(`Alpha Recorder did not accept finalization_format=${args.finalizationFormat}: ${JSON.stringify(settings)}`);
     }
+    if (
+      Number(settings.responseData?.hevc_gop_size) !== args.hevcGopSize ||
+      Number(settings.responseData?.hevc_b_frames) !== args.hevcBFrames
+    ) {
+      throw new Error(
+        `Alpha Recorder did not accept HEVC timing settings: expected gop=${args.hevcGopSize} ` +
+          `b_frames=${args.hevcBFrames}; got ${JSON.stringify(settings.responseData)}`,
+      );
+    }
 
     await socket.request("CreateInput", {
       sceneName: "Scene",
@@ -1897,11 +1949,19 @@ finalization_format=${args.finalizationFormat}
       }
       const stopResponse = await socket.request("StopRecord");
       await waitForRecordState(socket, false, stopWaitTimeoutSeconds(durationSeconds));
+      const rgbPath = String(stopResponse?.outputPath ?? "");
+      if (rgbPath) {
+        await waitForAlphaOutputSettled(
+          artifactRoot,
+          alphaPathForRgb(rgbPath, expectedFinalizationFormat),
+          stopWaitTimeoutSeconds(durationSeconds),
+        );
+      }
       scanObsLogsForOverload(portableConfig, overload, attemptLogCheckpoint);
       const attemptOverloaded = overload.seen;
       throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps, args.allowOverload);
       throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot);
-      recordedAttempts.push({ ...attempt, rgbPath: String(stopResponse?.outputPath ?? ""), overloaded: attemptOverloaded });
+      recordedAttempts.push({ ...attempt, rgbPath, overloaded: attemptOverloaded });
     }
 
     await cleanupObs();

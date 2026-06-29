@@ -108,7 +108,7 @@ Settings include:
   - CQ.
   - Encoder-specific Preset.
   - Tune for NVENC.
-  - Advanced GOP, B-frames, Lookahead, AQ, NVENC GPU, and NVENC Split Encode
+  - Advanced GOP, B-frames, AQ, NVENC GPU, and NVENC Split Encode
     controls.
 - NVENC exposes P1 through P7 preset values, Tune, GPU index, and Split Encode
   mode.
@@ -120,9 +120,9 @@ Settings include:
 - Quality Profile buttons apply full encoder presets, not CQ-only shortcuts.
 - HEVC profile buttons have complete tuning semantics:
   - Lossless disables the lossy tuning path.
-  - High Quality enables the quality preset with B-frames, lookahead, and AQ.
-  - Balanced uses lighter B-frame, lookahead, and AQ settings.
-  - Fast disables latency-heavy B-frame, lookahead, and AQ options.
+  - High Quality enables the quality preset with B-frames and AQ.
+  - Balanced uses lighter B-frame and AQ settings.
+  - Fast disables latency-heavy B-frame and AQ options.
 
 Persisted OBS user config keys:
 
@@ -136,7 +136,6 @@ Persisted OBS user config keys:
 | HEVC NVENC tune | `AlphaRecorder.hevc_nvenc_tune` |
 | HEVC GOP size | `AlphaRecorder.hevc_gop_size` |
 | HEVC B-frames | `AlphaRecorder.hevc_b_frames` |
-| HEVC lookahead | `AlphaRecorder.hevc_lookahead` |
 | HEVC adaptive quantization | `AlphaRecorder.hevc_adaptive_quantization` |
 | HEVC NVENC Split Encode | `AlphaRecorder.hevc_nvenc_split_encode` |
 | HEVC NVENC GPU index | `AlphaRecorder.hevc_nvenc_gpu_index` |
@@ -636,7 +635,7 @@ Completed:
 - obs-websocket vendor API for `alpha_recorder.GetSettings` and
   `alpha_recorder.SetSettings`.
 - obs-websocket settings coverage for HEVC quality profile, CQ, preset, NVENC
-  tune, GOP, B-frames, lookahead, adaptive quantization, NVENC Split Encode,
+  tune, GOP, B-frames, adaptive quantization, NVENC Split Encode,
   and NVENC GPU index.
 - CMake-native OBS bootstrap, staging, deterministic E2E, and OBS app E2E
   scripts:

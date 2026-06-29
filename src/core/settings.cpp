@@ -73,12 +73,6 @@ namespace alpha_recorder::obs
                 settings.b_frames = clamp_hevc_b_frames(static_cast<std::uint32_t>(stored_b_frames < 0 ? 0 : stored_b_frames));
             }
 
-            if (config_has_user_value(config, settings_section().data(), settings_hevc_lookahead_key().data()))
-            {
-                const std::int64_t stored_lookahead = config_get_int(config, settings_section().data(), settings_hevc_lookahead_key().data());
-                settings.lookahead = clamp_hevc_lookahead(static_cast<std::uint32_t>(stored_lookahead < 0 ? 0 : stored_lookahead));
-            }
-
             if (config_has_user_value(config, settings_section().data(), settings_hevc_adaptive_quantization_key().data()))
             {
                 settings.adaptive_quantization =

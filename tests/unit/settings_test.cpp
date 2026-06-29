@@ -21,7 +21,6 @@ int main()
         defaults.hevc_encoder.nvenc_tune != alpha_recorder::obs::HevcNvencTune::HighQuality ||
         defaults.hevc_encoder.gop_size != 0U ||
         defaults.hevc_encoder.b_frames != 0U ||
-        defaults.hevc_encoder.lookahead != 0U ||
         defaults.hevc_encoder.adaptive_quantization ||
         defaults.hevc_encoder.nvenc_split_encode != alpha_recorder::obs::HevcNvencSplitEncodeMode::Auto ||
         defaults.hevc_encoder.nvenc_gpu_index != -1 ||
@@ -39,7 +38,6 @@ int main()
         alpha_recorder::obs::settings_hevc_nvenc_tune_key() != "hevc_nvenc_tune" ||
         alpha_recorder::obs::settings_hevc_gop_size_key() != "hevc_gop_size" ||
         alpha_recorder::obs::settings_hevc_b_frames_key() != "hevc_b_frames" ||
-        alpha_recorder::obs::settings_hevc_lookahead_key() != "hevc_lookahead" ||
         alpha_recorder::obs::settings_hevc_adaptive_quantization_key() != "hevc_adaptive_quantization" ||
         alpha_recorder::obs::settings_hevc_nvenc_split_encode_key() != "hevc_nvenc_split_encode" ||
         alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key() != "hevc_nvenc_gpu_index" ||
@@ -173,7 +171,6 @@ int main()
         alpha_recorder::obs::clamp_hevc_quality_cq(99U) != 51U ||
         alpha_recorder::obs::clamp_hevc_gop_size(1200U) != 1000U ||
         alpha_recorder::obs::clamp_hevc_b_frames(8U) != 4U ||
-        alpha_recorder::obs::clamp_hevc_lookahead(64U) != 32U ||
         !alpha_recorder::obs::try_normalize_hevc_nvenc_gpu_index(99, normalized_gpu_index) ||
         normalized_gpu_index != 99 ||
         alpha_recorder::obs::try_normalize_hevc_nvenc_gpu_index(-2, normalized_gpu_index) ||
@@ -200,7 +197,7 @@ int main()
     }
 
     config_t *config = nullptr;
-    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=amf_quality\nhevc_nvenc_tune=ull\nhevc_gop_size=1200\nhevc_b_frames=8\nhevc_lookahead=64\nhevc_adaptive_quantization=true\nhevc_nvenc_split_encode=3\nhevc_nvenc_gpu_index=99\ndiagnostic_logging=true\n") != CONFIG_SUCCESS || config == nullptr)
+    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=amf_quality\nhevc_nvenc_tune=ull\nhevc_gop_size=1200\nhevc_b_frames=8\nhevc_adaptive_quantization=true\nhevc_nvenc_split_encode=3\nhevc_nvenc_gpu_index=99\ndiagnostic_logging=true\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory config string\n";
         return 16;
@@ -215,7 +212,6 @@ int main()
         loaded_settings.hevc_encoder.nvenc_tune != alpha_recorder::obs::HevcNvencTune::UltraLowLatency ||
         loaded_settings.hevc_encoder.gop_size != 1000U ||
         loaded_settings.hevc_encoder.b_frames != 4U ||
-        loaded_settings.hevc_encoder.lookahead != 32U ||
         !loaded_settings.hevc_encoder.adaptive_quantization ||
         loaded_settings.hevc_encoder.nvenc_split_encode != alpha_recorder::obs::HevcNvencSplitEncodeMode::ThreeWay ||
         loaded_settings.hevc_encoder.nvenc_gpu_index != 99 ||

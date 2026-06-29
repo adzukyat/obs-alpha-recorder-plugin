@@ -68,7 +68,6 @@ namespace alpha_recorder::obs
         HevcNvencTune nvenc_tune = HevcNvencTune::HighQuality;
         std::uint32_t gop_size = 0;
         std::uint32_t b_frames = 0;
-        std::uint32_t lookahead = 0;
         bool adaptive_quantization = false;
         HevcNvencSplitEncodeMode nvenc_split_encode = HevcNvencSplitEncodeMode::Auto;
         std::int32_t nvenc_gpu_index = -1;
@@ -132,11 +131,6 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline constexpr std::string_view settings_hevc_b_frames_key() noexcept
     {
         return "hevc_b_frames";
-    }
-
-    [[nodiscard]] inline constexpr std::string_view settings_hevc_lookahead_key() noexcept
-    {
-        return "hevc_lookahead";
     }
 
     [[nodiscard]] inline constexpr std::string_view settings_hevc_adaptive_quantization_key() noexcept
@@ -536,13 +530,8 @@ namespace alpha_recorder::obs
         return b_frames > 4U ? 4U : b_frames;
     }
 
-    [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_lookahead(std::uint32_t lookahead) noexcept
-    {
-        return lookahead > 32U ? 32U : lookahead;
-    }
-
     [[nodiscard]] inline constexpr bool try_normalize_hevc_nvenc_gpu_index(std::int64_t gpu_index,
-                                                                            std::int32_t &normalized) noexcept
+                                                                           std::int32_t &normalized) noexcept
     {
         if (gpu_index < -1 || gpu_index > static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()))
         {
