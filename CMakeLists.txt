@@ -154,100 +154,10 @@ set_target_properties(alpha_recorder_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
-set(_alpha_recorder_obs_outputs_dir "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/plugins/obs-outputs")
-set(_alpha_recorder_private_obs_outputs_dir "${CMAKE_CURRENT_BINARY_DIR}/alpha_recorder_private_obs_outputs")
-
-file(MAKE_DIRECTORY "${_alpha_recorder_private_obs_outputs_dir}")
-
-file(READ "${_alpha_recorder_obs_outputs_dir}/mp4-mux.h" _alpha_recorder_private_mp4_mux_header)
-if(NOT _alpha_recorder_private_mp4_mux_header MATCHES "MP4_VIDEO_ONLY_TRACKS")
-    string(REPLACE
-        "\tMP4_USE_NEGATIVE_CTS = 1 << 3,\n"
-        "\tMP4_USE_NEGATIVE_CTS = 1 << 3,\n\t/* Alpha Recorder: construct only video tracks even if the output has an audio encoder for timing */\n\tMP4_VIDEO_ONLY_TRACKS = 1 << 4,\n"
-        _alpha_recorder_private_mp4_mux_header
-        "${_alpha_recorder_private_mp4_mux_header}"
-    )
-endif()
-if(NOT _alpha_recorder_private_mp4_mux_header MATCHES "mp4_mux_set_video_edit")
-    string(REPLACE
-        "bool mp4_mux_add_chapter(struct mp4_mux *mux, int64_t dts_usec, const char *name);\nbool mp4_mux_finalise(struct mp4_mux *mux);"
-        "bool mp4_mux_add_chapter(struct mp4_mux *mux, int64_t dts_usec, const char *name);\nvoid mp4_mux_set_video_edit(struct mp4_mux *mux, int64_t media_time, int64_t duration);\nbool mp4_mux_finalise(struct mp4_mux *mux);"
-        _alpha_recorder_private_mp4_mux_header
-        "${_alpha_recorder_private_mp4_mux_header}"
-    )
-endif()
-file(WRITE "${_alpha_recorder_private_obs_outputs_dir}/mp4-mux.h" "${_alpha_recorder_private_mp4_mux_header}")
-
-file(READ "${_alpha_recorder_obs_outputs_dir}/mp4-mux-internal.h" _alpha_recorder_private_mp4_mux_internal)
-if(NOT _alpha_recorder_private_mp4_mux_internal MATCHES "has_edit_range")
-    string(REPLACE
-        "\t/* Highest PTS this track has seen (in usec) */\n\tint64_t last_pts_usec;\n"
-        "\t/* Highest PTS this track has seen (in usec) */\n\tint64_t last_pts_usec;\n\t/* Optional edit list range in encoder packet timebase units. */\n\tbool has_edit_range;\n\tint64_t edit_media_time;\n\tint64_t edit_duration;\n"
-        _alpha_recorder_private_mp4_mux_internal
-        "${_alpha_recorder_private_mp4_mux_internal}"
-    )
-endif()
-file(WRITE "${_alpha_recorder_private_obs_outputs_dir}/mp4-mux-internal.h" "${_alpha_recorder_private_mp4_mux_internal}")
-
-file(READ "${_alpha_recorder_obs_outputs_dir}/mp4-mux.c" _alpha_recorder_private_mp4_mux_source)
-if(NOT _alpha_recorder_private_mp4_mux_source MATCHES "has_edit_range")
-    string(REPLACE
-        "\t\tdelay = util_mul_div64(dts_offset, track->timescale, track->timebase_den);\n\t} else if (track->type == TRACK_AUDIO && track->first_pts < 0) {"
-        "\t\tdelay = util_mul_div64(dts_offset, track->timescale, track->timebase_den);\n\t\tif (track->has_edit_range) {\n\t\t\tduration = util_mul_div64(track->edit_duration, 1000, track->timebase_den);\n\t\t\tdelay += util_mul_div64(track->edit_media_time, track->timescale, track->timebase_den);\n\t\t}\n\t} else if (track->type == TRACK_AUDIO && track->first_pts < 0) {"
-        _alpha_recorder_private_mp4_mux_source
-        "${_alpha_recorder_private_mp4_mux_source}"
-    )
-    string(REPLACE
-        "\t\t/* Subtract priming delay from total duration */\n\t\tduration -= util_mul_div64(delay, 1000, track->timescale);\n\t}\n"
-        "\t\t/* Subtract priming delay from total duration */\n\t\tduration -= util_mul_div64(delay, 1000, track->timescale);\n\t} else if (track->has_edit_range) {\n\t\tduration = util_mul_div64(track->edit_duration, 1000, track->timebase_den);\n\t\tdelay = util_mul_div64(track->edit_media_time, track->timescale, track->timebase_den);\n\t}\n"
-        _alpha_recorder_private_mp4_mux_source
-        "${_alpha_recorder_private_mp4_mux_source}"
-    )
-endif()
-if(NOT _alpha_recorder_private_mp4_mux_source MATCHES "MP4_VIDEO_ONLY_TRACKS")
-    string(REPLACE
-        "\tfor (size_t i = 0; i < MAX_OUTPUT_AUDIO_ENCODERS; i++) {\n\t\tobs_encoder_t *enc = obs_output_get_audio_encoder(output, i);\n\t\tif (!enc)\n\t\t\tcontinue;\n\t\tadd_track(mux, enc);\n\t}\n"
-        "\tif ((flags & MP4_VIDEO_ONLY_TRACKS) == 0) {\n\t\tfor (size_t i = 0; i < MAX_OUTPUT_AUDIO_ENCODERS; i++) {\n\t\t\tobs_encoder_t *enc = obs_output_get_audio_encoder(output, i);\n\t\t\tif (!enc)\n\t\t\t\tcontinue;\n\t\t\tadd_track(mux, enc);\n\t\t}\n\t}\n"
-        _alpha_recorder_private_mp4_mux_source
-        "${_alpha_recorder_private_mp4_mux_source}"
-    )
-endif()
-if(NOT _alpha_recorder_private_mp4_mux_source MATCHES "mp4_mux_set_video_edit")
-    string(REPLACE
-        "\nbool mp4_mux_finalise(struct mp4_mux *mux)\n"
-        "\nvoid mp4_mux_set_video_edit(struct mp4_mux *mux, int64_t media_time, int64_t duration)\n{\n\tif (!mux || media_time < 0 || duration <= 0)\n\t\treturn;\n\n\tfor (size_t i = 0; i < mux->tracks.num; i++) {\n\t\tstruct mp4_track *track = &mux->tracks.array[i];\n\t\tif (track->type != TRACK_VIDEO)\n\t\t\tcontinue;\n\n\t\ttrack->has_edit_range = true;\n\t\ttrack->edit_media_time = media_time;\n\t\ttrack->edit_duration = duration;\n\t}\n}\n\nbool mp4_mux_finalise(struct mp4_mux *mux)\n"
-        _alpha_recorder_private_mp4_mux_source
-        "${_alpha_recorder_private_mp4_mux_source}"
-    )
-endif()
-file(WRITE "${_alpha_recorder_private_obs_outputs_dir}/mp4-mux.c" "${_alpha_recorder_private_mp4_mux_source}")
-
 set(_alpha_recorder_direct_mp4_sources
     src/obs/direct_mp4_muxer.cpp
     src/obs/gpu_texture_alpha_output_sink.cpp
-    "${_alpha_recorder_private_obs_outputs_dir}/mp4-mux.c"
-    deps/obs/obs-studio/plugins/obs-outputs/rtmp-av1.c
-    deps/obs/obs-studio/plugins/obs-outputs/rtmp-hevc.c
 )
-set(_alpha_recorder_direct_mp4_private_symbol_definitions
-    mp4_mux_create=alpha_recorder_private_mp4_mux_create
-    mp4_mux_destroy=alpha_recorder_private_mp4_mux_destroy
-    mp4_mux_submit_packet=alpha_recorder_private_mp4_mux_submit_packet
-    mp4_mux_add_chapter=alpha_recorder_private_mp4_mux_add_chapter
-    mp4_mux_set_video_edit=alpha_recorder_private_mp4_mux_set_video_edit
-    mp4_mux_finalise=alpha_recorder_private_mp4_mux_finalise
-)
-
-function(alpha_recorder_configure_direct_mp4_target target)
-    target_compile_definitions(${target} PRIVATE
-        ALPHA_RECORDER_HAS_OBS_MP4_MUX_VIDEO_EDIT=1
-        ${_alpha_recorder_direct_mp4_private_symbol_definitions}
-    )
-    target_include_directories(${target} PRIVATE
-        $<BUILD_INTERFACE:${_alpha_recorder_private_obs_outputs_dir}>
-        $<BUILD_INTERFACE:${_alpha_recorder_obs_outputs_dir}>
-    )
-endfunction()
 endif()
 
 if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
@@ -271,7 +181,6 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/plugins/obs-websocket/lib>
     )
-    alpha_recorder_configure_direct_mp4_target(alpha_recorder_plugin)
 
     set_target_properties(alpha_recorder_plugin PROPERTIES
         OUTPUT_NAME "alpha_recorder"
@@ -351,7 +260,6 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
     target_include_directories(alpha_recorder_e2e_output PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     )
-    alpha_recorder_configure_direct_mp4_target(alpha_recorder_e2e_output)
     set_target_properties(alpha_recorder_e2e_output PROPERTIES
         OUTPUT_NAME "alpha_recorder_e2e"
         FOLDER "alpha_recorder/tests/e2e"
