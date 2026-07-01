@@ -27,7 +27,6 @@ namespace alpha_recorder::obs
 {
     namespace
     {
-        constexpr std::uint32_t kMovieTimescale = 1000U;
         constexpr std::uint64_t kMp4EpochOffset = 0x7C25B080ULL;
 
         void assign_error(std::string *error_message, const char *message)
@@ -473,12 +472,91 @@ namespace alpha_recorder::obs
             return true;
         }
 
-        void write_mvhd(ByteWriter &writer, std::uint64_t creation_time, std::uint64_t movie_duration)
+        [[nodiscard]] std::uint64_t sample_duration_sum(const std::vector<Sample> &samples) noexcept
+        {
+            std::uint64_t duration = 0U;
+            for (const Sample &sample : samples)
+            {
+                duration += sample.duration;
+            }
+            return duration;
+        }
+
+        [[nodiscard]] bool trim_samples_to_media_duration(std::vector<Sample> &samples,
+                                                          std::int64_t first_dts,
+                                                          std::uint64_t media_duration,
+                                                          std::uint64_t &track_duration,
+                                                          std::string *error_message)
+        {
+            if (samples.empty())
+            {
+                assign_error(error_message, "Direct MP4 muxer cannot trim an empty sample table");
+                return false;
+            }
+            if (media_duration == 0U)
+            {
+                assign_error(error_message, "Direct MP4 muxer cannot trim to an empty media duration");
+                return false;
+            }
+
+            std::size_t keep_count = 0U;
+            for (std::size_t index = 0U; index < samples.size(); ++index)
+            {
+                const std::int64_t media_dts = samples[index].dts - first_dts;
+                if (media_dts < 0)
+                {
+                    assign_error(error_message, "Direct MP4 muxer sample DTS precedes the first sample DTS");
+                    return false;
+                }
+                if (static_cast<std::uint64_t>(media_dts) >= media_duration)
+                {
+                    break;
+                }
+                keep_count = index + 1U;
+            }
+            if (keep_count == 0U)
+            {
+                assign_error(error_message, "Direct MP4 visible range contains no muxed HEVC samples");
+                return false;
+            }
+
+            samples.resize(keep_count);
+            track_duration = sample_duration_sum(samples);
+            if (track_duration < media_duration)
+            {
+                assign_error(error_message, "Direct MP4 visible range is not covered by the muxed HEVC samples");
+                return false;
+            }
+            if (track_duration > media_duration)
+            {
+                Sample &last_sample = samples.back();
+                const std::uint64_t duration_before_last = track_duration - last_sample.duration;
+                if (duration_before_last >= media_duration)
+                {
+                    assign_error(error_message, "Direct MP4 visible range does not end on a sample boundary");
+                    return false;
+                }
+                const std::uint64_t trimmed_last_duration = media_duration - duration_before_last;
+                if (trimmed_last_duration == 0U ||
+                    trimmed_last_duration > std::numeric_limits<std::uint32_t>::max())
+                {
+                    assign_error(error_message, "Direct MP4 trimmed sample duration is out of range");
+                    return false;
+                }
+                last_sample.duration = static_cast<std::uint32_t>(trimmed_last_duration);
+                track_duration = media_duration;
+            }
+            return true;
+        }
+
+        void write_mvhd(ByteWriter &writer, std::uint64_t creation_time,
+                        std::uint32_t movie_timescale,
+                        std::uint64_t movie_duration)
         {
             const std::size_t start = writer.begin_full_box("mvhd", 0, 0);
             writer.u32(static_cast<std::uint32_t>(creation_time));
             writer.u32(static_cast<std::uint32_t>(creation_time));
-            writer.u32(kMovieTimescale);
+            writer.u32(movie_timescale);
             writer.u32(static_cast<std::uint32_t>(std::min<std::uint64_t>(movie_duration, std::numeric_limits<std::uint32_t>::max())));
             writer.u32(0x00010000U);
             writer.u16(0x0100U);
@@ -804,6 +882,7 @@ namespace alpha_recorder::obs
         }
 
         [[nodiscard]] std::vector<std::uint8_t> build_moov(std::uint64_t creation_time,
+                                                           std::uint32_t movie_timescale,
                                                            std::uint64_t movie_duration,
                                                            std::uint32_t timescale,
                                                            std::uint64_t track_duration,
@@ -816,7 +895,7 @@ namespace alpha_recorder::obs
         {
             ByteWriter writer;
             const std::size_t start = writer.begin_box("moov");
-            write_mvhd(writer, creation_time, movie_duration);
+            write_mvhd(writer, creation_time, movie_timescale, movie_duration);
             write_trak(writer, creation_time, movie_duration, timescale, track_duration,
                        edit_media_time, has_edit_range, width, height, hvcc, samples);
             writer.end_box(start);
@@ -1201,12 +1280,15 @@ namespace alpha_recorder::obs
             return false;
         }
 
+        std::vector<Sample> table_samples = impl_->samples;
+        std::uint64_t table_track_duration = track_duration;
         std::int64_t edit_media_time = 0;
         std::uint64_t visible_duration = track_duration;
         const bool has_edit_range = impl_->has_pending_visible_range;
         if (has_edit_range)
         {
-            const std::int64_t media_time = impl_->pending_visible_range.media_time - impl_->samples.front().dts;
+            const std::int64_t first_dts = impl_->samples.front().dts;
+            const std::int64_t media_time = impl_->pending_visible_range.media_time - first_dts;
             if (media_time < 0)
             {
                 assign_error(error_message, "Direct MP4 visible range starts before the first muxed sample");
@@ -1214,17 +1296,31 @@ namespace alpha_recorder::obs
             }
             edit_media_time = media_time;
             visible_duration = static_cast<std::uint64_t>(impl_->pending_visible_range.duration);
-            if (visible_duration == 0U || static_cast<std::uint64_t>(edit_media_time) + visible_duration > track_duration)
+            if (visible_duration == 0U ||
+                static_cast<std::uint64_t>(edit_media_time) >
+                    std::numeric_limits<std::uint64_t>::max() - visible_duration ||
+                static_cast<std::uint64_t>(edit_media_time) + visible_duration > track_duration)
             {
                 assign_error(error_message, "Direct MP4 visible range is outside the muxed HEVC samples");
                 return false;
             }
+            const std::uint64_t visible_end = static_cast<std::uint64_t>(edit_media_time) + visible_duration;
+            if (!trim_samples_to_media_duration(table_samples, first_dts, visible_end, table_track_duration,
+                                                error_message))
+            {
+                return false;
+            }
         }
 
-        const std::uint64_t movie_duration = scale_u64(visible_duration, kMovieTimescale, impl_->timebase_den);
+        const bool write_edit_range = has_edit_range &&
+                                      (edit_media_time != 0 ||
+                                       visible_duration != table_track_duration);
+        const std::uint32_t movie_timescale = impl_->timebase_den == 0U ? 1000U : impl_->timebase_den;
+        const std::uint64_t movie_duration = scale_u64(visible_duration, movie_timescale, impl_->timebase_den);
         const std::vector<std::uint8_t> moov =
-            build_moov(impl_->creation_time, movie_duration, impl_->timebase_den, track_duration,
-                       edit_media_time, has_edit_range, impl_->width, impl_->height, hvcc, impl_->samples);
+            build_moov(impl_->creation_time, movie_timescale, movie_duration, impl_->timebase_den,
+                       table_track_duration, edit_media_time, write_edit_range, impl_->width, impl_->height,
+                       hvcc, table_samples);
 
         const int64_t end_pos = serializer_get_pos(&impl_->mp4_serializer);
         if (end_pos < 0)
