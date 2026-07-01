@@ -180,6 +180,7 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     target_include_directories(alpha_recorder_plugin PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/plugins/obs-websocket/lib>
+        ${_alpha_recorder_ffmpeg_include_dirs}
     )
 
     set_target_properties(alpha_recorder_plugin PROPERTIES

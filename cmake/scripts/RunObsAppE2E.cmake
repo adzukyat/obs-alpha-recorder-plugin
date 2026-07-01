@@ -15,6 +15,8 @@ set(DURABILITY_RECORD_SECONDS 30 CACHE STRING "Sustained recording duration for 
 set(WIDTH 1920 CACHE STRING "Canvas width")
 set(HEIGHT 1080 CACHE STRING "Canvas height")
 set(FPS 60 CACHE STRING "Recording FPS")
+set(RECORD_FORMAT "mkv" CACHE STRING "OBS recording container format")
+set(WITH_AUDIO OFF CACHE BOOL "Add a deterministic audio source to the OBS app E2E scene")
 set(RGB_ENCODER "software" CACHE STRING "RGB recording encoder profile: software, apple_hevc, nvenc_hevc, or amd_hevc")
 set(FINALIZATION_FORMAT "mask_png_mov" CACHE STRING "Alpha Recorder finalization format")
 set(HEVC_QUALITY_PROFILE "high_quality" CACHE STRING "Alpha Recorder HEVC quality profile")
@@ -98,6 +100,7 @@ set(args
     "--width" "${WIDTH}"
     "--height" "${HEIGHT}"
     "--fps" "${FPS}"
+    "--record-format" "${RECORD_FORMAT}"
     "--rgb-encoder" "${RGB_ENCODER}"
     "--finalization-format" "${FINALIZATION_FORMAT}"
     "--hevc-quality-profile" "${HEVC_QUALITY_PROFILE}"
@@ -111,6 +114,9 @@ if(KEEP_OBS_OPEN)
 endif()
 if(ALLOW_OVERLOAD)
     list(APPEND args "--allow-overload")
+endif()
+if(WITH_AUDIO)
+    list(APPEND args "--with-audio")
 endif()
 
 if(APPLE)

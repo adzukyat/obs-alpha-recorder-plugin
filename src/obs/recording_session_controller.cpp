@@ -9,6 +9,7 @@
 #include "recording_telemetry.hpp"
 
 #include <algorithm>
+#include <array>
 #include <condition_variable>
 #include <chrono>
 #include <cstdio>
@@ -26,6 +27,13 @@
 
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+
+extern "C"
+{
+#include <libavcodec/packet.h>
+#include <libavformat/avformat.h>
+#include <libavutil/error.h>
+}
 
 #include <util/bmem.h>
 #include <util/config-file.h>
@@ -80,6 +88,116 @@ namespace
 
         std::error_code error;
         return std::filesystem::is_directory(path, error) && !error;
+    }
+
+    std::string av_error_message(int error_code)
+    {
+        std::array<char, AV_ERROR_MAX_STRING_SIZE> buffer{};
+        av_strerror(error_code, buffer.data(), buffer.size());
+        return std::string{buffer.data()};
+    }
+
+#ifdef _WIN32
+    std::string path_to_utf8(const std::filesystem::path &path)
+    {
+        return path.u8string();
+    }
+#else
+    std::string path_to_utf8(const std::filesystem::path &path)
+    {
+        return path.string();
+    }
+#endif
+
+    struct VideoPacketCountProbe
+    {
+        bool ok = false;
+        std::uint64_t packet_count = 0U;
+        std::string error{};
+    };
+
+    VideoPacketCountProbe probe_video_packet_count(const std::filesystem::path &path)
+    {
+        VideoPacketCountProbe result{};
+        if (path.empty())
+        {
+            result.error = "recording path is empty";
+            return result;
+        }
+
+        std::error_code exists_error;
+        if (!std::filesystem::exists(path, exists_error) || exists_error)
+        {
+            result.error = exists_error ? exists_error.message() : "recording file does not exist yet";
+            return result;
+        }
+
+        AVFormatContext *format = nullptr;
+        const std::string path_text = path_to_utf8(path);
+        int ret = avformat_open_input(&format, path_text.c_str(), nullptr, nullptr);
+        if (ret < 0)
+        {
+            result.error = std::string{"avformat_open_input failed: "} + av_error_message(ret);
+            return result;
+        }
+
+        ret = avformat_find_stream_info(format, nullptr);
+        if (ret < 0)
+        {
+            result.error = std::string{"avformat_find_stream_info failed: "} + av_error_message(ret);
+            avformat_close_input(&format);
+            return result;
+        }
+
+        int video_stream_index = av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (video_stream_index < 0)
+        {
+            for (unsigned index = 0; index < format->nb_streams; ++index)
+            {
+                AVStream *stream = format->streams[index];
+                if (stream != nullptr && stream->codecpar != nullptr &&
+                    stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
+                {
+                    video_stream_index = static_cast<int>(index);
+                    break;
+                }
+            }
+        }
+        if (video_stream_index < 0)
+        {
+            result.error = "recording file has no video stream";
+            avformat_close_input(&format);
+            return result;
+        }
+
+        AVPacket *packet = av_packet_alloc();
+        if (packet == nullptr)
+        {
+            result.error = "av_packet_alloc failed";
+            avformat_close_input(&format);
+            return result;
+        }
+
+        while ((ret = av_read_frame(format, packet)) >= 0)
+        {
+            if (packet->stream_index == video_stream_index)
+            {
+                ++result.packet_count;
+            }
+            av_packet_unref(packet);
+        }
+        av_packet_free(&packet);
+        avformat_close_input(&format);
+
+        if (ret != AVERROR_EOF)
+        {
+            result.error = std::string{"av_read_frame failed: "} + av_error_message(ret);
+            result.packet_count = 0U;
+            return result;
+        }
+
+        result.ok = true;
+        return result;
     }
 
     bool text_equals(const char *text, const char *expected) noexcept
@@ -922,6 +1040,113 @@ namespace
             return true;
         }
 
+        void clamp_gpu_texture_visible_range_to_recording_file_locked(
+            alpha_recorder::obs::AlphaVisiblePacketRange &visible_range)
+        {
+            if (visible_range.duration <= 0 || recording_path_.empty())
+            {
+                return;
+            }
+
+            const std::uint64_t callback_packet_count =
+                static_cast<std::uint64_t>(gpu_main_packets_.size());
+            if (callback_packet_count == 0U)
+            {
+                return;
+            }
+
+            std::int64_t alpha_pts_step = 0;
+            if (visible_range.duration % static_cast<std::int64_t>(callback_packet_count) == 0)
+            {
+                alpha_pts_step =
+                    visible_range.duration / static_cast<std::int64_t>(callback_packet_count);
+            }
+            else if (video_info_.fps_den > 0U && visible_range.duration % video_info_.fps_den == 0)
+            {
+                alpha_pts_step = static_cast<std::int64_t>(video_info_.fps_den);
+            }
+
+            if (alpha_pts_step <= 0)
+            {
+                blog(LOG_WARNING,
+                     "[alpha_recorder] could not infer alpha PTS step for main-file duration clamp: path=\"%s\" visible_duration=%lld main_callback_packets=%llu fps=%u/%u",
+                     recording_path_.generic_string().c_str(),
+                     static_cast<long long>(visible_range.duration),
+                     static_cast<unsigned long long>(callback_packet_count),
+                     video_info_.fps_num,
+                     video_info_.fps_den);
+                return;
+            }
+
+            const std::uint64_t solved_visible_frames =
+                static_cast<std::uint64_t>(visible_range.duration / alpha_pts_step);
+            if (solved_visible_frames == 0U)
+            {
+                return;
+            }
+
+            const VideoPacketCountProbe probe = probe_video_packet_count(recording_path_);
+            if (!probe.ok)
+            {
+                blog(LOG_WARNING,
+                     "[alpha_recorder] could not probe main recording video packet count for GPU alpha duration clamp: path=\"%s\" reason=\"%s\"",
+                     recording_path_.generic_string().c_str(),
+                     probe.error.c_str());
+                return;
+            }
+
+            if (probe.packet_count >= solved_visible_frames)
+            {
+                if (probe.packet_count > solved_visible_frames)
+                {
+                    blog(LOG_INFO,
+                         "[alpha_recorder] main recording has more video packets than certified GPU alpha range; keeping alpha duration unchanged: path=\"%s\" main_video_packets=%llu solved_visible_frames=%llu duration=%lld",
+                         recording_path_.generic_string().c_str(),
+                         static_cast<unsigned long long>(probe.packet_count),
+                         static_cast<unsigned long long>(solved_visible_frames),
+                         static_cast<long long>(visible_range.duration));
+                }
+                return;
+            }
+
+            if (probe.packet_count >
+                static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / alpha_pts_step))
+            {
+                blog(LOG_WARNING,
+                     "[alpha_recorder] main recording packet count is too large for GPU alpha duration clamp: path=\"%s\" main_video_packets=%llu alpha_pts_step=%lld",
+                     recording_path_.generic_string().c_str(),
+                     static_cast<unsigned long long>(probe.packet_count),
+                     static_cast<long long>(alpha_pts_step));
+                return;
+            }
+
+            const std::int64_t previous_duration = visible_range.duration;
+            visible_range.duration = static_cast<std::int64_t>(probe.packet_count) * alpha_pts_step;
+            blog(LOG_INFO,
+                 "[alpha_recorder] clamped GPU texture alpha visible duration to written main recording frames: path=\"%s\" main_video_packets=%llu main_callback_packets=%llu solved_visible_frames=%llu media_time=%lld duration=%lld previous_duration=%lld alpha_pts_step=%lld",
+                 recording_path_.generic_string().c_str(),
+                 static_cast<unsigned long long>(probe.packet_count),
+                 static_cast<unsigned long long>(callback_packet_count),
+                 static_cast<unsigned long long>(solved_visible_frames),
+                 static_cast<long long>(visible_range.media_time),
+                 static_cast<long long>(visible_range.duration),
+                 static_cast<long long>(previous_duration),
+                 static_cast<long long>(alpha_pts_step));
+            if (settings_.diagnostic_logging)
+            {
+                alpha_recorder::obs::append_diagnostic_log_line(
+                    "Alpha Recorder clamped GPU texture alpha visible duration to main recording: path=\"" +
+                    recording_path_.generic_string() + "\" main_video_packets=\"" +
+                    std::to_string(probe.packet_count) + "\" main_callback_packets=\"" +
+                    std::to_string(callback_packet_count) + "\" solved_visible_frames=\"" +
+                    std::to_string(solved_visible_frames) + "\" media_time=\"" +
+                    std::to_string(visible_range.media_time) + "\" duration=\"" +
+                    std::to_string(visible_range.duration) + "\" previous_duration=\"" +
+                    std::to_string(previous_duration) + "\" alpha_pts_step=\"" +
+                    std::to_string(alpha_pts_step) + "\"");
+            }
+        }
+
         bool finalize_gpu_texture_segment_locked(std::string *error_message)
         {
             if (gpu_texture_output_ == nullptr)
@@ -1000,6 +1225,10 @@ namespace
                             sync_failure_reason + "\"");
                     }
                 }
+            }
+            if (!finalize_failed && visible_range.duration > 0)
+            {
+                clamp_gpu_texture_visible_range_to_recording_file_locked(visible_range);
             }
             if (!finalize_failed && visible_range.duration > 0)
             {

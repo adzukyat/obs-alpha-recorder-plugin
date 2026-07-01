@@ -18,6 +18,8 @@ type Args = {
   width: number;
   height: number;
   fps: number;
+  recordFormat: string;
+  withAudio: boolean;
   rgbEncoder: string;
   finalizationFormat: string;
   hevcQualityProfile: string;
@@ -65,6 +67,8 @@ function parseArgs(argv: string[]): Args {
     width: 1920,
     height: 1080,
     fps: 60,
+    recordFormat: "mkv",
+    withAudio: false,
     rgbEncoder: "software",
     finalizationFormat: "mask_png_mov",
     hevcQualityProfile: "high_quality",
@@ -131,6 +135,13 @@ function parseArgs(argv: string[]): Args {
       case "--fps":
         args.fps = Number(value);
         ++index;
+        break;
+      case "--record-format":
+        args.recordFormat = value;
+        ++index;
+        break;
+      case "--with-audio":
+        args.withAudio = true;
         break;
       case "--rgb-encoder":
         args.rgbEncoder = value;
@@ -225,6 +236,50 @@ function simpleRgbEncoder(encoder: string): string {
 function writeText(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, text, "utf8");
+}
+
+function writeSineWave(path: string, durationSeconds: number, sampleRate = 48000): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const samples = Math.max(1, Math.floor(durationSeconds * sampleRate));
+  const channels = 2;
+  const bitsPerSample = 16;
+  const dataBytes = samples * channels * (bitsPerSample / 8);
+  const buffer = Buffer.alloc(44 + dataBytes);
+  let offset = 0;
+  const ascii = (text: string): void => {
+    buffer.write(text, offset, "ascii");
+    offset += text.length;
+  };
+  const u16 = (value: number): void => {
+    buffer.writeUInt16LE(value, offset);
+    offset += 2;
+  };
+  const u32 = (value: number): void => {
+    buffer.writeUInt32LE(value, offset);
+    offset += 4;
+  };
+  ascii("RIFF");
+  u32(36 + dataBytes);
+  ascii("WAVE");
+  ascii("fmt ");
+  u32(16);
+  u16(1);
+  u16(channels);
+  u32(sampleRate);
+  u32(sampleRate * channels * (bitsPerSample / 8));
+  u16(channels * (bitsPerSample / 8));
+  u16(bitsPerSample);
+  ascii("data");
+  u32(dataBytes);
+  for (let sample = 0; sample < samples; ++sample) {
+    const t = sample / sampleRate;
+    const value = Math.round(Math.sin(t * Math.PI * 2 * 440) * 0x1fff);
+    for (let channel = 0; channel < channels; ++channel) {
+      buffer.writeInt16LE(value, offset);
+      offset += 2;
+    }
+  }
+  writeFileSync(path, buffer);
 }
 
 async function freePort(): Promise<number> {
@@ -1479,9 +1534,11 @@ function verifyRgbAlphaFrameSync(
   }
 
   const frameCountDelta = Math.abs(rgbFrames - alphaFrames);
-  if (frameCountDelta > toleratedTerminalFrames) {
+  const toleratedFrameCountDelta = overloadObserved ? toleratedTerminalFrames : 0;
+  if (frameCountDelta > toleratedFrameCountDelta) {
     throw new Error(
       `Decoded RGB/alpha frame counts differ beyond tolerance: rgb=${rgbFrames} alpha=${alphaFrames}; ` +
+        `tolerance=${toleratedFrameCountDelta}; ` +
         `frameCodes=${rgbCodes.length}/${alphaCodes.length}; ` +
         `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
         `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
@@ -1835,7 +1892,7 @@ FilenameFormatting=%CCYY-%MM-%DD %hh-%mm-%ss
 [AdvOut]
 RecType=Standard
 RecFilePath=${artifactRoot.replaceAll("\\", "/")}
-RecFormat2=mkv
+RecFormat2=${args.recordFormat}
 RecTracks=1
 RecEncoder=obs_x264
 Encoder=obs_x264
@@ -1846,7 +1903,7 @@ RecSplitFileType=Time
 
 [SimpleOutput]
 FilePath=${artifactRoot.replaceAll("\\", "/")}
-RecFormat2=mkv
+RecFormat2=${args.recordFormat}
 VBitrate=2500
 ABitrate=160
 UseAdvanced=true
@@ -2063,6 +2120,23 @@ finalization_format=${args.finalizationFormat}
       },
       sceneItemEnabled: true,
     });
+
+    if (args.withAudio) {
+      const audioPath = join(artifactRoot, "e2e-tone.wav");
+      writeSineWave(audioPath, args.syncRecordSeconds * args.syncAttempts + args.durabilityRecordSeconds + 30);
+      await socket.request("CreateInput", {
+        sceneName: "Scene",
+        inputName: "AlphaRecorderAudioTone",
+        inputKind: "ffmpeg_source",
+        inputSettings: {
+          is_local_file: true,
+          local_file: audioPath,
+          looping: true,
+          restart_on_activate: true,
+        },
+        sceneItemEnabled: true,
+      });
+    }
 
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
 
