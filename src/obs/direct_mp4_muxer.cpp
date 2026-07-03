@@ -27,6 +27,7 @@ namespace alpha_recorder::obs
 {
     namespace
     {
+        constexpr std::uint32_t kMovieTimescale = 1000U;
         constexpr std::uint64_t kMp4EpochOffset = 0x7C25B080ULL;
 
         void assign_error(std::string *error_message, const char *message)
@@ -1315,7 +1316,7 @@ namespace alpha_recorder::obs
         const bool write_edit_range = has_edit_range &&
                                       (edit_media_time != 0 ||
                                        visible_duration != table_track_duration);
-        const std::uint32_t movie_timescale = impl_->timebase_den == 0U ? 1000U : impl_->timebase_den;
+        const std::uint32_t movie_timescale = kMovieTimescale;
         const std::uint64_t movie_duration = scale_u64(visible_duration, movie_timescale, impl_->timebase_den);
         const std::vector<std::uint8_t> moov =
             build_moov(impl_->creation_time, movie_timescale, movie_duration, impl_->timebase_den,

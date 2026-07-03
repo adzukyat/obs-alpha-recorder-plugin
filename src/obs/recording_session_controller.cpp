@@ -927,7 +927,8 @@ namespace
                                              const obs_video_info &video_info,
                                              bool show_popup)
         {
-            if (gpu_texture_output_ != nullptr && obs_output_active(gpu_texture_output_))
+            if (gpu_texture_output_ != nullptr &&
+                (obs_output_active(gpu_texture_output_) || gpu_texture_output_is_temporary_))
             {
                 if (gpu_texture_output_path_ == mask_path ||
                     (gpu_texture_output_is_temporary_ &&
@@ -1633,6 +1634,7 @@ namespace
             gpu_main_packets_.clear();
             gpu_texture_output_start_video_time_ = 0U;
             gpu_recording_started_video_time_ = 0U;
+            gpu_texture_delayed_replay_started_ = false;
         }
 
         void remember_gpu_texture_main_packet_locked(const encoder_packet &packet,
@@ -1907,7 +1909,8 @@ namespace
                     return;
                 }
 
-                if (gpu_texture_path_ && gpu_texture_output_ != nullptr)
+                if (gpu_texture_path_ && gpu_texture_output_ != nullptr &&
+                    !(gpu_texture_output_is_temporary_ && gpu_texture_final_output_path_.empty()))
                 {
                     if (!finalize_current_segment_locked(&error_message))
                     {
@@ -2056,6 +2059,9 @@ namespace
         void on_video_packet(obs_output_t *output, encoder_packet *packet, encoder_packet_time *packet_time)
         {
             std::string error_message;
+            obs_output_t *delayed_replay_output = nullptr;
+            std::uint64_t delayed_replay_main_cts = 0U;
+            bool delayed_replay_main_texture_encoded = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (output != recording_output_ || packet == nullptr || packet->type != OBS_ENCODER_VIDEO ||
@@ -2075,6 +2081,13 @@ namespace
                 else if (gpu_texture_path_)
                 {
                     remember_gpu_texture_main_packet_locked(*packet, *packet_time);
+                    if (!gpu_texture_delayed_replay_started_ && gpu_texture_output_ != nullptr &&
+                        gpu_main_first_packet_cts_ != 0U)
+                    {
+                        delayed_replay_output = obs_output_get_ref(gpu_texture_output_);
+                        delayed_replay_main_cts = gpu_main_first_packet_cts_;
+                        delayed_replay_main_texture_encoded = recording_texture_encoded_;
+                    }
                 }
                 else
                 {
@@ -2086,6 +2099,28 @@ namespace
             if (!error_message.empty())
             {
                 log_and_show_error(error_message, false);
+            }
+            if (delayed_replay_output != nullptr)
+            {
+                std::string replay_error;
+                const bool replay_started =
+                    alpha_recorder::obs::gpu_texture_recording_output_begin_delayed_replay(
+                        delayed_replay_output,
+                        delayed_replay_main_cts,
+                        delayed_replay_main_texture_encoded,
+                        &replay_error);
+                obs_output_release(delayed_replay_output);
+                if (replay_started)
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    gpu_texture_delayed_replay_started_ = true;
+                }
+                else if (!replay_error.empty() && settings_.diagnostic_logging)
+                {
+                    alpha_recorder::obs::append_diagnostic_log_line(
+                        "Alpha Recorder GPU delayed replay not started yet: reason=\"" +
+                        replay_error + "\" main_cts=\"" + std::to_string(delayed_replay_main_cts) + "\"");
+                }
             }
         }
 
@@ -2108,6 +2143,7 @@ namespace
         std::vector<alpha_recorder::obs::GpuTexturePacketRecord> gpu_main_packets_{};
         std::uint64_t gpu_texture_output_start_video_time_ = 0U;
         std::uint64_t gpu_recording_started_video_time_ = 0U;
+        bool gpu_texture_delayed_replay_started_ = false;
         AlphaAlignmentEngine alignment_engine_{};
         alpha_recorder::obs::RawVideoCadenceTracker raw_video_cadence_{};
         LivePipelineTelemetry live_telemetry_{};

@@ -690,8 +690,8 @@ if(_alpha_recorder_build_full_targets)
     set(_alpha_recorder_obs_app_e2e_skipped_targets)
 
     function(alpha_recorder_add_obs_app_e2e_target target_name stage_suffix)
-        set(options ALLOW_OVERLOAD EXPERIMENTAL)
-        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_SECONDS MAX_RECORD_SECONDS SYNC_RECORD_SECONDS SYNC_ATTEMPTS DURABILITY_RECORD_SECONDS HEVC_GOP_SIZE)
+        set(options ALLOW_OVERLOAD EXPERIMENTAL WITH_AUDIO VERIFY_NLE_TIMELINE)
+        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_FORMAT RECORD_SECONDS MAX_RECORD_SECONDS SYNC_RECORD_SECONDS SYNC_ATTEMPTS DURABILITY_RECORD_SECONDS HEVC_GOP_SIZE)
         set(multi_value_args)
         cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
@@ -709,6 +709,9 @@ if(_alpha_recorder_build_full_targets)
         endif()
         if(NOT ARG_FPS)
             set(ARG_FPS "60")
+        endif()
+        if(NOT ARG_RECORD_FORMAT)
+            set(ARG_RECORD_FORMAT "mkv")
         endif()
         if(ARG_RECORD_SECONDS AND NOT ARG_SYNC_RECORD_SECONDS)
             set(ARG_SYNC_RECORD_SECONDS "${ARG_RECORD_SECONDS}")
@@ -733,6 +736,16 @@ if(_alpha_recorder_build_full_targets)
         else()
             set(ARG_ALLOW_OVERLOAD_VALUE "OFF")
         endif()
+        if(ARG_WITH_AUDIO)
+            set(ARG_WITH_AUDIO_VALUE "ON")
+        else()
+            set(ARG_WITH_AUDIO_VALUE "OFF")
+        endif()
+        if(ARG_VERIFY_NLE_TIMELINE)
+            set(ARG_VERIFY_NLE_TIMELINE_VALUE "ON")
+        else()
+            set(ARG_VERIFY_NLE_TIMELINE_VALUE "OFF")
+        endif()
 
         add_custom_target(${target_name}
             COMMAND ${CMAKE_COMMAND}
@@ -746,11 +759,14 @@ if(_alpha_recorder_build_full_targets)
                 "-DWIDTH=${ARG_WIDTH}"
                 "-DHEIGHT=${ARG_HEIGHT}"
                 "-DFPS=${ARG_FPS}"
+                "-DRECORD_FORMAT=${ARG_RECORD_FORMAT}"
                 "-DSYNC_RECORD_SECONDS=${ARG_SYNC_RECORD_SECONDS}"
                 "-DSYNC_ATTEMPTS=${ARG_SYNC_ATTEMPTS}"
                 "-DDURABILITY_RECORD_SECONDS=${ARG_DURABILITY_RECORD_SECONDS}"
                 "-DHEVC_GOP_SIZE=${ARG_HEVC_GOP_SIZE}"
                 "-DALLOW_OVERLOAD=${ARG_ALLOW_OVERLOAD_VALUE}"
+                "-DWITH_AUDIO=${ARG_WITH_AUDIO_VALUE}"
+                "-DVERIFY_NLE_TIMELINE=${ARG_VERIFY_NLE_TIMELINE_VALUE}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
             VERBATIM
         )
@@ -815,6 +831,17 @@ if(_alpha_recorder_build_full_targets)
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER nvenc_hevc
             HEVC_GOP_SIZE 120
+            EXPERIMENTAL
+        )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_nle_timeline fhd60-rgb-nvenc-hevc-alpha-hevc-nvenc-nle-timeline
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            RECORD_FORMAT mov
+            SYNC_RECORD_SECONDS 2
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 2
+            WITH_AUDIO
+            VERIFY_NLE_TIMELINE
             EXPERIMENTAL
         )
     else()

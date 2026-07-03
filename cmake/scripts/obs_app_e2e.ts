@@ -19,6 +19,8 @@ type Args = {
   height: number;
   fps: number;
   recordFormat: string;
+  outputMode: string;
+  recordAudioEncoder: string;
   withAudio: boolean;
   rgbEncoder: string;
   finalizationFormat: string;
@@ -27,6 +29,7 @@ type Args = {
   hevcPreset: string;
   hevcNvencTune: string;
   hevcGopSize: number;
+  verifyNleTimeline: boolean;
   keepObsOpen: boolean;
   allowOverload: boolean;
 };
@@ -68,6 +71,8 @@ function parseArgs(argv: string[]): Args {
     height: 1080,
     fps: 60,
     recordFormat: "mkv",
+    outputMode: "simple",
+    recordAudioEncoder: "aac",
     withAudio: false,
     rgbEncoder: "software",
     finalizationFormat: "mask_png_mov",
@@ -76,6 +81,7 @@ function parseArgs(argv: string[]): Args {
     hevcPreset: "nvenc_p3",
     hevcNvencTune: "hq",
     hevcGopSize: 0,
+    verifyNleTimeline: false,
     keepObsOpen: false,
     allowOverload: false,
   };
@@ -140,6 +146,14 @@ function parseArgs(argv: string[]): Args {
         args.recordFormat = value;
         ++index;
         break;
+      case "--output-mode":
+        args.outputMode = value;
+        ++index;
+        break;
+      case "--record-audio-encoder":
+        args.recordAudioEncoder = value;
+        ++index;
+        break;
       case "--with-audio":
         args.withAudio = true;
         break;
@@ -170,6 +184,9 @@ function parseArgs(argv: string[]): Args {
       case "--hevc-gop-size":
         args.hevcGopSize = Number(value);
         ++index;
+        break;
+      case "--verify-nle-timeline":
+        args.verifyNleTimeline = true;
         break;
       case "--keep-obs-open":
         args.keepObsOpen = true;
@@ -236,6 +253,36 @@ function simpleRgbEncoder(encoder: string): string {
 function writeText(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, text, "utf8");
+}
+
+function advancedRgbEncoder(encoder: string): string {
+  switch (encoder) {
+    case "software":
+      return "obs_x264";
+    case "nvenc_hevc":
+      if (platform === "darwin") {
+        throw new Error("RGB encoder profile nvenc_hevc is only supported on Windows/Linux OBS runtimes");
+      }
+      return "obs_nvenc_hevc_tex";
+    case "amd_hevc":
+      if (platform === "darwin") {
+        throw new Error("RGB encoder profile amd_hevc is only supported on Windows/Linux OBS runtimes");
+      }
+      return "h265_texture_amf";
+    default:
+      throw new Error(`Unsupported advanced RGB encoder profile: ${encoder}`);
+  }
+}
+
+function obsAudioEncoderId(encoder: string): string {
+  switch (encoder) {
+    case "aac":
+      return "ffmpeg_aac";
+    case "pcm_s16le":
+      return "ffmpeg_pcm_s16le";
+    default:
+      throw new Error(`Unsupported recording audio encoder: ${encoder}`);
+  }
 }
 
 function writeSineWave(path: string, durationSeconds: number, sampleRate = 48000): void {
@@ -1297,6 +1344,65 @@ function frameTimes(ffprobe: string, path: string): number[] {
     .filter((timestamp) => Number.isFinite(timestamp));
 }
 
+function packetPresentationReorderDepth(ffprobe: string, path: string): number {
+  const probe = checkedJson(
+    ffprobe,
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_packets",
+      "-show_entries",
+      "packet=pts,dts",
+      "-of",
+      "json",
+      path,
+    ],
+    180,
+  ) as { packets?: Array<{ pts?: number | string; dts?: number | string }> };
+
+  const packets = (probe.packets ?? [])
+    .map((packet, decodeIndex) => {
+      const pts = Number(packet.pts);
+      const dts = Number(packet.dts);
+      return {
+        decodeIndex,
+        pts,
+        dts: Number.isFinite(dts) ? dts : pts,
+      };
+    })
+    .filter((packet) => Number.isFinite(packet.pts));
+
+  if (packets.length === 0) {
+    return 0;
+  }
+
+  const presentationOrder = [...packets].sort((left, right) => {
+    if (left.pts !== right.pts) {
+      return left.pts - right.pts;
+    }
+    if (left.dts !== right.dts) {
+      return left.dts - right.dts;
+    }
+    return left.decodeIndex - right.decodeIndex;
+  });
+  const presentationRankByDecodeIndex = new Map<number, number>();
+  presentationOrder.forEach((packet, presentationRank) => {
+    presentationRankByDecodeIndex.set(packet.decodeIndex, presentationRank);
+  });
+
+  let reorderDepth = 0;
+  for (const packet of packets) {
+    const presentationRank = presentationRankByDecodeIndex.get(packet.decodeIndex);
+    if (presentationRank == null) {
+      continue;
+    }
+    reorderDepth = Math.max(reorderDepth, presentationRank - packet.decodeIndex);
+  }
+  return reorderDepth;
+}
+
 function frameCodeCropFilter(): { filter: string; width: number; height: number } {
   const width = (frameCodeBits + 2) * frameCodeTileSize + (frameCodeBits + 1) * frameCodeGap;
   const height = frameCodeTileSize;
@@ -1405,6 +1511,9 @@ type OffsetSummary = { offset: number; matches: number; total: number };
 type SyncVerification = {
   rgbFrames: number;
   alphaFrames: number;
+  expectedFrameCodeOffset: number;
+  mainReorderDepth: number;
+  alphaConstantPacketDuration?: number;
   bestFrameCodeOffset: OffsetSummary;
   bestContentOffset: OffsetSummary;
   overloadTerminalFrameCodeOffset?: OffsetSummary;
@@ -1412,6 +1521,55 @@ type SyncVerification = {
   frameCodeMismatches: number;
   maskBoundsMismatches: number;
 };
+
+type PacketTimingSummary = {
+  packetCount: number;
+  uniqueDurations: number;
+  firstDuration: number;
+  monotonicPts: boolean;
+};
+
+function packetTimingSummary(ffprobe: string, path: string): PacketTimingSummary {
+  const probe = checkedJson(
+    ffprobe,
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_packets",
+      "-show_entries",
+      "packet=pts,duration",
+      "-of",
+      "json",
+      path,
+    ],
+    180,
+  ) as { packets?: Array<{ pts?: number | string; duration?: number | string }> };
+
+  const packets = (probe.packets ?? [])
+    .map((packet) => ({
+      pts: Number(packet.pts),
+      duration: Number(packet.duration),
+    }))
+    .filter((packet) => Number.isFinite(packet.pts) && Number.isFinite(packet.duration));
+
+  const durations = new Set(packets.map((packet) => packet.duration));
+  let monotonicPts = true;
+  for (let index = 1; index < packets.length; ++index) {
+    if (packets[index].pts <= packets[index - 1].pts) {
+      monotonicPts = false;
+      break;
+    }
+  }
+
+  return {
+    packetCount: packets.length,
+    uniqueDurations: durations.size,
+    firstDuration: packets[0]?.duration ?? 0,
+    monotonicPts,
+  };
+}
 
 function bestFrameCodeOffsetInRange(
   rgbCodes: number[],
@@ -1488,6 +1646,7 @@ function verifyRgbAlphaFrameSync(
   height: number,
   fps: number,
   overloadObserved: boolean,
+  verifyNleTimeline: boolean,
 ): SyncVerification {
   const toleratedTerminalFrames = 3;
   const toleratedPerFrameMismatches = 3;
@@ -1520,6 +1679,9 @@ function verifyRgbAlphaFrameSync(
   const rgbCodes = decodeFrameCodes(ffmpeg, rgbPath, "rgb24");
   const alphaCodes = decodeFrameCodes(ffmpeg, alphaPath, "gray");
   const bestCodeOffset = bestFrameCodeOffset(rgbCodes, alphaCodes);
+  const mainReorderDepth = verifyNleTimeline ? packetPresentationReorderDepth(ffprobe, rgbPath) : 0;
+  const expectedFrameCodeOffset = 0;
+  const alphaTiming = verifyNleTimeline ? packetTimingSummary(ffprobe, alphaPath) : undefined;
 
   const rgbBounds = Array.from({ length: rgbFrames }, (_, frame) =>
     rgbFrameBounds(rgbBytes.subarray(frame * rgbFrameSize, (frame + 1) * rgbFrameSize), verifyWidth, verifyHeight),
@@ -1533,23 +1695,58 @@ function verifyRgbAlphaFrameSync(
     throw new Error(`Frame-code counts differ from decoded frames: rgb=${rgbCodes.length}/${rgbFrames} alpha=${alphaCodes.length}/${alphaFrames}`);
   }
 
-  const frameCountDelta = Math.abs(rgbFrames - alphaFrames);
+  const delayedReplayEnabled = /^(1|true|yes|on)$/i.test(process.env.ALPHA_RECORDER_GPU_DELAYED_REPLAY ?? "");
+  const expectedAlphaFrameDelta = verifyNleTimeline && !delayedReplayEnabled ? 1 : 0;
+  const frameCountDelta = alphaFrames - rgbFrames;
   const toleratedFrameCountDelta = overloadObserved ? toleratedTerminalFrames : 0;
-  if (frameCountDelta > toleratedFrameCountDelta) {
+  if (
+    verifyNleTimeline
+      ? frameCountDelta !== expectedAlphaFrameDelta
+      : Math.abs(frameCountDelta) > toleratedFrameCountDelta
+  ) {
     throw new Error(
-      `Decoded RGB/alpha frame counts differ beyond tolerance: rgb=${rgbFrames} alpha=${alphaFrames}; ` +
-        `tolerance=${toleratedFrameCountDelta}; ` +
+      `Decoded RGB/alpha frame counts do not match expectation: rgb=${rgbFrames} alpha=${alphaFrames}; ` +
+        `expectedDelta=${expectedAlphaFrameDelta} tolerance=${toleratedFrameCountDelta}; ` +
         `frameCodes=${rgbCodes.length}/${alphaCodes.length}; ` +
         `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
         `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
     );
   }
 
-  if (bestCodeOffset.offset !== 0) {
+  if (bestCodeOffset.offset !== expectedFrameCodeOffset) {
     throw new Error(
-      `RGB/alpha frame-code offset is not zero: offset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `RGB/alpha frame-code offset does not match the expected value: ` +
+        `offset=${bestCodeOffset.offset} expected=${expectedFrameCodeOffset} ` +
+        `matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `mainReorderDepth=${mainReorderDepth}; ` +
         `frames=${rgbFrames}/${alphaFrames}; bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
     );
+  }
+
+  if (verifyNleTimeline) {
+    if (alphaTiming == null || alphaTiming.packetCount !== alphaFrames || alphaTiming.uniqueDurations !== 1 || !alphaTiming.monotonicPts) {
+      throw new Error(
+        `Alpha NLE timeline is not exact CFR: ` +
+          `packets=${alphaTiming?.packetCount ?? 0}/${alphaFrames} ` +
+          `uniqueDurations=${alphaTiming?.uniqueDurations ?? 0} ` +
+          `firstDuration=${alphaTiming?.firstDuration ?? 0} ` +
+          `monotonicPts=${alphaTiming?.monotonicPts ?? false}`,
+      );
+    }
+  }
+
+  if (verifyNleTimeline && !delayedReplayEnabled) {
+    const tailAlphaCode = alphaCodes[alphaFrames - 1];
+    const tailRgbCode = rgbCodes[rgbFrames - 1];
+    const tailAlphaBounds = alphaBounds[alphaFrames - 1];
+    const tailRgbBounds = rgbBounds[rgbFrames - 1];
+    if (tailAlphaCode !== tailRgbCode || !boundsAreSimilar(tailRgbBounds, tailAlphaBounds)) {
+      throw new Error(
+        `Alpha NLE tail duplicate does not match the final RGB frame: ` +
+          `rgbCode=${tailRgbCode} alphaCode=${tailAlphaCode}; ` +
+          `rgbBounds=${boundsText(tailRgbBounds)} alphaBounds=${boundsText(tailAlphaBounds)}`,
+      );
+    }
   }
 
   const rgbTimes = frameTimes(ffprobe, rgbPath);
@@ -1633,7 +1830,10 @@ function verifyRgbAlphaFrameSync(
   const firstMaskBoundsMismatches: string[] = [];
 
   for (let frame = 0; frame < comparedFrames; ++frame) {
-    if (rgbCodes[frame] !== alphaCodes[frame]) {
+    const alphaFrame = frame;
+    const alphaFrameCode = alphaFrame >= 0 && alphaFrame < alphaCodes.length ? alphaCodes[alphaFrame] : undefined;
+    const alphaBound = alphaFrame >= 0 && alphaFrame < alphaBounds.length ? alphaBounds[alphaFrame] : undefined;
+    if (rgbCodes[frame] !== alphaFrameCode) {
       ++frameCodeMismatches;
       if (frame < toleratedBoundaryFrames) {
         ++startFrameCodeMismatches;
@@ -1643,11 +1843,11 @@ function verifyRgbAlphaFrameSync(
         ++interiorFrameCodeMismatches;
       }
       if (firstFrameCodeMismatches.length < toleratedPerFrameMismatches + 1) {
-        firstFrameCodeMismatches.push(`${frame}:${rgbCodes[frame]}/${alphaCodes[frame]}`);
+        firstFrameCodeMismatches.push(`${frame}:${rgbCodes[frame]}/${alphaFrameCode ?? "missing"}@${alphaFrame}`);
       }
     }
 
-    if (!boundsAreSimilar(rgbBounds[frame], alphaBounds[frame])) {
+    if (alphaBound == null || !boundsAreSimilar(rgbBounds[frame], alphaBound)) {
       ++maskBoundsMismatches;
       if (frame < toleratedBoundaryFrames) {
         ++startMaskBoundsMismatches;
@@ -1659,7 +1859,9 @@ function verifyRgbAlphaFrameSync(
       if (firstMaskBoundsMismatches.length < toleratedPerFrameMismatches + 1) {
         const candidates = localCandidateOffsets(rgbBounds, alphaBounds, frame);
         firstMaskBoundsMismatches.push(
-          `${frame}:rgb=${boundsText(rgbBounds[frame])} alpha=${boundsText(alphaBounds[frame])} local=${candidates.length === 0 ? "none" : candidates.join(",")}`,
+          `${frame}:rgb=${boundsText(rgbBounds[frame])} ` +
+            `alpha=${alphaBound == null ? "missing" : boundsText(alphaBound)}@${alphaFrame} ` +
+            `local=${candidates.length === 0 ? "none" : candidates.join(",")}`,
         );
       }
     }
@@ -1728,6 +1930,9 @@ function verifyRgbAlphaFrameSync(
   return {
     rgbFrames,
     alphaFrames,
+    expectedFrameCodeOffset,
+    mainReorderDepth,
+    alphaConstantPacketDuration: alphaTiming?.firstDuration,
     bestFrameCodeOffset: bestCodeOffset,
     bestContentOffset: bestOffset,
     overloadTerminalFrameCodeOffset: overloadObserved ? overloadTerminalFrameCodeOffset : undefined,
@@ -1749,6 +1954,7 @@ async function verifyRecordingOutputs(
   height: number,
   fps: number,
   overloadObserved: boolean,
+  verifyNleTimeline: boolean,
 ): Promise<{ rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any; syncVerification: SyncVerification }> {
   if (!rgbPath) {
     const mkvs = readdirSync(artifactRoot)
@@ -1827,7 +2033,17 @@ async function verifyRecordingOutputs(
     throw new Error(`Alpha movie probe did not report PNG MOV: ${JSON.stringify(alphaProbe)}`);
   }
 
-  const syncVerification = verifyRgbAlphaFrameSync(ffmpeg, ffprobe, rgbPath, alphaPath, width, height, fps, overloadObserved);
+  const syncVerification = verifyRgbAlphaFrameSync(
+    ffmpeg,
+    ffprobe,
+    rgbPath,
+    alphaPath,
+    width,
+    height,
+    fps,
+    overloadObserved,
+    verifyNleTimeline,
+  );
   return { rgbPath, alphaPath, rgbProbe, alphaProbe, syncVerification };
 }
 
@@ -1848,6 +2064,12 @@ async function main(): Promise<void> {
         ? join(homeRoot, ".config", "obs-studio")
         : join(contentRoot, "config", "obs-studio");
   const simpleVideoEncoder = simpleRgbEncoder(args.rgbEncoder);
+  const outputMode = args.outputMode === "advanced-standard" ? "Advanced" : "Simple";
+  if (args.outputMode !== "simple" && args.outputMode !== "advanced-standard") {
+    throw new Error(`Unsupported output mode: ${args.outputMode}`);
+  }
+  const advancedVideoEncoder = advancedRgbEncoder(args.rgbEncoder);
+  const recordAudioEncoder = obsAudioEncoderId(args.recordAudioEncoder);
   if (platform === "darwin") {
     mkdirSync(join(homeRoot, "Library", "Logs", "DiagnosticReports"), { recursive: true });
   }
@@ -1886,7 +2108,7 @@ ConfigOnNewProfile=false
 Name=${profile}
 
 [Output]
-Mode=Simple
+Mode=${outputMode}
 FilenameFormatting=%CCYY-%MM-%DD %hh-%mm-%ss
 
 [AdvOut]
@@ -1894,12 +2116,14 @@ RecType=Standard
 RecFilePath=${artifactRoot.replaceAll("\\", "/")}
 RecFormat2=${args.recordFormat}
 RecTracks=1
-RecEncoder=obs_x264
+RecEncoder=${advancedVideoEncoder}
 Encoder=obs_x264
 ApplyServiceSettings=true
 RecUseRescale=false
 TrackIndex=1
 RecSplitFileType=Time
+AudioEncoder=ffmpeg_aac
+RecAudioEncoder=${recordAudioEncoder}
 
 [SimpleOutput]
 FilePath=${artifactRoot.replaceAll("\\", "/")}
@@ -1914,6 +2138,8 @@ RecRB=false
 RecTracks=1
 StreamEncoder=${simpleVideoEncoder}
 RecEncoder=${simpleVideoEncoder}
+StreamAudioEncoder=aac
+RecAudioEncoder=${args.recordAudioEncoder}
 
 [Video]
 BaseCX=${args.width}
@@ -2209,12 +2435,16 @@ finalization_format=${args.finalizationFormat}
         args.height,
         args.fps,
         args.allowOverload && attempt.overloaded,
+        args.verifyNleTimeline,
       );
       attempts.push({ ...attempt, ...outputs });
       console.log(
         `  ok ${label} ${durationSeconds}s: rgb=${outputs.syncVerification.rgbFrames} alpha=${outputs.syncVerification.alphaFrames} ` +
           `overloaded=${attempt.overloaded} ` +
           `frameCodeOffset=${outputs.syncVerification.bestFrameCodeOffset.offset} ` +
+          `expectedFrameCodeOffset=${outputs.syncVerification.expectedFrameCodeOffset} ` +
+          `mainReorderDepth=${outputs.syncVerification.mainReorderDepth} ` +
+          `alphaConstantPacketDuration=${outputs.syncVerification.alphaConstantPacketDuration ?? "n/a"} ` +
           `contentOffset=${outputs.syncVerification.bestContentOffset.offset} ` +
           `mismatches=${outputs.syncVerification.frameCodeMismatches}/${outputs.syncVerification.maskBoundsMismatches}`,
       );
@@ -2238,6 +2468,9 @@ finalization_format=${args.finalizationFormat}
             preset: args.hevcPreset,
             nvencTune: args.hevcNvencTune,
             gopSize: args.hevcGopSize,
+          },
+          nleTimeline: {
+            verify: args.verifyNleTimeline,
           },
           width: args.width,
           height: args.height,

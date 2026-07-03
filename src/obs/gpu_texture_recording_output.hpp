@@ -57,6 +57,12 @@ namespace alpha_recorder::obs
     void gpu_texture_recording_output_set_main_texture_encoded(obs_output_t *output,
                                                                bool main_texture_encoded) noexcept;
 
+    [[nodiscard]] bool gpu_texture_recording_output_begin_delayed_replay(
+        obs_output_t *output,
+        std::uint64_t main_first_packet_cts,
+        bool main_texture_encoded,
+        std::string *error_message = nullptr) noexcept;
+
     [[nodiscard]] bool gpu_texture_recording_output_wait_deactivated(
         obs_output_t *output,
         std::uint32_t timeout_ms,

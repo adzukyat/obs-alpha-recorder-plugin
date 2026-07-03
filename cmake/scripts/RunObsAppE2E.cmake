@@ -16,6 +16,8 @@ set(WIDTH 1920 CACHE STRING "Canvas width")
 set(HEIGHT 1080 CACHE STRING "Canvas height")
 set(FPS 60 CACHE STRING "Recording FPS")
 set(RECORD_FORMAT "mkv" CACHE STRING "OBS recording container format")
+set(OUTPUT_MODE "simple" CACHE STRING "OBS output mode for E2E: simple or advanced-standard")
+set(RECORD_AUDIO_ENCODER "aac" CACHE STRING "OBS recording audio encoder for E2E: aac or pcm_s16le")
 set(WITH_AUDIO OFF CACHE BOOL "Add a deterministic audio source to the OBS app E2E scene")
 set(RGB_ENCODER "software" CACHE STRING "RGB recording encoder profile: software, apple_hevc, nvenc_hevc, or amd_hevc")
 set(FINALIZATION_FORMAT "mask_png_mov" CACHE STRING "Alpha Recorder finalization format")
@@ -28,6 +30,7 @@ set(SKIP_BUILD OFF CACHE BOOL "Skip plugin build before OBS app E2E")
 set(SKIP_STAGE OFF CACHE BOOL "Skip staging before OBS app E2E")
 set(KEEP_OBS_OPEN OFF CACHE BOOL "Keep OBS open after the E2E run")
 set(ALLOW_OVERLOAD OFF CACHE BOOL "Continue OBS app E2E after OBS reports overload")
+set(VERIFY_NLE_TIMELINE OFF CACHE BOOL "Verify alpha MP4 uses an NLE-friendly exact-CFR timeline with a duplicate tail sample")
 
 alpha_recorder_abs_path(REPO_ROOT "${REPO_ROOT}" "${CMAKE_CURRENT_LIST_DIR}")
 alpha_recorder_abs_path(BUILD_DIR "${BUILD_DIR}" "${REPO_ROOT}")
@@ -101,6 +104,8 @@ set(args
     "--height" "${HEIGHT}"
     "--fps" "${FPS}"
     "--record-format" "${RECORD_FORMAT}"
+    "--output-mode" "${OUTPUT_MODE}"
+    "--record-audio-encoder" "${RECORD_AUDIO_ENCODER}"
     "--rgb-encoder" "${RGB_ENCODER}"
     "--finalization-format" "${FINALIZATION_FORMAT}"
     "--hevc-quality-profile" "${HEVC_QUALITY_PROFILE}"
@@ -114,6 +119,9 @@ if(KEEP_OBS_OPEN)
 endif()
 if(ALLOW_OVERLOAD)
     list(APPEND args "--allow-overload")
+endif()
+if(VERIFY_NLE_TIMELINE)
+    list(APPEND args "--verify-nle-timeline")
 endif()
 if(WITH_AUDIO)
     list(APPEND args "--with-audio")
