@@ -221,6 +221,46 @@ int main()
         input.fps_num = 1;
         input.fps_den = 1;
         input.main_packets = {
+            main_packet(0, 1000, 0, 1, 1),
+            main_packet(1, 2000, 1, 1, 1),
+            main_packet(2, 3000, 2, 1, 1),
+            main_packet(3, 4000, 3, 1, 1),
+            main_packet(4, 5000, 4, 1, 1),
+        };
+        input.alpha_packets = {
+            alpha_packet(0, 1000, 0, 0, 1, 1),
+            alpha_packet(1, 2000, 1, 1, 1, 1),
+            alpha_packet(2, 3000, 1, 2, 1, 1),
+            alpha_packet(3, 4000, 1, 3, 1, 1),
+            alpha_packet(4, 5000, 2, 4, 1, 1),
+        };
+        input.alpha_renders = {
+            render(0, 1000, 0),
+            render(1, 2000, 1),
+            render(2, 5000, 2),
+        };
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (result.error != alpha_recorder::obs::TimelineSolveError::None ||
+            result.solution.range.media_time != 0 ||
+            result.solution.range.duration != 5)
+        {
+            std::cerr << "repeated main texture generation solve failed: "
+                      << alpha_recorder::obs::timeline_solve_error_name(result.error)
+                      << " media_time=" << result.solution.range.media_time
+                      << " duration=" << result.solution.range.duration << '\n';
+            return 17;
+        }
+    }
+
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.fps_num = 1;
+        input.fps_den = 1;
+        input.main_packets = {
             main_packet(0, 4000, 0, 1, 1),
             main_packet(1, 5000, 1, 1, 1),
             main_packet(2, 6000, 2, 1, 1),

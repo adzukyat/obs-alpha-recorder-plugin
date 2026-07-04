@@ -2060,8 +2060,13 @@ namespace
         {
             std::string error_message;
             obs_output_t *delayed_replay_output = nullptr;
+            std::int64_t delayed_replay_main_pts = 0;
             std::uint64_t delayed_replay_main_cts = 0U;
             bool delayed_replay_main_texture_encoded = false;
+            obs_output_t *cts_replay_output = nullptr;
+            std::int64_t cts_replay_main_pts = 0;
+            std::uint64_t cts_replay_main_cts = 0U;
+            bool cts_replay_main_texture_encoded = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (output != recording_output_ || packet == nullptr || packet->type != OBS_ENCODER_VIDEO ||
@@ -2085,8 +2090,16 @@ namespace
                         gpu_main_first_packet_cts_ != 0U)
                     {
                         delayed_replay_output = obs_output_get_ref(gpu_texture_output_);
-                        delayed_replay_main_cts = gpu_main_first_packet_cts_;
+                        delayed_replay_main_pts = packet->pts;
+                        delayed_replay_main_cts = packet_time->cts;
                         delayed_replay_main_texture_encoded = recording_texture_encoded_;
+                    }
+                    else if (gpu_texture_delayed_replay_started_ && gpu_texture_output_ != nullptr)
+                    {
+                        cts_replay_output = obs_output_get_ref(gpu_texture_output_);
+                        cts_replay_main_pts = packet->pts;
+                        cts_replay_main_cts = packet_time->cts;
+                        cts_replay_main_texture_encoded = recording_texture_encoded_;
                     }
                 }
                 else
@@ -2106,6 +2119,7 @@ namespace
                 const bool replay_started =
                     alpha_recorder::obs::gpu_texture_recording_output_begin_delayed_replay(
                         delayed_replay_output,
+                        delayed_replay_main_pts,
                         delayed_replay_main_cts,
                         delayed_replay_main_texture_encoded,
                         &replay_error);
@@ -2120,6 +2134,23 @@ namespace
                     alpha_recorder::obs::append_diagnostic_log_line(
                         "Alpha Recorder GPU delayed replay not started yet: reason=\"" +
                         replay_error + "\" main_cts=\"" + std::to_string(delayed_replay_main_cts) + "\"");
+                }
+            }
+            if (cts_replay_output != nullptr)
+            {
+                std::string replay_error;
+                (void)alpha_recorder::obs::gpu_texture_recording_output_queue_main_packet_replay(
+                    cts_replay_output,
+                    cts_replay_main_pts,
+                    cts_replay_main_cts,
+                    cts_replay_main_texture_encoded,
+                    &replay_error);
+                obs_output_release(cts_replay_output);
+                if (!replay_error.empty() && settings_.diagnostic_logging)
+                {
+                    alpha_recorder::obs::append_diagnostic_log_line(
+                        "Alpha Recorder GPU CTS replay packet was not queued: reason=\"" +
+                        replay_error + "\" main_cts=\"" + std::to_string(cts_replay_main_cts) + "\"");
                 }
             }
         }

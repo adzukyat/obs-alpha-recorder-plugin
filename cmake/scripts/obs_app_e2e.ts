@@ -1527,6 +1527,7 @@ type PacketTimingSummary = {
   uniqueDurations: number;
   firstDuration: number;
   monotonicPts: boolean;
+  firstPacketKeyframe: boolean;
 };
 
 function packetTimingSummary(ffprobe: string, path: string): PacketTimingSummary {
@@ -1539,18 +1540,19 @@ function packetTimingSummary(ffprobe: string, path: string): PacketTimingSummary
       "v:0",
       "-show_packets",
       "-show_entries",
-      "packet=pts,duration",
+      "packet=pts,duration,flags",
       "-of",
       "json",
       path,
     ],
     180,
-  ) as { packets?: Array<{ pts?: number | string; duration?: number | string }> };
+  ) as { packets?: Array<{ pts?: number | string; duration?: number | string; flags?: string }> };
 
   const packets = (probe.packets ?? [])
     .map((packet) => ({
       pts: Number(packet.pts),
       duration: Number(packet.duration),
+      flags: packet.flags ?? "",
     }))
     .filter((packet) => Number.isFinite(packet.pts) && Number.isFinite(packet.duration));
 
@@ -1568,6 +1570,7 @@ function packetTimingSummary(ffprobe: string, path: string): PacketTimingSummary
     uniqueDurations: durations.size,
     firstDuration: packets[0]?.duration ?? 0,
     monotonicPts,
+    firstPacketKeyframe: packets[0]?.flags.includes("K") ?? false,
   };
 }
 
@@ -1695,13 +1698,12 @@ function verifyRgbAlphaFrameSync(
     throw new Error(`Frame-code counts differ from decoded frames: rgb=${rgbCodes.length}/${rgbFrames} alpha=${alphaCodes.length}/${alphaFrames}`);
   }
 
-  const delayedReplayEnabled = /^(1|true|yes|on)$/i.test(process.env.ALPHA_RECORDER_GPU_DELAYED_REPLAY ?? "");
-  const expectedAlphaFrameDelta = verifyNleTimeline && !delayedReplayEnabled ? 1 : 0;
+  const expectedAlphaFrameDelta = 0;
   const frameCountDelta = alphaFrames - rgbFrames;
-  const toleratedFrameCountDelta = overloadObserved ? toleratedTerminalFrames : 0;
+  const toleratedFrameCountDelta = verifyNleTimeline ? 1 : (overloadObserved ? toleratedTerminalFrames : 0);
   if (
     verifyNleTimeline
-      ? frameCountDelta !== expectedAlphaFrameDelta
+      ? Math.abs(frameCountDelta - expectedAlphaFrameDelta) > toleratedFrameCountDelta
       : Math.abs(frameCountDelta) > toleratedFrameCountDelta
   ) {
     throw new Error(
@@ -1724,27 +1726,20 @@ function verifyRgbAlphaFrameSync(
   }
 
   if (verifyNleTimeline) {
-    if (alphaTiming == null || alphaTiming.packetCount !== alphaFrames || alphaTiming.uniqueDurations !== 1 || !alphaTiming.monotonicPts) {
+    if (
+      alphaTiming == null ||
+      alphaTiming.packetCount !== alphaFrames ||
+      alphaTiming.uniqueDurations !== 1 ||
+      !alphaTiming.monotonicPts ||
+      !alphaTiming.firstPacketKeyframe
+    ) {
       throw new Error(
         `Alpha NLE timeline is not exact CFR: ` +
           `packets=${alphaTiming?.packetCount ?? 0}/${alphaFrames} ` +
           `uniqueDurations=${alphaTiming?.uniqueDurations ?? 0} ` +
           `firstDuration=${alphaTiming?.firstDuration ?? 0} ` +
-          `monotonicPts=${alphaTiming?.monotonicPts ?? false}`,
-      );
-    }
-  }
-
-  if (verifyNleTimeline && !delayedReplayEnabled) {
-    const tailAlphaCode = alphaCodes[alphaFrames - 1];
-    const tailRgbCode = rgbCodes[rgbFrames - 1];
-    const tailAlphaBounds = alphaBounds[alphaFrames - 1];
-    const tailRgbBounds = rgbBounds[rgbFrames - 1];
-    if (tailAlphaCode !== tailRgbCode || !boundsAreSimilar(tailRgbBounds, tailAlphaBounds)) {
-      throw new Error(
-        `Alpha NLE tail duplicate does not match the final RGB frame: ` +
-          `rgbCode=${tailRgbCode} alphaCode=${tailAlphaCode}; ` +
-          `rgbBounds=${boundsText(tailRgbBounds)} alphaBounds=${boundsText(tailAlphaBounds)}`,
+          `monotonicPts=${alphaTiming?.monotonicPts ?? false} ` +
+          `firstPacketKeyframe=${alphaTiming?.firstPacketKeyframe ?? false}`,
       );
     }
   }

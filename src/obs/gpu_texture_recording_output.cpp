@@ -34,8 +34,9 @@ namespace
     constexpr const char *kSourceName = "Alpha Recorder Program Alpha";
     constexpr const char *kDefaultEncoderId = "obs_nvenc_hevc_tex";
     constexpr std::size_t kPhaseTextureCount = 2U;
-    constexpr std::size_t kDefaultReplayTextureCount = 32U;
+    constexpr std::size_t kDefaultReplayTextureCount = 64U;
     constexpr std::size_t kMaxReplayTextureCount = 128U;
+    constexpr std::size_t kDefaultCtsReplayPrebuffer = 16U;
 
     enum class TextureHevcBackend
     {
@@ -128,6 +129,12 @@ technique DrawRed
         std::uint64_t next_generation = 0U;
     };
 
+    struct ReplayGenerationEntry
+    {
+        std::int64_t pts = 0;
+        std::uint64_t generation = 0U;
+    };
+
     struct GpuTextureRecordingOutputContext
     {
         obs_output_t *output = nullptr;
@@ -165,13 +172,23 @@ technique DrawRed
         std::uint64_t stop_ts_ns = 0U;
         bool has_stop_ts = false;
         bool delayed_replay_enabled = false;
+        bool replay_cts_driven_enabled = false;
         std::size_t replay_texture_count = kPhaseTextureCount;
         bool data_capture_started = false;
         bool replay_configured = false;
         std::uint64_t replay_target_generation = 0U;
         std::uint64_t replay_next_generation = 0U;
         std::uint64_t replay_main_cts = 0U;
+        std::uint64_t replay_consume_start_render_time = 0U;
         std::uint64_t replay_emitted_frames = 0U;
+        std::vector<ReplayGenerationEntry> replay_generation_queue{};
+        std::vector<ReplayGenerationEntry> replay_packet_generations{};
+        std::int64_t replay_next_packet_pts = 0;
+        bool replay_has_next_packet_pts = false;
+        std::uint64_t replay_consumed_entries = 0U;
+        std::uint64_t replay_last_emitted_generation = 0U;
+        bool replay_has_last_emitted_generation = false;
+        std::uint64_t replay_queue_underflows = 0U;
     };
 
     std::mutex g_contexts_mutex;
@@ -191,19 +208,6 @@ technique DrawRed
         {
             *error_message = message;
         }
-    }
-
-    bool env_flag_enabled(const char *name) noexcept
-    {
-        const char *value = std::getenv(name);
-        if (value == nullptr || *value == '\0')
-        {
-            return false;
-        }
-
-        const std::string_view text{value};
-        return text != "0" && text != "false" && text != "False" && text != "FALSE" &&
-               text != "off" && text != "Off" && text != "OFF";
     }
 
     std::size_t env_size_value(const char *name, std::size_t fallback) noexcept
@@ -465,6 +469,20 @@ technique DrawRed
         }
 
         return context.fps_num == 0U ? 30U : context.fps_num;
+    }
+
+    std::uint64_t configured_frame_interval_ns(const GpuTextureRecordingOutputContext &context) noexcept
+    {
+        const std::uint32_t fps_num = context.fps_num == 0U ? 30U : context.fps_num;
+        const std::uint32_t fps_den = context.fps_den == 0U ? 1U : context.fps_den;
+        if (fps_num == 0U)
+        {
+            return 33333333ULL;
+        }
+        return std::max<std::uint64_t>(
+            1ULL,
+            (1000000000ULL * static_cast<std::uint64_t>(fps_den)) /
+                static_cast<std::uint64_t>(fps_num));
     }
 
     std::uint32_t configured_keyint_seconds(const GpuTextureRecordingOutputContext &context) noexcept
@@ -804,6 +822,50 @@ technique DrawRed
         return found == records.end() ? nullptr : &*found;
     }
 
+    ReplayGenerationEntry *find_replay_generation_by_pts(
+        std::vector<ReplayGenerationEntry> &records,
+        std::int64_t pts) noexcept
+    {
+        const auto found = std::find_if(records.begin(), records.end(),
+                                        [pts](const ReplayGenerationEntry &record) {
+                                            return record.pts == pts;
+                                        });
+        return found == records.end() ? nullptr : &*found;
+    }
+
+    void remember_replay_packet_generation(GpuTextureRecordingOutputContext &context,
+                                           std::int64_t pts,
+                                           std::uint64_t generation) noexcept
+    {
+        ReplayGenerationEntry *record =
+            find_replay_generation_by_pts(context.replay_packet_generations, pts);
+        if (record == nullptr)
+        {
+            context.replay_packet_generations.push_back(ReplayGenerationEntry{pts, generation});
+            return;
+        }
+        record->generation = generation;
+    }
+
+    void merge_replay_packet_generation(GpuTextureRecordingOutputContext &context,
+                                        alpha_recorder::obs::GpuTexturePacketRecord &record) noexcept
+    {
+        if (!context.delayed_replay_enabled || !context.replay_cts_driven_enabled)
+        {
+            return;
+        }
+        ReplayGenerationEntry *generation =
+            find_replay_generation_by_pts(context.replay_packet_generations, record.pts);
+        if (generation == nullptr)
+        {
+            return;
+        }
+        record.input_generation = generation->generation;
+        record.emitted_generation = generation->generation;
+        record.has_generation = true;
+        record.ambiguous_generation = false;
+    }
+
     void merge_packet_fields(alpha_recorder::obs::GpuTexturePacketRecord &record,
                              const encoder_packet &packet) noexcept
     {
@@ -844,6 +906,29 @@ technique DrawRed
         return match;
     }
 
+    const alpha_recorder::obs::ProgramRenderRecord *find_render_record_at_or_before_cts(
+        const std::vector<alpha_recorder::obs::ProgramRenderRecord> &records,
+        std::uint64_t cts,
+        std::uint64_t tolerance_ns) noexcept
+    {
+        const alpha_recorder::obs::ProgramRenderRecord *match = nullptr;
+        const std::uint64_t upper_bound = cts > std::numeric_limits<std::uint64_t>::max() - tolerance_ns
+                                              ? std::numeric_limits<std::uint64_t>::max()
+                                              : cts + tolerance_ns;
+        for (const alpha_recorder::obs::ProgramRenderRecord &record : records)
+        {
+            if (record.render_time_ns == 0U || record.render_time_ns > upper_bound)
+            {
+                continue;
+            }
+            if (match == nullptr || record.render_time_ns > match->render_time_ns)
+            {
+                match = &record;
+            }
+        }
+        return match;
+    }
+
     bool main_generation_for_render(const alpha_recorder::obs::ProgramRenderRecord &record,
                                     alpha_recorder::obs::MainContentPhase phase,
                                     std::uint64_t &generation) noexcept
@@ -858,6 +943,62 @@ technique DrawRed
             return false;
         }
         generation = record.generation - 1U;
+        return true;
+    }
+
+    bool queue_main_packet_replay_generation_locked(GpuTextureRecordingOutputContext &context,
+                                                    std::int64_t main_packet_pts,
+                                                    std::uint64_t main_packet_cts,
+                                                    bool main_texture_encoded,
+                                                    std::uint64_t &target_generation,
+                                                    std::uint64_t &latest_generation,
+                                                    std::string *error_message) noexcept
+    {
+        const alpha_recorder::obs::MainContentPhase phase =
+            main_texture_encoded ? alpha_recorder::obs::MainContentPhase::LiveProgramGeneration
+                                 : alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
+        context.main_phase = phase;
+
+        const alpha_recorder::obs::ProgramRenderRecord *render =
+            find_render_record_at_or_before_cts(context.alpha_render_records, main_packet_cts, 10000U);
+        if (render == nullptr)
+        {
+            assign_error(error_message,
+                         "Alpha Recorder GPU delayed replay is waiting for a render generation for the main packet");
+            return false;
+        }
+        if (!main_generation_for_render(*render, phase, target_generation))
+        {
+            assign_error(error_message,
+                         "Alpha Recorder GPU delayed replay cannot represent the main packet generation");
+            return false;
+        }
+
+        latest_generation = context.alpha_render_records.empty()
+                                ? render->generation
+                                : context.alpha_render_records.back().generation;
+        if (latest_generation >= target_generation &&
+            latest_generation - target_generation + 1U >= context.replay_texture_count)
+        {
+            assign_error(error_message,
+                         "Alpha Recorder GPU delayed replay ring no longer contains a main packet generation");
+            return false;
+        }
+
+        const auto duplicate = std::find_if(context.replay_generation_queue.begin(),
+                                            context.replay_generation_queue.end(),
+                                            [main_packet_pts](const ReplayGenerationEntry &entry) {
+                                                return entry.pts == main_packet_pts;
+                                            });
+        if (duplicate == context.replay_generation_queue.end())
+        {
+            context.replay_generation_queue.push_back(ReplayGenerationEntry{main_packet_pts, target_generation});
+        }
+        if (!context.replay_has_next_packet_pts || main_packet_pts < context.replay_next_packet_pts)
+        {
+            context.replay_next_packet_pts = main_packet_pts;
+            context.replay_has_next_packet_pts = true;
+        }
         return true;
     }
 
@@ -923,6 +1064,10 @@ technique DrawRed
         bool replay_configured = false;
         bool data_capture_started = false;
         std::uint64_t replay_next_generation = 0U;
+        bool replay_cts_driven = false;
+        bool replay_used_queued_generation = false;
+        std::int64_t replay_queued_pts = 0;
+        bool replay_before_consume_start = false;
         if (source->context != nullptr)
         {
             std::lock_guard<std::mutex> lock(source->context->mutex);
@@ -931,7 +1076,41 @@ technique DrawRed
             delayed_replay = source->context->delayed_replay_enabled;
             replay_configured = source->context->replay_configured;
             data_capture_started = source->context->data_capture_started;
-            replay_next_generation = source->context->replay_next_generation;
+            replay_cts_driven = source->context->replay_cts_driven_enabled;
+            if (replay_cts_driven && replay_configured && data_capture_started)
+            {
+                replay_before_consume_start =
+                    source->context->replay_consume_start_render_time != 0U &&
+                    render_time < source->context->replay_consume_start_render_time;
+                auto entry = source->context->replay_has_next_packet_pts
+                                 ? std::find_if(source->context->replay_generation_queue.begin(),
+                                                source->context->replay_generation_queue.end(),
+                                                [source](const ReplayGenerationEntry &candidate) {
+                                                    return candidate.pts ==
+                                                           source->context->replay_next_packet_pts;
+                                                })
+                                 : source->context->replay_generation_queue.end();
+                if (entry != source->context->replay_generation_queue.end())
+                {
+                    replay_queued_pts = entry->pts;
+                    replay_next_generation = entry->generation;
+                    replay_used_queued_generation = !replay_before_consume_start;
+                }
+                else if (source->context->replay_has_last_emitted_generation)
+                {
+                    replay_next_generation = source->context->replay_last_emitted_generation;
+                    ++source->context->replay_queue_underflows;
+                }
+                else
+                {
+                    replay_next_generation = source->context->replay_next_generation;
+                    ++source->context->replay_queue_underflows;
+                }
+            }
+            else
+            {
+                replay_next_generation = source->context->replay_next_generation;
+            }
         }
         bool emitted = true;
         std::uint64_t emitted_generation = generation;
@@ -979,8 +1158,46 @@ technique DrawRed
         if (replay_emitted && data_capture_started && source->context != nullptr)
         {
             std::lock_guard<std::mutex> lock(source->context->mutex);
-            if (source->context->replay_configured &&
-                source->context->replay_next_generation == emitted_generation)
+            if (source->context->replay_configured && source->context->replay_cts_driven_enabled)
+            {
+                if (replay_used_queued_generation)
+                {
+                    auto entry = std::find_if(source->context->replay_generation_queue.begin(),
+                                              source->context->replay_generation_queue.end(),
+                                              [replay_queued_pts, emitted_generation](const ReplayGenerationEntry &candidate) {
+                                                  return candidate.pts == replay_queued_pts &&
+                                                         candidate.generation == emitted_generation;
+                                              });
+                    if (entry != source->context->replay_generation_queue.end())
+                    {
+                        source->context->replay_generation_queue.erase(entry);
+                        ++source->context->replay_consumed_entries;
+                    }
+                    remember_replay_packet_generation(*source->context,
+                                                      replay_queued_pts,
+                                                      emitted_generation);
+                    if (source->context->replay_generation_queue.empty())
+                    {
+                        source->context->replay_has_next_packet_pts = false;
+                    }
+                    else
+                    {
+                        const auto next = std::min_element(
+                            source->context->replay_generation_queue.begin(),
+                            source->context->replay_generation_queue.end(),
+                            [](const ReplayGenerationEntry &lhs, const ReplayGenerationEntry &rhs) {
+                                return lhs.pts < rhs.pts;
+                            });
+                        source->context->replay_next_packet_pts = next->pts;
+                        source->context->replay_has_next_packet_pts = true;
+                    }
+                }
+                source->context->replay_last_emitted_generation = emitted_generation;
+                source->context->replay_has_last_emitted_generation = true;
+                ++source->context->replay_emitted_frames;
+            }
+            else if (source->context->replay_configured &&
+                     source->context->replay_next_generation == emitted_generation)
             {
                 ++source->context->replay_next_generation;
                 ++source->context->replay_emitted_frames;
@@ -1108,14 +1325,13 @@ technique DrawRed
         context->main_phase = obs_data_get_bool(settings, "main_texture_encoded")
                                    ? alpha_recorder::obs::MainContentPhase::LiveProgramGeneration
                                    : alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
-        context->delayed_replay_enabled = env_flag_enabled("ALPHA_RECORDER_GPU_DELAYED_REPLAY");
+        context->delayed_replay_enabled = true;
+        context->replay_cts_driven_enabled = true;
         context->replay_texture_count =
-            context->delayed_replay_enabled
-                ? std::clamp(env_size_value("ALPHA_RECORDER_GPU_REPLAY_RING_FRAMES",
-                                            kDefaultReplayTextureCount),
-                             kPhaseTextureCount,
-                             kMaxReplayTextureCount)
-                : kPhaseTextureCount;
+            std::clamp(env_size_value("ALPHA_RECORDER_GPU_REPLAY_RING_FRAMES",
+                                      kDefaultReplayTextureCount),
+                       kPhaseTextureCount,
+                       kMaxReplayTextureCount);
     }
 
     void *gpu_texture_recording_create(obs_data_t *settings, obs_output_t *output)
@@ -1379,6 +1595,7 @@ technique DrawRed
             merge_packet_fields(*record, *packet);
             record->input_cts = packet_time->cts;
             record->has_input_cts = true;
+            merge_replay_packet_generation(*context, *record);
         }
     }
 
@@ -1468,7 +1685,16 @@ technique DrawRed
             context->replay_target_generation = 0U;
             context->replay_next_generation = 0U;
             context->replay_main_cts = 0U;
+            context->replay_consume_start_render_time = 0U;
             context->replay_emitted_frames = 0U;
+            context->replay_generation_queue.clear();
+            context->replay_packet_generations.clear();
+            context->replay_next_packet_pts = 0;
+            context->replay_has_next_packet_pts = false;
+            context->replay_consumed_entries = 0U;
+            context->replay_last_emitted_generation = 0U;
+            context->replay_has_last_emitted_generation = false;
+            context->replay_queue_underflows = 0U;
         }
 
         std::string error_message;
@@ -1556,7 +1782,7 @@ technique DrawRed
         }
 
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u preset=%s tune=%s split=%s gpu=%d phase=%s delayed_replay=%s replay_ring=%zu",
+             "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u preset=%s tune=%s split=%s gpu=%d phase=%s delayed_replay=%s cts_driven_replay=%s replay_ring=%zu",
              context->path.generic_string().c_str(),
              context->encoder_id.c_str(),
              backend_name(backend_for_encoder_id(context->encoder_id)),
@@ -1576,6 +1802,7 @@ technique DrawRed
                  ? "live"
                  : "previous",
              context->delayed_replay_enabled ? "true" : "false",
+             context->replay_cts_driven_enabled ? "true" : "false",
              context->replay_texture_count);
         obs_output_set_last_error(context->output, nullptr);
         return true;
@@ -1650,6 +1877,7 @@ technique DrawRed
         }
 
         merge_packet_fields(*record, *packet);
+        merge_replay_packet_generation(*context, *record);
         std::string error_message;
         if (!context->sink.submit_packet(packet, &error_message) && !error_message.empty())
         {
@@ -1943,6 +2171,7 @@ namespace alpha_recorder::obs
     }
 
     bool gpu_texture_recording_output_begin_delayed_replay(obs_output_t *output,
+                                                           std::int64_t main_first_packet_pts,
                                                            std::uint64_t main_first_packet_cts,
                                                            bool main_texture_encoded,
                                                            std::string *error_message) noexcept
@@ -1960,6 +2189,9 @@ namespace alpha_recorder::obs
 
         std::uint64_t target_generation = 0U;
         std::uint64_t latest_generation = 0U;
+        bool cts_driven = false;
+        const std::size_t cts_replay_prebuffer =
+            env_size_value("ALPHA_RECORDER_GPU_CTS_REPLAY_PREBUFFER", kDefaultCtsReplayPrebuffer);
         {
             std::lock_guard<std::mutex> lock(context->mutex);
             if (context->data_capture_started)
@@ -1972,36 +2204,75 @@ namespace alpha_recorder::obs
                                      : alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
             context->main_phase = phase;
 
-            const alpha_recorder::obs::ProgramRenderRecord *render =
-                find_render_record_by_cts(context->alpha_render_records, main_first_packet_cts, 10000U);
-            if (render == nullptr)
+            cts_driven = context->replay_cts_driven_enabled;
+            if (cts_driven)
             {
-                assign_error(error_message,
-                             "Alpha Recorder GPU delayed replay is waiting for the main first-frame generation");
-                return false;
+                if (!queue_main_packet_replay_generation_locked(*context,
+                                                                main_first_packet_pts,
+                                                                main_first_packet_cts,
+                                                                main_texture_encoded,
+                                                                target_generation,
+                                                                latest_generation,
+                                                                error_message))
+                {
+                    return false;
+                }
+                context->replay_configured = true;
+                const auto first_entry = std::min_element(
+                    context->replay_generation_queue.begin(),
+                    context->replay_generation_queue.end(),
+                    [](const ReplayGenerationEntry &lhs, const ReplayGenerationEntry &rhs) {
+                        return lhs.pts < rhs.pts;
+                    });
+                context->replay_target_generation = first_entry == context->replay_generation_queue.end()
+                                                        ? target_generation
+                                                        : first_entry->generation;
+                context->replay_next_generation = context->replay_target_generation;
+                context->replay_main_cts = main_first_packet_cts;
+                if (context->replay_generation_queue.size() <
+                    std::max<std::size_t>(1U, cts_replay_prebuffer))
+                {
+                    assign_error(error_message,
+                                 "Alpha Recorder GPU delayed replay is waiting for the CTS replay prebuffer");
+                    return false;
+                }
             }
-            if (!main_generation_for_render(*render, phase, target_generation))
+            else
             {
-                assign_error(error_message,
-                             "Alpha Recorder GPU delayed replay cannot represent the first main generation");
-                return false;
-            }
+                const alpha_recorder::obs::ProgramRenderRecord *render =
+                    find_render_record_by_cts(context->alpha_render_records, main_first_packet_cts, 10000U);
+                if (render == nullptr)
+                {
+                    assign_error(error_message,
+                                 "Alpha Recorder GPU delayed replay is waiting for the main first-frame generation");
+                    return false;
+                }
+                if (!main_generation_for_render(*render, phase, target_generation))
+                {
+                    assign_error(error_message,
+                                 "Alpha Recorder GPU delayed replay cannot represent the first main generation");
+                    return false;
+                }
 
-            latest_generation = context->alpha_render_records.empty()
-                                    ? render->generation
-                                    : context->alpha_render_records.back().generation;
-            if (latest_generation >= target_generation &&
-                latest_generation - target_generation + 1U >= context->replay_texture_count)
-            {
-                assign_error(error_message,
-                             "Alpha Recorder GPU delayed replay ring no longer contains the first main generation");
-                return false;
+                latest_generation = context->alpha_render_records.empty()
+                                        ? render->generation
+                                        : context->alpha_render_records.back().generation;
+                if (latest_generation >= target_generation &&
+                    latest_generation - target_generation + 1U >= context->replay_texture_count)
+                {
+                    assign_error(error_message,
+                                 "Alpha Recorder GPU delayed replay ring no longer contains the first main generation");
+                    return false;
+                }
             }
 
             context->replay_configured = true;
-            context->replay_target_generation = target_generation;
-            context->replay_next_generation = target_generation;
-            context->replay_main_cts = main_first_packet_cts;
+            if (!cts_driven)
+            {
+                context->replay_target_generation = target_generation;
+                context->replay_next_generation = target_generation;
+                context->replay_main_cts = main_first_packet_cts;
+            }
             context->replay_emitted_frames = 0U;
         }
 
@@ -2024,18 +2295,80 @@ namespace alpha_recorder::obs
         {
             std::lock_guard<std::mutex> lock(context->mutex);
             context->data_capture_started = true;
+            const std::uint64_t frame_interval_ns = configured_frame_interval_ns(*context);
+            const std::uint64_t current_video_time = obs_get_video_frame_time();
+            context->replay_consume_start_render_time =
+                cts_driven ? current_video_time + frame_interval_ns : 0U;
             context->start_total_frames = obs_get_total_frames();
             context->start_lagged_frames = obs_get_lagged_frames();
             context->state_cv.notify_all();
         }
 
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] delayed replay capture started main_cts=%llu target_generation=%llu latest_generation=%llu replay_ring=%zu phase=%s",
+             "[alpha_recorder_gpu_texture] delayed replay capture started main_cts=%llu target_generation=%llu latest_generation=%llu replay_ring=%zu phase=%s cts_driven=%s consume_start_render_time=%llu",
              static_cast<unsigned long long>(main_first_packet_cts),
              static_cast<unsigned long long>(target_generation),
              static_cast<unsigned long long>(latest_generation),
              context->replay_texture_count,
-             main_texture_encoded ? "live" : "previous");
+             main_texture_encoded ? "live" : "previous",
+             cts_driven ? "true" : "false",
+             static_cast<unsigned long long>(context->replay_consume_start_render_time));
+        return true;
+    }
+
+    bool gpu_texture_recording_output_queue_main_packet_replay(obs_output_t *output,
+                                                               std::int64_t main_packet_pts,
+                                                               std::uint64_t main_packet_cts,
+                                                               bool main_texture_encoded,
+                                                               std::string *error_message) noexcept
+    {
+        GpuTextureRecordingOutputContext *context = find_context(output);
+        if (context == nullptr)
+        {
+            assign_error(error_message, "Alpha Recorder GPU texture output context is unavailable");
+            return false;
+        }
+        if (!context->delayed_replay_enabled || !context->replay_cts_driven_enabled)
+        {
+            return true;
+        }
+
+        std::uint64_t target_generation = 0U;
+        std::uint64_t latest_generation = 0U;
+        std::uint64_t queued = 0U;
+        std::uint64_t consumed = 0U;
+        {
+            std::lock_guard<std::mutex> lock(context->mutex);
+            if (!context->replay_configured)
+            {
+                assign_error(error_message,
+                             "Alpha Recorder GPU delayed replay has not been configured yet");
+                return false;
+            }
+            if (!queue_main_packet_replay_generation_locked(*context,
+                                                            main_packet_pts,
+                                                            main_packet_cts,
+                                                            main_texture_encoded,
+                                                            target_generation,
+                                                            latest_generation,
+                                                            error_message))
+            {
+                return false;
+            }
+            queued = static_cast<std::uint64_t>(context->replay_generation_queue.size());
+            consumed = context->replay_consumed_entries;
+        }
+
+        if ((queued <= 8U) || ((queued % 300U) == 0U))
+        {
+            blog(LOG_INFO,
+                 "[alpha_recorder_gpu_texture] queued CTS replay packet main_cts=%llu target_generation=%llu latest_generation=%llu queued=%llu consumed=%llu",
+                 static_cast<unsigned long long>(main_packet_cts),
+                 static_cast<unsigned long long>(target_generation),
+                 static_cast<unsigned long long>(latest_generation),
+                 static_cast<unsigned long long>(queued),
+                 static_cast<unsigned long long>(consumed));
+        }
         return true;
     }
 
@@ -2170,10 +2503,14 @@ namespace alpha_recorder::obs
         context->stop_state = GpuTextureOutputStopState::MuxFinalized;
         context->state_cv.notify_all();
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] mux finalized packets=%llu muxed_packets=%llu last_pts=%lld",
+             "[alpha_recorder_gpu_texture] mux finalized packets=%llu muxed_packets=%llu last_pts=%lld replay_queue_pending=%zu replay_consumed=%llu replay_underflows=%llu replay_emitted=%llu",
              static_cast<unsigned long long>(context->sink.stats().packet_count),
              static_cast<unsigned long long>(context->sink.stats().muxed_packet_count),
-             static_cast<long long>(context->sink.stats().last_pts));
+             static_cast<long long>(context->sink.stats().last_pts),
+             context->replay_generation_queue.size(),
+             static_cast<unsigned long long>(context->replay_consumed_entries),
+             static_cast<unsigned long long>(context->replay_queue_underflows),
+             static_cast<unsigned long long>(context->replay_emitted_frames));
         return true;
     }
 
