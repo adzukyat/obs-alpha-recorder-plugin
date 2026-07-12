@@ -1,8 +1,8 @@
 #pragma once
 
 #include "alpha_output_sink.hpp"
-#include "direct_mp4_muxer.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -18,6 +18,7 @@ namespace alpha_recorder::obs
     struct MatroskaHevcMuxerConfig
     {
         std::filesystem::path path{};
+        std::size_t tail_packet_buffer_size = 256U;
     };
 
     class MatroskaHevcMuxer final
@@ -44,7 +45,7 @@ namespace alpha_recorder::obs
         [[nodiscard]] bool is_open() const noexcept;
         [[nodiscard]] bool is_accepting_packets() const noexcept;
         [[nodiscard]] const std::filesystem::path &path() const noexcept;
-        [[nodiscard]] const DirectMp4MuxerStats &stats() const noexcept;
+        [[nodiscard]] const AlphaMovieMuxerStats &stats() const noexcept;
 
     private:
         struct Impl;

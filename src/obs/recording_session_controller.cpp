@@ -67,7 +67,7 @@ namespace
     using alpha_recorder::obs::timestamp_span_ms;
 
     constexpr std::uint32_t kGpuTextureDeactivateTimeoutMs = 10000U;
-    constexpr std::uint32_t kGpuTextureVisibleRangeDrainWaitMs = 1000U;
+    constexpr std::uint32_t kGpuTextureTailCoverageTimeoutMs = 1000U;
 
     std::filesystem::path path_from_utf8(const char *text)
     {
@@ -255,7 +255,8 @@ namespace
             const char *recording_type = config_get_string(profile_config, "AdvOut", "RecType");
             if (text_equals(recording_type, "FFmpeg"))
             {
-                return {};
+                const char *format = config_get_string(profile_config, "AdvOut", "FFExtension");
+                return format == nullptr ? std::string{} : std::string{format};
             }
             const char *format = config_get_string(profile_config, "AdvOut", "RecFormat2");
             return format == nullptr ? std::string{} : std::string{format};
@@ -358,17 +359,14 @@ namespace
                                                                           alpha_recorder::obs::FinalizationFormat format)
     {
         std::filesystem::path recording_path = current_recording_file_path(recording_output);
-        if (recording_path.empty())
+        if (!recording_path.empty())
         {
-            config_t *profile_config = obs_frontend_get_profile_config();
-            const std::string recording_format = active_profile_recording_format(profile_config);
-            if (!recording_format.empty())
-            {
-                recording_path = std::filesystem::path{"recording." + recording_format};
-            }
+            return alpha_recorder::obs::alpha_movie_container_for_recording_path(recording_path, format);
         }
 
-        return alpha_recorder::obs::alpha_movie_container_for_recording_path(recording_path, format);
+        config_t *profile_config = obs_frontend_get_profile_config();
+        return alpha_recorder::obs::alpha_movie_container_for_recording_format(
+            active_profile_recording_format(profile_config), format);
     }
 
     std::filesystem::path temporary_gpu_texture_output_path(obs_output_t *recording_output,
@@ -405,32 +403,30 @@ namespace
             {
                 if (error_message != nullptr)
                 {
-                    *error_message = "Alpha Recorder could not create the final GPU texture alpha output directory.";
+                    *error_message =
+                        std::string{"Alpha Recorder could not create the final GPU texture alpha output directory: "} +
+                        error.message();
                 }
                 return false;
             }
         }
 
-        if (std::filesystem::exists(final_path, error) && !error)
+#ifdef _WIN32
+        if (!MoveFileExW(temporary_path.c_str(), final_path.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         {
-            std::filesystem::remove(final_path, error);
-            if (error)
-            {
-                if (error_message != nullptr)
-                {
-                    *error_message = "Alpha Recorder could not replace the final GPU texture alpha output.";
-                }
-                return false;
-            }
+            error = std::error_code{static_cast<int>(GetLastError()), std::system_category()};
         }
-
+#else
         std::filesystem::rename(temporary_path, final_path, error);
+#endif
         if (error)
         {
             if (error_message != nullptr)
             {
                 *error_message =
-                    "Alpha Recorder could not rename the temporary GPU texture alpha movie to the final output path.";
+                    std::string{"Alpha Recorder could not rename the temporary GPU texture alpha movie to the final output path: "} +
+                    error.message();
             }
             return false;
         }
@@ -448,12 +444,12 @@ namespace
         }
 
         std::error_code error;
-        std::filesystem::remove(writer_path, error);
+        const bool removed = std::filesystem::remove(writer_path, error);
         blog(error ? LOG_WARNING : LOG_INFO,
              "Alpha Recorder removed failed GPU texture alpha movie: path=\"%s\" final=\"%s\" removed=%s reason=\"%s\" remove_error=\"%s\"",
-             writer_path.generic_string().c_str(),
-             final_path.generic_string().c_str(),
-             error ? "false" : "true",
+             writer_path.generic_u8string().c_str(),
+             final_path.generic_u8string().c_str(),
+             removed ? "true" : "false",
              reason.c_str(),
              error ? error.message().c_str() : "");
     }
@@ -479,7 +475,8 @@ namespace
                                                  bool main_texture_encoded)
     {
         obs_data_t *data = obs_data_create();
-        obs_data_set_string(data, "path", mask_path.string().c_str());
+        const std::string mask_path_utf8 = path_to_utf8(mask_path);
+        obs_data_set_string(data, "path", mask_path_utf8.c_str());
         const char *encoder_id =
             alpha_recorder::obs::gpu_texture_hevc_encoder_id_for_format(settings.finalization_format);
         obs_data_set_string(data, "encoder_id", encoder_id != nullptr ? encoder_id : "");
@@ -830,7 +827,7 @@ namespace
             if (path_is_directory(recording_path))
             {
                 log_and_show_error(std::string{"Alpha Recorder could not determine the recording file name; OBS only reported the recording folder: "} +
-                                       recording_path.generic_string(),
+                                       recording_path.generic_u8string(),
                                    true);
                 return false;
             }
@@ -946,12 +943,12 @@ namespace
             {
                 const std::string message = writer_error.empty()
                                                 ? std::string{"Alpha Recorder could not open the alpha mask movie for recording path: "} +
-                                                      recording_path.generic_string()
+                                                      recording_path.generic_u8string()
                                                 : writer_error;
                 if (settings_.diagnostic_logging)
                 {
                     alpha_recorder::obs::append_diagnostic_log_line(std::string{"Alpha Recorder segment open failed: path=\""} +
-                                                                    mask_path.generic_string() + "\" error=\"" + message + "\"");
+                                                                    mask_path.generic_u8string() + "\" error=\"" + message + "\"");
                 }
                 log_and_show_error(message,
                                    show_popup);
@@ -983,8 +980,8 @@ namespace
                         gpu_texture_final_output_path_ = mask_path;
                         blog(LOG_INFO,
                              "Alpha Recorder GPU texture bound temporary output to final path: temp=\"%s\" final=\"%s\"",
-                             gpu_texture_output_path_.generic_string().c_str(),
-                             gpu_texture_final_output_path_.generic_string().c_str());
+                             gpu_texture_output_path_.generic_u8string().c_str(),
+                             gpu_texture_final_output_path_.generic_u8string().c_str());
                     }
                     video_info_ = video_info;
                     recording_path_ = recording_path;
@@ -1115,7 +1112,7 @@ namespace
             {
                 blog(LOG_WARNING,
                      "[alpha_recorder] could not infer alpha PTS step for main-file duration clamp: path=\"%s\" visible_duration=%lld main_callback_packets=%llu fps=%u/%u",
-                     recording_path_.generic_string().c_str(),
+                     recording_path_.generic_u8string().c_str(),
                      static_cast<long long>(visible_range.duration),
                      static_cast<unsigned long long>(callback_packet_count),
                      video_info_.fps_num,
@@ -1135,7 +1132,7 @@ namespace
             {
                 blog(LOG_WARNING,
                      "[alpha_recorder] could not probe main recording video packet count for GPU alpha duration clamp: path=\"%s\" reason=\"%s\"",
-                     recording_path_.generic_string().c_str(),
+                     recording_path_.generic_u8string().c_str(),
                      probe.error.c_str());
                 return;
             }
@@ -1146,7 +1143,7 @@ namespace
                 {
                     blog(LOG_INFO,
                          "[alpha_recorder] main recording has more video packets than certified GPU alpha range; keeping alpha duration unchanged: path=\"%s\" main_video_packets=%llu solved_visible_frames=%llu duration=%lld",
-                         recording_path_.generic_string().c_str(),
+                         recording_path_.generic_u8string().c_str(),
                          static_cast<unsigned long long>(probe.packet_count),
                          static_cast<unsigned long long>(solved_visible_frames),
                          static_cast<long long>(visible_range.duration));
@@ -1159,7 +1156,7 @@ namespace
             {
                 blog(LOG_WARNING,
                      "[alpha_recorder] main recording packet count is too large for GPU alpha duration clamp: path=\"%s\" main_video_packets=%llu alpha_pts_step=%lld",
-                     recording_path_.generic_string().c_str(),
+                     recording_path_.generic_u8string().c_str(),
                      static_cast<unsigned long long>(probe.packet_count),
                      static_cast<long long>(alpha_pts_step));
                 return;
@@ -1169,7 +1166,7 @@ namespace
             visible_range.duration = static_cast<std::int64_t>(probe.packet_count) * alpha_pts_step;
             blog(LOG_INFO,
                  "[alpha_recorder] clamped GPU texture alpha visible duration to written main recording frames: path=\"%s\" main_video_packets=%llu main_callback_packets=%llu solved_visible_frames=%llu media_time=%lld duration=%lld previous_duration=%lld alpha_pts_step=%lld",
-                 recording_path_.generic_string().c_str(),
+                 recording_path_.generic_u8string().c_str(),
                  static_cast<unsigned long long>(probe.packet_count),
                  static_cast<unsigned long long>(callback_packet_count),
                  static_cast<unsigned long long>(solved_visible_frames),
@@ -1181,7 +1178,7 @@ namespace
             {
                 alpha_recorder::obs::append_diagnostic_log_line(
                     "Alpha Recorder clamped GPU texture alpha visible duration to main recording: path=\"" +
-                    recording_path_.generic_string() + "\" main_video_packets=\"" +
+                    recording_path_.generic_u8string() + "\" main_video_packets=\"" +
                     std::to_string(probe.packet_count) + "\" main_callback_packets=\"" +
                     std::to_string(callback_packet_count) + "\" solved_visible_frames=\"" +
                     std::to_string(solved_visible_frames) + "\" media_time=\"" +
@@ -1212,9 +1209,11 @@ namespace
             std::string finalize_failure_reason;
             const bool strict_sync_proof = settings_.fail_close_on_sync_proof_failure;
 
-            const auto solve_deadline =
-                std::chrono::steady_clock::now() + std::chrono::milliseconds(kGpuTextureVisibleRangeDrainWaitMs);
-            bool visible_range_certified = false;
+            // Encoder drain cannot create replay frames that have not reached the
+            // auxiliary video mix yet. Keep the alpha output live briefly so its
+            // queued main-packet generations can catch the main recording tail.
+            const auto tail_coverage_deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(kGpuTextureTailCoverageTimeoutMs);
             do
             {
                 range_error.clear();
@@ -1225,13 +1224,44 @@ namespace
                         visible_range,
                         &range_error))
                 {
-                    visible_range_certified = true;
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            } while (std::chrono::steady_clock::now() < solve_deadline);
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            } while (std::chrono::steady_clock::now() < tail_coverage_deadline);
 
-            if (!visible_range_certified)
+            alpha_recorder::obs::gpu_texture_recording_output_request_stop(gpu_texture_output_);
+            if (!alpha_recorder::obs::gpu_texture_recording_output_wait_stop_boundary(
+                    gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
+            {
+                finalize_failed = true;
+            }
+            if (!finalize_failed)
+            {
+                alpha_recorder::obs::gpu_texture_recording_output_end_data_capture(gpu_texture_output_);
+                data_capture_end_requested = true;
+                if (!alpha_recorder::obs::gpu_texture_recording_output_wait_deactivated(
+                        gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
+                {
+                    finalize_failed = true;
+                }
+            }
+
+            bool visible_range_certified = false;
+            if (!finalize_failed)
+            {
+                range_error.clear();
+                if (alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
+                        gpu_texture_output_,
+                        gpu_main_packets_,
+                        recording_texture_encoded_,
+                        visible_range,
+                        &range_error))
+                {
+                    visible_range_certified = true;
+                }
+            }
+
+            if (!finalize_failed && !visible_range_certified)
             {
                 const std::string sync_failure_reason =
                     range_error.empty()
@@ -1252,8 +1282,8 @@ namespace
                     blog(LOG_WARNING,
                          "[alpha_recorder] sync proof not certified; publishing GPU texture alpha movie %s: path=\"%s\" final=\"%s\" media_time=%lld duration=%lld reason=\"%s\"",
                          has_partial_visible_range ? "with a best-effort edit range" : "without an edit range",
-                         actual_writer_path.generic_string().c_str(),
-                         final_writer_path.generic_string().c_str(),
+                         actual_writer_path.generic_u8string().c_str(),
+                         final_writer_path.generic_u8string().c_str(),
                          static_cast<long long>(visible_range.media_time),
                          static_cast<long long>(visible_range.duration),
                          log_reason.c_str());
@@ -1263,8 +1293,8 @@ namespace
                             std::string{
                                 "Alpha Recorder sync proof was not certified; publishing "} +
                             (has_partial_visible_range ? "with a best-effort edit range" : "without an edit range") +
-                            ": path=\"" + actual_writer_path.generic_string() + "\" final=\"" +
-                            final_writer_path.generic_string() + "\" media_time=\"" +
+                            ": path=\"" + actual_writer_path.generic_u8string() + "\" final=\"" +
+                            final_writer_path.generic_u8string() + "\" media_time=\"" +
                             std::to_string(visible_range.media_time) + "\" duration=\"" +
                             std::to_string(visible_range.duration) + "\" reason=\"" +
                             sync_failure_reason + "\"");
@@ -1293,6 +1323,10 @@ namespace
                     }
                     else
                     {
+                        alpha_recorder::obs::AlphaVisiblePacketRange no_visible_range{};
+                        std::string clear_range_error;
+                        (void)alpha_recorder::obs::gpu_texture_recording_output_set_visible_range(
+                            gpu_texture_output_, no_visible_range, &clear_range_error);
                         const std::string sync_failure_reason =
                             visible_range_error.empty()
                                 ? "Alpha Recorder could not apply the GPU texture alpha visible range."
@@ -1301,44 +1335,25 @@ namespace
                         const std::string log_reason = nonfatal_sync_log_reason(sync_failure_reason);
                         blog(LOG_WARNING,
                              "[alpha_recorder] sync proof edit range not applied; publishing GPU texture alpha movie without an edit range: path=\"%s\" final=\"%s\" reason=\"%s\"",
-                             actual_writer_path.generic_string().c_str(),
-                             final_writer_path.generic_string().c_str(),
+                             actual_writer_path.generic_u8string().c_str(),
+                             final_writer_path.generic_u8string().c_str(),
                              log_reason.c_str());
                         if (settings_.diagnostic_logging)
                         {
                             alpha_recorder::obs::append_diagnostic_log_line(
                                 std::string{
                                     "Alpha Recorder sync proof edit range was not applied; publishing without an edit range: path=\""} +
-                                actual_writer_path.generic_string() + "\" final=\"" +
-                                final_writer_path.generic_string() + "\" reason=\"" +
+                                actual_writer_path.generic_u8string() + "\" final=\"" +
+                                final_writer_path.generic_u8string() + "\" reason=\"" +
                                 sync_failure_reason + "\"");
                         }
                     }
-                }
-            }
-            if (!finalize_failed)
-            {
-                alpha_recorder::obs::gpu_texture_recording_output_request_stop(gpu_texture_output_);
-                if (!alpha_recorder::obs::gpu_texture_recording_output_wait_stop_boundary(
-                        gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
-                {
-                    finalize_failed = true;
                 }
             }
             if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_finalize_mux(
                                       gpu_texture_output_, error_message))
             {
                 finalize_failed = true;
-            }
-            if (!finalize_failed)
-            {
-                alpha_recorder::obs::gpu_texture_recording_output_end_data_capture(gpu_texture_output_);
-                data_capture_end_requested = true;
-                if (!alpha_recorder::obs::gpu_texture_recording_output_wait_deactivated(
-                        gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
-                {
-                    finalize_failed = true;
-                }
             }
             if (finalize_failed)
             {
@@ -1363,6 +1378,17 @@ namespace
             const std::string last_error_text = last_error != nullptr ? last_error : "";
             obs_output_release(gpu_texture_output_);
             gpu_texture_output_ = nullptr;
+            if (!finalize_failed && !gpu_stats.finalized)
+            {
+                finalize_failed = true;
+                finalize_failure_reason = !last_error_text.empty()
+                                              ? last_error_text
+                                              : "Alpha Recorder alpha movie muxer did not reach its finalized state.";
+                if (error_message != nullptr && error_message->empty())
+                {
+                    *error_message = finalize_failure_reason;
+                }
+            }
             if (!finalize_failed && gpu_stats.finalized && rename_temporary_output &&
                 !move_completed_gpu_texture_output(actual_writer_path, final_writer_path, error_message))
             {
@@ -1424,12 +1450,14 @@ namespace
             char buffer[2048];
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder GPU texture telemetry: path=\"%s\" packets=%llu keyframes=%llu packet_bytes=%s muxed_packets=%llu finalized=%s first_pts=%lld last_pts=%lld visible_range={media_time=%lld duration=%lld} main_packets={count=%llu first_cts=%llu last_cts=%llu}",
-                mask_path.generic_string().c_str(),
+                "Alpha Recorder GPU texture telemetry: path=\"%s\" packets=%llu keyframes=%llu packet_bytes=%s muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%s finalized=%s first_pts=%lld last_pts=%lld visible_range={media_time=%lld duration=%lld} main_packets={count=%llu first_cts=%llu last_cts=%llu}",
+                mask_path.generic_u8string().c_str(),
                 static_cast<unsigned long long>(gpu_stats.packet_count),
                 static_cast<unsigned long long>(gpu_stats.keyframe_count),
                 format_bytes(gpu_stats.packet_bytes).c_str(),
                 static_cast<unsigned long long>(gpu_stats.muxed_packet_count),
+                static_cast<unsigned long long>(gpu_stats.max_buffered_packet_count),
+                format_bytes(gpu_stats.max_buffered_packet_bytes).c_str(),
                 gpu_stats.finalized ? "true" : "false",
                 static_cast<long long>(gpu_stats.first_pts),
                 static_cast<long long>(gpu_stats.last_pts),
@@ -1462,7 +1490,7 @@ namespace
             (void)std::snprintf(
                 buffer, sizeof(buffer),
                 "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} alignment_queue={alpha_limit_frames=%zu output_limit_frames=%zu encoded_reorder_frames=%zu plausible_delta_ns=%llu} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
-                mask_path.generic_string().c_str(),
+                mask_path.generic_u8string().c_str(),
                 std::string{alpha_recorder::obs::finalization_format_config_value(config.finalization_format)}.c_str(),
                 config.width, config.height, config.fps_num, config.fps_den,
                 max_pending_alpha_frames_, max_pending_output_frames_, kMaxEncoderReorderFrames,
@@ -1512,7 +1540,7 @@ namespace
             (void)std::snprintf(
                 buffer, sizeof(buffer),
                 "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} timestamp_spans={packet_cts_ms=%.3f raw_output_ms=%.3f alpha_capture_ms=%.3f first_packet_cts=%llu last_packet_cts=%llu first_raw=%llu last_raw=%llu first_alpha=%llu last_alpha=%llu} alignment_delta={output_minus_packet_cts={%s} alpha_minus_output_content={%s}} packet_timing={fer_minus_cts={%s} cts_delta={%s} fer_delta={%s} texture_stall_corrections=%llu} queues={alpha_max=%zu alpha_limit=%zu output_max=%zu output_limit=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s writer_limit_frames=%zu writer_limit_bytes=%s writer_overflow_repeats=%llu} alignment_recovery={repeated=%llu missing_output=%llu missing_alpha=%llu texture_stall=%llu black=%llu alpha_dropped=%llu output_dropped=%llu} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s} encode_breakdown={make_writable_avg_ms=%.3f make_writable_max_ms=%.3f copy_avg_ms=%.3f copy_max_ms=%.3f send_avg_ms=%.3f send_max_ms=%.3f receive_avg_ms=%.3f receive_max_ms=%.3f packet_write_avg_ms=%.3f packet_write_max_ms=%.3f emitted_packets=%llu} nvenc_options={split_available=%s split_value=%lld gpu_available=%s gpu_value=%lld}",
-                mask_path.generic_string().c_str(), capture_total.c_str(),
+                mask_path.generic_u8string().c_str(), capture_total.c_str(),
                 static_cast<unsigned long long>(live_telemetry_.rendered_callbacks),
                 static_cast<unsigned long long>(live_telemetry_.captured_frames), capture_map.c_str(),
                 capture_render.c_str(), capture_stage.c_str(), alignment_batch.c_str(),

@@ -12,6 +12,7 @@ alpha_recorder_require(PACKAGE_DIR)
 
 set(CONFIGURATION "RelWithDebInfo" CACHE STRING "Build configuration")
 set(PLUGIN_NAME "alpha_recorder" CACHE STRING "Main plugin output name")
+set(INSTALL_LIBDIR "lib" CACHE STRING "Linux library directory inside the package")
 
 cmake_path(ABSOLUTE_PATH REPO_ROOT NORMALIZE OUTPUT_VARIABLE REPO_ROOT)
 cmake_path(ABSOLUTE_PATH BUILD_DIR BASE_DIRECTORY "${REPO_ROOT}" NORMALIZE OUTPUT_VARIABLE BUILD_DIR)
@@ -71,8 +72,7 @@ if(WIN32)
 elseif(APPLE)
     set(plugin_target_dir "${PACKAGE_DIR}/obs-plugins")
 else()
-    include(GNUInstallDirs)
-    set(plugin_target_dir "${PACKAGE_DIR}/${CMAKE_INSTALL_LIBDIR}/obs-plugins")
+    set(plugin_target_dir "${PACKAGE_DIR}/${INSTALL_LIBDIR}/obs-plugins")
 endif()
 file(MAKE_DIRECTORY "${plugin_target_dir}")
 

@@ -10,6 +10,7 @@ type Args = {
   repoRoot: string;
   stageDir: string;
   buildDir?: string;
+  artifactBase?: string;
   configuration: string;
   port: number;
   syncRecordSeconds: number;
@@ -100,6 +101,10 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--build-dir":
         args.buildDir = resolve(value);
+        ++index;
+        break;
+      case "--artifact-base":
+        args.artifactBase = resolve(value);
         ++index;
         break;
       case "--configuration":
@@ -1036,6 +1041,52 @@ async function waitForRecordState(
   throw new Error(`Timed out waiting for recording active=${active}; last status=${JSON.stringify(lastStatus)}`);
 }
 
+async function startRecordingWithRetry(
+  socket: ObsWebSocket,
+  failureWatch?: AlphaRecorderFailureWatch,
+  timeoutSeconds = 30,
+): Promise<void> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let lastStatus: unknown = undefined;
+  let lastStartError: unknown = undefined;
+
+  while (Date.now() < deadline) {
+    throwIfAlphaRecorderFailureDetected(failureWatch);
+    const status = await socket.request("GetRecordStatus", {}, 5000);
+    lastStatus = status;
+    if (Boolean(status.outputActive)) {
+      return;
+    }
+
+    try {
+      await socket.request("StartRecord");
+      lastStartError = undefined;
+    } catch (error) {
+      lastStartError = error;
+    }
+
+    const attemptDeadline = Math.min(deadline, Date.now() + 5000);
+    while (Date.now() < attemptDeadline) {
+      throwIfAlphaRecorderFailureDetected(failureWatch);
+      await delay(250);
+      const attemptStatus = await socket.request("GetRecordStatus", {}, 5000);
+      lastStatus = attemptStatus;
+      if (Boolean(attemptStatus.outputActive)) {
+        return;
+      }
+    }
+
+    // OBS can report inactive before the previous recording output has fully
+    // released its encoders. Retry only while it remains inactive.
+    await delay(500);
+  }
+
+  throw new Error(
+    `Timed out starting recording; last status=${JSON.stringify(lastStatus)}` +
+      (lastStartError == null ? "" : `; last StartRecord error=${String(lastStartError)}`),
+  );
+}
+
 function stopWaitTimeoutSeconds(durationSeconds: number): number {
   return Math.max(60, Math.ceil(durationSeconds * 3));
 }
@@ -1137,7 +1188,7 @@ async function waitForAlphaOutputSettled(
 function findTool(stageBin: string, repoRoot: string, name: string): string {
   const candidates = [join(stageBin, name), join(stageBin, `${name}.exe`)];
   const depsRoot = join(repoRoot, "deps", "obs", "obs-studio", ".deps");
-  if (existsSync(depsRoot)) {
+  if (platform !== "linux" && existsSync(depsRoot)) {
     for (const depsName of readdirSync(depsRoot)) {
       candidates.push(join(depsRoot, depsName, "bin", name), join(depsRoot, depsName, "bin", `${name}.exe`));
     }
@@ -1708,12 +1759,11 @@ function verifyRgbAlphaFrameSync(
 
   const expectedAlphaFrameDelta = 0;
   const frameCountDelta = alphaFrames - rgbFrames;
-  const toleratedFrameCountDelta = verifyNleTimeline ? 1 : (overloadObserved ? toleratedTerminalFrames : 0);
-  if (
-    verifyNleTimeline
-      ? Math.abs(frameCountDelta - expectedAlphaFrameDelta) > toleratedFrameCountDelta
-      : Math.abs(frameCountDelta) > toleratedFrameCountDelta
-  ) {
+  // OBS output muxers can differ by one admitted terminal frame even when all
+  // shared presentation slots are content-identical. Keep offset/content checks
+  // strict and reserve the wider allowance for an observed overload only.
+  const toleratedFrameCountDelta = overloadObserved ? toleratedTerminalFrames : 1;
+  if (Math.abs(frameCountDelta - expectedAlphaFrameDelta) > toleratedFrameCountDelta) {
     throw new Error(
       `Decoded RGB/alpha frame counts do not match expectation: rgb=${rgbFrames} alpha=${alphaFrames}; ` +
         `expectedDelta=${expectedAlphaFrameDelta} tolerance=${toleratedFrameCountDelta}; ` +
@@ -2055,7 +2105,8 @@ async function main(): Promise<void> {
   const port = args.port > 0 ? args.port : await freePort();
   const password = randomBytes(16).toString("hex");
   const { exe: obsExe, cwd: obsCwd, contentRoot, runtimeBin } = resolveObsExecutable(args.stageDir);
-  const artifactRoot = join(args.repoRoot, "out", "e2e", "obs-app", new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, ""));
+  const artifactBase = args.artifactBase ?? join(args.repoRoot, "out", "e2e", "obs-app");
+  const artifactRoot = join(artifactBase, new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, ""));
   mkdirSync(artifactRoot, { recursive: true });
   const obsProcessLogPath = join(artifactRoot, "obs-process.log");
 
@@ -2393,8 +2444,7 @@ finalization_format=${args.finalizationFormat}
         checkpoint: attemptLogCheckpoint,
       };
       resetOverloadMonitor(overload);
-      await socket.request("StartRecord");
-      await waitForRecordState(socket, true, 30, attemptFailureWatch);
+      await startRecordingWithRetry(socket, attemptFailureWatch);
       if (args.allowOverload) {
         await delayUnlessOverloaded(durationSeconds * 1000, { seen: false, firstLine: "" }, attemptFailureWatch);
       } else {

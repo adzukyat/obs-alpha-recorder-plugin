@@ -38,13 +38,17 @@ namespace alpha_recorder::obs
             }
         }
 
-        void assign_error(std::string *error_message, const std::string &message)
+#ifdef _WIN32
+        std::string path_to_utf8(const std::filesystem::path &path)
         {
-            if (error_message != nullptr)
-            {
-                *error_message = message;
-            }
+            return path.u8string();
         }
+#else
+        std::string path_to_utf8(const std::filesystem::path &path)
+        {
+            return path.string();
+        }
+#endif
 
         class ByteWriter
         {
@@ -1102,7 +1106,8 @@ namespace alpha_recorder::obs
             }
         }
 
-        if (!buffered_file_serializer_init_defaults(&impl_->mp4_serializer, config.path.string().c_str()))
+        const std::string output_path = path_to_utf8(config.path);
+        if (!buffered_file_serializer_init_defaults(&impl_->mp4_serializer, output_path.c_str()))
         {
             assign_error(error_message, "could not open the Direct MP4 mux output");
             return false;

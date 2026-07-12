@@ -46,9 +46,12 @@ own transparency channel.
 - Preserve runtime-aware HEVC handling: expose NVENC/AMF options only when the
   matching encoder can actually open on the current machine.
 - Preserve the explicit NVENC and AMF split in settings, target names, and docs.
+- An explicit `OBS_ROOT` must override the generated local OBS root. Never add
+  Windows/macOS OBS `.deps` directories to Linux/WSL dependency discovery.
 - For sync changes, preserve the alignment contract in `SPECS.md`: raw-video
-  cadence is authoritative, packet callbacks carry ordering evidence, and the
-  app E2E verifier requires zero decoded frame-code offset.
+  cadence is authoritative for the CPU path; Program generation plus packet
+  timing is authoritative for the GPU texture path; and the app E2E verifier
+  requires zero decoded frame-code offset.
 - If a target is unavailable, prefer a clear runtime skip reason over an
   impossible or trap target.
 

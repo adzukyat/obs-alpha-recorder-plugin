@@ -88,7 +88,13 @@ int main()
         alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskHevcQsv) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mkv"} ||
         alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskHevcVaapi) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mkv"} ||
         alpha_recorder::obs::recording_alpha_movie_path(std::filesystem::path{"C:/Recordings/MyRec.mov"}, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
+        alpha_recorder::obs::recording_alpha_movie_path(std::filesystem::path{"C:/Recordings/MyRec.MOV"}, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
         alpha_recorder::obs::recording_alpha_movie_path(std::filesystem::path{"C:/Recordings/MyRec.custom"}, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("hybrid_mov", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mov ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("fragmented_mov", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mov ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("hybrid_mp4", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mp4 ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("MKV", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mkv ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("mkv", alpha_recorder::obs::FinalizationFormat::MaskPngMov) != alpha_recorder::obs::AlphaMovieContainer::Mov ||
         alpha_recorder::obs::recording_sidecar_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"} ||
         alpha_recorder::obs::recording_manifest_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.manifest.json"})
     {

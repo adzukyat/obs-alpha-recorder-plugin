@@ -54,6 +54,19 @@ namespace alpha_recorder::obs
         std::int64_t duration = 0;
     };
 
+    struct AlphaMovieMuxerStats
+    {
+        std::uint64_t packet_count = 0U;
+        std::uint64_t keyframe_count = 0U;
+        std::uint64_t packet_bytes = 0U;
+        std::uint64_t muxed_packet_count = 0U;
+        std::uint64_t max_buffered_packet_count = 0U;
+        std::uint64_t max_buffered_packet_bytes = 0U;
+        std::int64_t first_pts = 0;
+        std::int64_t last_pts = 0;
+        bool finalized = false;
+    };
+
     class IAlphaPacketSink : public IAlphaOutputSink
     {
     public:

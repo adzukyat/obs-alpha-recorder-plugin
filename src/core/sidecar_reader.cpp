@@ -69,7 +69,7 @@ namespace alpha_recorder
             std::ifstream stream(sidecar_path, std::ios::binary);
             if (!stream)
             {
-                set_error(error_message, std::string{"failed to open sidecar: "} + sidecar_path.generic_string());
+                set_error(error_message, std::string{"failed to open sidecar: "} + sidecar_path.generic_u8string());
                 return false;
             }
 
@@ -80,7 +80,7 @@ namespace alpha_recorder
                 !read_le(stream, header.record_header_size) || !read_le(stream, header.index_entry_size) ||
                 !read_le(stream, header.flags) || !read_le(stream, header.reserved))
             {
-                set_error(error_message, std::string{"failed to read sidecar header: "} + sidecar_path.generic_string());
+                set_error(error_message, std::string{"failed to read sidecar header: "} + sidecar_path.generic_u8string());
                 return false;
             }
 
@@ -96,7 +96,7 @@ namespace alpha_recorder
             const std::uintmax_t file_size = std::filesystem::file_size(sidecar_path, file_error);
             if (file_error)
             {
-                set_error(error_message, std::string{"failed to read sidecar file size: "} + sidecar_path.generic_string());
+                set_error(error_message, std::string{"failed to read sidecar file size: "} + sidecar_path.generic_u8string());
                 return false;
             }
 

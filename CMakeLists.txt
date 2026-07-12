@@ -15,11 +15,13 @@ project(alpha_recorder_plugin
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/cmake/finders")
 
-file(GLOB _alpha_recorder_obs_deps_roots LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/.deps/obs-deps-*")
-list(SORT _alpha_recorder_obs_deps_roots)
-if(_alpha_recorder_obs_deps_roots)
-    list(POP_FRONT _alpha_recorder_obs_deps_roots _alpha_recorder_obs_deps_root)
-    list(APPEND CMAKE_PREFIX_PATH "${_alpha_recorder_obs_deps_root}")
+if(WIN32 OR APPLE)
+    file(GLOB _alpha_recorder_obs_deps_roots LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/.deps/obs-deps-*")
+    list(SORT _alpha_recorder_obs_deps_roots)
+    if(_alpha_recorder_obs_deps_roots)
+        list(POP_FRONT _alpha_recorder_obs_deps_roots _alpha_recorder_obs_deps_root)
+        list(APPEND CMAKE_PREFIX_PATH "${_alpha_recorder_obs_deps_root}")
+    endif()
 endif()
 
 include(ProjectOptions)
@@ -39,7 +41,9 @@ configure_file(
     @ONLY
 )
 
-include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
+if(NOT DEFINED OBS_ROOT OR OBS_ROOT STREQUAL "")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-root.cmake" OPTIONAL)
+endif()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/obs")
 if(APPLE)
     set(_alpha_recorder_generated_obs_data_path "Resources")
@@ -852,11 +856,22 @@ if(_alpha_recorder_build_full_targets)
             VERIFY_NLE_TIMELINE
             EXPERIMENTAL
         )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_hybrid_mov fhd60-rgb-nvenc-hevc-alpha-hevc-nvenc-hybrid-mov
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            RECORD_FORMAT hybrid_mov
+            SYNC_RECORD_SECONDS 2
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 2
+            VERIFY_NLE_TIMELINE
+            EXPERIMENTAL
+        )
     else()
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mp4 "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_gop120 "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_hybrid_mov "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
     endif()
     if(_alpha_recorder_obs_app_e2e_has_amf)
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_amf_hevc_alpha_png_mov fhd60-rgb-amf-hevc-alpha-png-mov

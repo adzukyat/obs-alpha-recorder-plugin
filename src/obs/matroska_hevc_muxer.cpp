@@ -4,8 +4,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -23,6 +23,7 @@ extern "C"
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
+#include <libavutil/mem.h>
 #include <util/bmem.h>
 }
 
@@ -80,12 +81,16 @@ namespace alpha_recorder::obs
 
         struct MatroskaSample
         {
-            std::uint64_t offset = 0U;
-            std::uint32_t size = 0U;
             std::int64_t pts = 0;
             std::int64_t dts = 0;
             std::int64_t duration = 0;
             bool keyframe = false;
+        };
+
+        struct PendingMatroskaPacket
+        {
+            std::size_t sample_index = 0U;
+            std::vector<std::uint8_t> data{};
         };
 
         [[nodiscard]] std::int64_t fallback_sample_duration(const std::vector<MatroskaSample> &samples,
@@ -110,31 +115,26 @@ namespace alpha_recorder::obs
                 static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())));
         }
 
-        [[nodiscard]] bool finalize_sample_durations(std::vector<MatroskaSample> &samples,
-                                                     std::int32_t timebase_num,
-                                                     std::string *error_message)
+        [[nodiscard]] bool checked_range_end(const AlphaVisiblePacketRange &range,
+                                             std::int64_t &end,
+                                             std::string *error_message)
         {
-            if (samples.empty())
+            if (range.media_time < 0 || range.duration < 0)
             {
-                assign_error(error_message, "Matroska HEVC muxer received no HEVC packets");
+                assign_error(error_message, "Matroska HEVC visible range cannot be negative");
                 return false;
             }
-
-            const std::int64_t last_duration = fallback_sample_duration(samples, timebase_num);
-            for (std::size_t index = 0U; index < samples.size(); ++index)
+            if (range.duration == 0)
             {
-                std::int64_t duration = last_duration;
-                if (index + 1U < samples.size())
-                {
-                    duration = samples[index + 1U].dts - samples[index].dts;
-                    if (duration <= 0)
-                    {
-                        assign_error(error_message, "Matroska HEVC muxer requires strictly increasing HEVC DTS values");
-                        return false;
-                    }
-                }
-                samples[index].duration = duration;
+                end = range.media_time;
+                return true;
             }
+            if (range.media_time > std::numeric_limits<std::int64_t>::max() - range.duration)
+            {
+                assign_error(error_message, "Matroska HEVC visible range overflows the packet timeline");
+                return false;
+            }
+            end = range.media_time + range.duration;
             return true;
         }
 
@@ -168,11 +168,8 @@ namespace alpha_recorder::obs
     struct MatroskaHevcMuxer::Impl
     {
         std::filesystem::path path{};
-        std::filesystem::path spool_path{};
-        std::ofstream spool_writer{};
         bool storage_open = false;
         bool accepting_packets = false;
-        bool first_packet = true;
         obs_encoder_t *encoder = nullptr;
         std::uint32_t width = 0U;
         std::uint32_t height = 0U;
@@ -182,25 +179,14 @@ namespace alpha_recorder::obs
         AlphaVisiblePacketRange pending_visible_range{};
         std::vector<std::uint8_t> header_annexb{};
         std::vector<MatroskaSample> samples{};
-        DirectMp4MuxerStats stats{};
-
-        void reset_state() noexcept
-        {
-            path.clear();
-            spool_path.clear();
-            storage_open = false;
-            accepting_packets = false;
-            first_packet = true;
-            width = 0U;
-            height = 0U;
-            timebase_num = 1;
-            timebase_den = 60;
-            has_pending_visible_range = false;
-            pending_visible_range = {};
-            header_annexb.clear();
-            samples.clear();
-            stats = {};
-        }
+        std::deque<PendingMatroskaPacket> pending_packets{};
+        std::uint64_t pending_packet_bytes = 0U;
+        std::size_t tail_packet_buffer_size = 256U;
+        std::size_t committed_sample_count = 0U;
+        AVFormatContext *format_context = nullptr;
+        AVStream *stream = nullptr;
+        std::int64_t timestamp_origin = 0;
+        AlphaMovieMuxerStats stats{};
 
         void release_encoder() noexcept
         {
@@ -209,6 +195,45 @@ namespace alpha_recorder::obs
                 obs_encoder_release(encoder);
                 encoder = nullptr;
             }
+        }
+
+        void close_format_context() noexcept
+        {
+            if (format_context == nullptr)
+            {
+                stream = nullptr;
+                return;
+            }
+            if (format_context->pb != nullptr)
+            {
+                avio_closep(&format_context->pb);
+            }
+            avformat_free_context(format_context);
+            format_context = nullptr;
+            stream = nullptr;
+        }
+
+        void reset_state() noexcept
+        {
+            close_format_context();
+            release_encoder();
+            path.clear();
+            storage_open = false;
+            accepting_packets = false;
+            width = 0U;
+            height = 0U;
+            timebase_num = 1;
+            timebase_den = 60;
+            has_pending_visible_range = false;
+            pending_visible_range = {};
+            header_annexb.clear();
+            samples.clear();
+            pending_packets.clear();
+            pending_packet_bytes = 0U;
+            tail_packet_buffer_size = 256U;
+            committed_sample_count = 0U;
+            timestamp_origin = 0;
+            stats = {};
         }
 
         [[nodiscard]] bool ensure_headers(std::string *error_message)
@@ -225,7 +250,8 @@ namespace alpha_recorder::obs
 
             std::uint8_t *extra_data = nullptr;
             std::size_t extra_size = 0U;
-            if (obs_encoder_get_extra_data(encoder, &extra_data, &extra_size) && extra_data != nullptr && extra_size > 0U)
+            if (obs_encoder_get_extra_data(encoder, &extra_data, &extra_size) &&
+                extra_data != nullptr && extra_size > 0U)
             {
                 capture_headers_from_annexb(header_annexb, extra_data, extra_size);
             }
@@ -234,6 +260,175 @@ namespace alpha_recorder::obs
                 assign_error(error_message, "Matroska HEVC muxer could not read HEVC encoder headers");
                 return false;
             }
+            return true;
+        }
+
+        [[nodiscard]] bool open_format_context(std::int64_t origin, std::string *error_message)
+        {
+            if (format_context != nullptr)
+            {
+                if (timestamp_origin != origin)
+                {
+                    assign_error(error_message,
+                                 "Matroska HEVC timestamp origin changed after streaming began");
+                    return false;
+                }
+                return true;
+            }
+            if (!ensure_headers(error_message))
+            {
+                return false;
+            }
+            if (header_annexb.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+                width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+                height > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
+            {
+                assign_error(error_message, "Matroska HEVC stream metadata is too large");
+                return false;
+            }
+
+            const std::string output_path = path_to_utf8(path);
+            int result = avformat_alloc_output_context2(&format_context, nullptr, "matroska", output_path.c_str());
+            if (result < 0 || format_context == nullptr)
+            {
+                assign_error(error_message,
+                             std::string{"could not allocate Matroska output context: "} + av_error_message(result));
+                close_format_context();
+                return false;
+            }
+
+            stream = avformat_new_stream(format_context, nullptr);
+            if (stream == nullptr)
+            {
+                assign_error(error_message, "could not create the Matroska HEVC video stream");
+                close_format_context();
+                return false;
+            }
+            stream->time_base = AVRational{timebase_num, timebase_den};
+            stream->avg_frame_rate = AVRational{timebase_den, timebase_num};
+            stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+            stream->codecpar->codec_id = AV_CODEC_ID_HEVC;
+            stream->codecpar->codec_tag = 0;
+            stream->codecpar->width = static_cast<int>(width);
+            stream->codecpar->height = static_cast<int>(height);
+            stream->codecpar->extradata = static_cast<std::uint8_t *>(
+                av_mallocz(header_annexb.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+            if (stream->codecpar->extradata == nullptr)
+            {
+                assign_error(error_message, "could not allocate Matroska HEVC codec private data");
+                close_format_context();
+                return false;
+            }
+            std::memcpy(stream->codecpar->extradata, header_annexb.data(), header_annexb.size());
+            stream->codecpar->extradata_size = static_cast<int>(header_annexb.size());
+
+            result = avio_open(&format_context->pb, output_path.c_str(), AVIO_FLAG_WRITE);
+            if (result < 0)
+            {
+                assign_error(error_message,
+                             std::string{"could not open the Matroska HEVC output: "} + av_error_message(result));
+                close_format_context();
+                return false;
+            }
+            result = avformat_write_header(format_context, nullptr);
+            if (result < 0)
+            {
+                assign_error(error_message,
+                             std::string{"could not write the Matroska HEVC header: "} + av_error_message(result));
+                close_format_context();
+                return false;
+            }
+
+            timestamp_origin = origin;
+            return true;
+        }
+
+        [[nodiscard]] bool write_packet(const PendingMatroskaPacket &pending,
+                                        std::int64_t visible_end,
+                                        std::string *error_message)
+        {
+            if (pending.sample_index >= samples.size())
+            {
+                assign_error(error_message, "Matroska HEVC pending packet metadata is invalid");
+                return false;
+            }
+            const MatroskaSample &sample = samples[pending.sample_index];
+            if (pending.data.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            {
+                assign_error(error_message, "Matroska HEVC packet is too large for FFmpeg");
+                return false;
+            }
+
+            AVPacket *packet = av_packet_alloc();
+            if (packet == nullptr)
+            {
+                assign_error(error_message, "could not allocate a Matroska HEVC packet");
+                return false;
+            }
+            int result = av_new_packet(packet, static_cast<int>(pending.data.size()));
+            if (result < 0)
+            {
+                av_packet_free(&packet);
+                assign_error(error_message,
+                             std::string{"could not allocate Matroska HEVC packet data: "} + av_error_message(result));
+                return false;
+            }
+            std::memcpy(packet->data, pending.data.data(), pending.data.size());
+            packet->stream_index = stream->index;
+            packet->pts = sample.pts - timestamp_origin;
+            packet->dts = sample.dts - timestamp_origin;
+            packet->duration = sample.duration;
+            if (visible_end != std::numeric_limits<std::int64_t>::max() &&
+                sample.pts < visible_end && packet->duration > visible_end - sample.pts)
+            {
+                packet->duration = visible_end - sample.pts;
+            }
+            if (sample.keyframe)
+            {
+                packet->flags |= AV_PKT_FLAG_KEY;
+            }
+            av_packet_rescale_ts(packet, AVRational{timebase_num, timebase_den}, stream->time_base);
+
+            result = av_interleaved_write_frame(format_context, packet);
+            av_packet_free(&packet);
+            if (result < 0)
+            {
+                assign_error(error_message,
+                             std::string{"could not write a Matroska HEVC packet: "} + av_error_message(result));
+                return false;
+            }
+
+            ++stats.muxed_packet_count;
+            return true;
+        }
+
+        [[nodiscard]] bool flush_oldest_pending_packet(std::string *error_message)
+        {
+            if (pending_packets.empty())
+            {
+                return true;
+            }
+            const PendingMatroskaPacket &pending = pending_packets.front();
+            if (pending.sample_index != committed_sample_count ||
+                pending.sample_index >= samples.size())
+            {
+                assign_error(error_message, "Matroska HEVC packet order is inconsistent");
+                return false;
+            }
+            if (committed_sample_count == 0U && !samples.front().keyframe)
+            {
+                assign_error(error_message, "Matroska HEVC output must start on an IDR/keyframe packet");
+                return false;
+            }
+            if (!open_format_context(samples.front().pts, error_message) ||
+                !write_packet(pending, std::numeric_limits<std::int64_t>::max(), error_message))
+            {
+                return false;
+            }
+            const std::uint64_t packet_bytes = static_cast<std::uint64_t>(pending.data.size());
+            pending_packets.pop_front();
+            pending_packet_bytes -= packet_bytes;
+            ++committed_sample_count;
             return true;
         }
     };
@@ -265,16 +460,8 @@ namespace alpha_recorder::obs
             return false;
         }
 
-        impl_->spool_path = config.path;
-        impl_->spool_path += ".spool";
-        impl_->spool_writer.open(impl_->spool_path, std::ios::binary | std::ios::trunc);
-        if (!impl_->spool_writer)
-        {
-            assign_error(error_message, "could not open the Matroska HEVC packet spool");
-            return false;
-        }
-
         impl_->path = config.path;
+        impl_->tail_packet_buffer_size = std::max<std::size_t>(config.tail_packet_buffer_size, 2U);
         impl_->storage_open = true;
         return true;
     }
@@ -326,14 +513,60 @@ namespace alpha_recorder::obs
     bool MatroskaHevcMuxer::set_visible_range(const AlphaVisiblePacketRange &range,
                                               std::string *error_message)
     {
-        if (range.media_time < 0 || range.duration < 0)
+        std::int64_t visible_end = 0;
+        if (!checked_range_end(range, visible_end, error_message))
         {
-            assign_error(error_message, "Matroska HEVC visible range cannot be negative");
+            return false;
+        }
+        if (range.duration == 0)
+        {
+            impl_->pending_visible_range = {};
+            impl_->has_pending_visible_range = false;
+            return true;
+        }
+        if (impl_->samples.empty())
+        {
+            assign_error(error_message, "Matroska HEVC visible range contains no HEVC packets");
             return false;
         }
 
+        const auto first_visible = std::find_if(
+            impl_->samples.begin(), impl_->samples.end(),
+            [&range, visible_end](const MatroskaSample &sample) {
+                return sample.pts >= range.media_time && sample.pts < visible_end;
+            });
+        if (first_visible == impl_->samples.end() || first_visible->pts != range.media_time)
+        {
+            assign_error(error_message, "Matroska HEVC visible range does not start on an encoded packet");
+            return false;
+        }
+        if (!first_visible->keyframe)
+        {
+            assign_error(error_message, "Matroska HEVC visible range must start on an IDR/keyframe packet");
+            return false;
+        }
+
+        const std::size_t first_visible_index = static_cast<std::size_t>(
+            std::distance(impl_->samples.begin(), first_visible));
+        if (impl_->committed_sample_count > 0U && first_visible_index != 0U)
+        {
+            assign_error(error_message,
+                         "Matroska HEVC visible range starts after packets already written to the file");
+            return false;
+        }
+        for (std::size_t index = 0U; index < impl_->committed_sample_count; ++index)
+        {
+            const MatroskaSample &sample = impl_->samples[index];
+            if (sample.pts < range.media_time || sample.pts >= visible_end)
+            {
+                assign_error(error_message,
+                             "Matroska HEVC visible range excludes packets already written to the file");
+                return false;
+            }
+        }
+
         impl_->pending_visible_range = range;
-        impl_->has_pending_visible_range = range.duration > 0;
+        impl_->has_pending_visible_range = true;
         return true;
     }
 
@@ -356,7 +589,7 @@ namespace alpha_recorder::obs
         {
             return true;
         }
-        if (packet->size > std::numeric_limits<std::uint32_t>::max())
+        if (packet->size > static_cast<std::size_t>(std::numeric_limits<int>::max()))
         {
             assign_error(error_message, "Matroska HEVC muxer received an oversized HEVC packet");
             return false;
@@ -364,44 +597,62 @@ namespace alpha_recorder::obs
 
         capture_headers_from_annexb(impl_->header_annexb, packet->data, packet->size);
 
-        if (impl_->first_packet)
+        if (impl_->samples.empty())
         {
             impl_->timebase_num = packet->timebase_num;
             impl_->timebase_den = packet->timebase_den;
             impl_->stats.first_pts = packet->pts;
-            impl_->first_packet = false;
         }
-        else if (impl_->timebase_num != packet->timebase_num || impl_->timebase_den != packet->timebase_den)
+        else
         {
-            assign_error(error_message, "Matroska HEVC muxer received mixed HEVC packet timebases");
-            return false;
-        }
-
-        const std::uint64_t offset = static_cast<std::uint64_t>(impl_->spool_writer.tellp());
-        impl_->spool_writer.write(reinterpret_cast<const char *>(packet->data),
-                                  static_cast<std::streamsize>(packet->size));
-        if (!impl_->spool_writer)
-        {
-            assign_error(error_message, "Matroska HEVC muxer could not write an HEVC packet to the spool");
-            return false;
+            if (impl_->timebase_num != packet->timebase_num || impl_->timebase_den != packet->timebase_den)
+            {
+                assign_error(error_message, "Matroska HEVC muxer received mixed HEVC packet timebases");
+                return false;
+            }
+            MatroskaSample &previous = impl_->samples.back();
+            const std::int64_t duration = packet->dts - previous.dts;
+            if (duration <= 0)
+            {
+                assign_error(error_message, "Matroska HEVC muxer requires strictly increasing HEVC DTS values");
+                return false;
+            }
+            previous.duration = duration;
         }
 
         MatroskaSample sample{};
-        sample.offset = offset;
-        sample.size = static_cast<std::uint32_t>(packet->size);
         sample.pts = packet->pts;
         sample.dts = packet->dts;
         sample.keyframe = packet->keyframe;
         impl_->samples.push_back(sample);
 
+        PendingMatroskaPacket pending{};
+        pending.sample_index = impl_->samples.size() - 1U;
+        pending.data.assign(packet->data, packet->data + packet->size);
+        impl_->pending_packets.push_back(std::move(pending));
+        impl_->pending_packet_bytes += static_cast<std::uint64_t>(packet->size);
+
         impl_->stats.last_pts = packet->pts;
         ++impl_->stats.packet_count;
-        ++impl_->stats.muxed_packet_count;
         if (sample.keyframe)
         {
             ++impl_->stats.keyframe_count;
         }
-        impl_->stats.packet_bytes += static_cast<std::uint64_t>(sample.size);
+        impl_->stats.packet_bytes += static_cast<std::uint64_t>(packet->size);
+
+        while (impl_->pending_packets.size() > impl_->tail_packet_buffer_size)
+        {
+            if (!impl_->flush_oldest_pending_packet(error_message))
+            {
+                return false;
+            }
+        }
+        impl_->stats.max_buffered_packet_count = std::max<std::uint64_t>(
+            impl_->stats.max_buffered_packet_count,
+            static_cast<std::uint64_t>(impl_->pending_packets.size()));
+        impl_->stats.max_buffered_packet_bytes = std::max(
+            impl_->stats.max_buffered_packet_bytes,
+            impl_->pending_packet_bytes);
         return true;
     }
 
@@ -412,173 +663,70 @@ namespace alpha_recorder::obs
         {
             return true;
         }
-        if (impl_->spool_writer.is_open())
+        if (impl_->samples.empty())
         {
-            impl_->spool_writer.close();
-        }
-        if (!impl_->ensure_headers(error_message))
-        {
+            assign_error(error_message, "Matroska HEVC muxer received no HEVC packets");
             return false;
         }
-        if (!finalize_sample_durations(impl_->samples, impl_->timebase_num, error_message))
+
+        impl_->samples.back().duration = fallback_sample_duration(impl_->samples, impl_->timebase_num);
+        const std::int64_t visible_start = impl_->has_pending_visible_range
+                                               ? impl_->pending_visible_range.media_time
+                                               : impl_->samples.front().pts;
+        std::int64_t visible_end = std::numeric_limits<std::int64_t>::max();
+        if (impl_->has_pending_visible_range &&
+            !checked_range_end(impl_->pending_visible_range, visible_end, error_message))
         {
             return false;
         }
 
-        const std::int64_t first_pts = impl_->samples.front().pts;
-        const std::int64_t visible_start = impl_->has_pending_visible_range ? impl_->pending_visible_range.media_time : first_pts;
-        const std::int64_t visible_end = impl_->has_pending_visible_range
-                                             ? impl_->pending_visible_range.media_time + impl_->pending_visible_range.duration
-                                             : std::numeric_limits<std::int64_t>::max();
-        std::vector<std::size_t> visible_indices;
-        visible_indices.reserve(impl_->samples.size());
-        for (std::size_t index = 0U; index < impl_->samples.size(); ++index)
+        const auto first_visible = std::find_if(
+            impl_->samples.begin(), impl_->samples.end(),
+            [visible_start, visible_end](const MatroskaSample &sample) {
+                return sample.pts >= visible_start && sample.pts < visible_end;
+            });
+        if (first_visible == impl_->samples.end() || !first_visible->keyframe)
         {
-            const MatroskaSample &sample = impl_->samples[index];
-            if (sample.pts >= visible_start && sample.pts < visible_end)
+            assign_error(error_message, "Matroska HEVC output does not start on an IDR/keyframe packet");
+            return false;
+        }
+
+        const std::int64_t origin = impl_->committed_sample_count > 0U
+                                        ? impl_->samples.front().pts
+                                        : visible_start;
+        if (!impl_->open_format_context(origin, error_message))
+        {
+            return false;
+        }
+
+        for (const PendingMatroskaPacket &pending : impl_->pending_packets)
+        {
+            const MatroskaSample &sample = impl_->samples[pending.sample_index];
+            if (sample.pts < visible_start || sample.pts >= visible_end)
             {
-                visible_indices.push_back(index);
+                continue;
+            }
+            if (!impl_->write_packet(pending, visible_end, error_message))
+            {
+                return false;
             }
         }
-        if (visible_indices.empty())
-        {
-            assign_error(error_message, "Matroska HEVC visible range contains no HEVC packets");
-            return false;
-        }
-        if (!impl_->samples[visible_indices.front()].keyframe)
-        {
-            assign_error(error_message, "Matroska HEVC visible range must start on an IDR/keyframe packet");
-            return false;
-        }
+        impl_->pending_packets.clear();
+        impl_->pending_packet_bytes = 0U;
 
-        AVFormatContext *format_context = nullptr;
-        const std::string output_path = path_to_utf8(impl_->path);
-        int result = avformat_alloc_output_context2(&format_context, nullptr, "matroska", output_path.c_str());
-        if (result < 0 || format_context == nullptr)
+        if (impl_->stats.muxed_packet_count == 0U)
         {
-            assign_error(error_message, std::string{"could not allocate Matroska output context: "} + av_error_message(result));
+            assign_error(error_message, "Matroska HEVC visible range contains no muxed packets");
             return false;
         }
-
-        auto close_format_context = [&format_context]() noexcept {
-            if (format_context != nullptr)
-            {
-                if (format_context->pb != nullptr)
-                {
-                    avio_closep(&format_context->pb);
-                }
-                avformat_free_context(format_context);
-                format_context = nullptr;
-            }
-        };
-
-        AVStream *stream = avformat_new_stream(format_context, nullptr);
-        if (stream == nullptr)
-        {
-            close_format_context();
-            assign_error(error_message, "could not create the Matroska HEVC video stream");
-            return false;
-        }
-        stream->time_base = AVRational{impl_->timebase_num, impl_->timebase_den};
-        stream->avg_frame_rate = AVRational{impl_->timebase_den, impl_->timebase_num};
-        stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-        stream->codecpar->codec_id = AV_CODEC_ID_HEVC;
-        stream->codecpar->codec_tag = 0;
-        stream->codecpar->width = static_cast<int>(impl_->width);
-        stream->codecpar->height = static_cast<int>(impl_->height);
-        stream->codecpar->extradata = static_cast<std::uint8_t *>(av_mallocz(impl_->header_annexb.size() + AV_INPUT_BUFFER_PADDING_SIZE));
-        if (stream->codecpar->extradata == nullptr)
-        {
-            close_format_context();
-            assign_error(error_message, "could not allocate Matroska HEVC codec private data");
-            return false;
-        }
-        std::memcpy(stream->codecpar->extradata, impl_->header_annexb.data(), impl_->header_annexb.size());
-        stream->codecpar->extradata_size = static_cast<int>(impl_->header_annexb.size());
-
-        result = avio_open(&format_context->pb, output_path.c_str(), AVIO_FLAG_WRITE);
+        const int result = av_write_trailer(impl_->format_context);
         if (result < 0)
         {
-            close_format_context();
-            assign_error(error_message, std::string{"could not open the Matroska HEVC output: "} + av_error_message(result));
+            assign_error(error_message,
+                         std::string{"could not write the Matroska HEVC trailer: "} + av_error_message(result));
             return false;
         }
-        result = avformat_write_header(format_context, nullptr);
-        if (result < 0)
-        {
-            close_format_context();
-            assign_error(error_message, std::string{"could not write the Matroska HEVC header: "} + av_error_message(result));
-            return false;
-        }
-
-        std::ifstream spool_reader{impl_->spool_path, std::ios::binary};
-        if (!spool_reader)
-        {
-            close_format_context();
-            assign_error(error_message, "could not reopen the Matroska HEVC packet spool");
-            return false;
-        }
-
-        std::vector<std::uint8_t> packet_buffer;
-        for (const std::size_t index : visible_indices)
-        {
-            const MatroskaSample &sample = impl_->samples[index];
-            packet_buffer.resize(sample.size);
-            spool_reader.seekg(static_cast<std::streamoff>(sample.offset), std::ios::beg);
-            spool_reader.read(reinterpret_cast<char *>(packet_buffer.data()),
-                              static_cast<std::streamsize>(packet_buffer.size()));
-            if (!spool_reader)
-            {
-                close_format_context();
-                assign_error(error_message, "could not read an HEVC packet from the Matroska spool");
-                return false;
-            }
-
-            AVPacket *av_packet = av_packet_alloc();
-            if (av_packet == nullptr)
-            {
-                close_format_context();
-                assign_error(error_message, "could not allocate a Matroska HEVC packet");
-                return false;
-            }
-            result = av_new_packet(av_packet, static_cast<int>(packet_buffer.size()));
-            if (result < 0)
-            {
-                av_packet_free(&av_packet);
-                close_format_context();
-                assign_error(error_message, std::string{"could not allocate Matroska HEVC packet data: "} + av_error_message(result));
-                return false;
-            }
-            std::memcpy(av_packet->data, packet_buffer.data(), packet_buffer.size());
-            av_packet->stream_index = stream->index;
-            av_packet->pts = sample.pts - visible_start;
-            av_packet->dts = sample.dts - visible_start;
-            av_packet->duration = sample.duration;
-            if (sample.keyframe)
-            {
-                av_packet->flags |= AV_PKT_FLAG_KEY;
-            }
-            av_packet_rescale_ts(av_packet, AVRational{impl_->timebase_num, impl_->timebase_den}, stream->time_base);
-
-            result = av_interleaved_write_frame(format_context, av_packet);
-            av_packet_free(&av_packet);
-            if (result < 0)
-            {
-                close_format_context();
-                assign_error(error_message, std::string{"could not write a Matroska HEVC packet: "} + av_error_message(result));
-                return false;
-            }
-        }
-
-        result = av_write_trailer(format_context);
-        if (result < 0)
-        {
-            close_format_context();
-            assign_error(error_message, std::string{"could not write the Matroska HEVC trailer: "} + av_error_message(result));
-            return false;
-        }
-        close_format_context();
-
+        impl_->close_format_context();
         impl_->stats.finalized = true;
         return true;
     }
@@ -587,15 +735,9 @@ namespace alpha_recorder::obs
     {
         impl_->accepting_packets = false;
         impl_->release_encoder();
-        if (impl_->spool_writer.is_open())
-        {
-            impl_->spool_writer.close();
-        }
-        if (!impl_->spool_path.empty())
-        {
-            std::error_code error;
-            std::filesystem::remove(impl_->spool_path, error);
-        }
+        impl_->close_format_context();
+        impl_->pending_packets.clear();
+        impl_->pending_packet_bytes = 0U;
         impl_->storage_open = false;
     }
 
@@ -619,7 +761,7 @@ namespace alpha_recorder::obs
         return impl_->path;
     }
 
-    const DirectMp4MuxerStats &MatroskaHevcMuxer::stats() const noexcept
+    const AlphaMovieMuxerStats &MatroskaHevcMuxer::stats() const noexcept
     {
         return impl_->stats;
     }

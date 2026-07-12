@@ -52,7 +52,6 @@ namespace
         Idle,
         Running,
         StopRequested,
-        StopBoundaryReached,
         EndDataCaptureRequested,
         OutputDeactivated,
         MuxFinalized,
@@ -167,6 +166,7 @@ technique DrawRed
         bool packet_callback_connected = false;
         bool deactivate_signal_connected = false;
         bool stop_finalized = false;
+        std::string sink_error{};
         GpuTextureOutputStopState stop_state = GpuTextureOutputStopState::Idle;
         std::uint64_t packets_at_stop_request = 0U;
         std::uint64_t packets_at_stop_boundary = 0U;
@@ -213,7 +213,20 @@ technique DrawRed
 
     std::size_t env_size_value(const char *name, std::size_t fallback) noexcept
     {
+#ifdef _WIN32
+        char *raw_value = nullptr;
+        std::size_t raw_size = 0U;
+        if (_dupenv_s(&raw_value, &raw_size, name) != 0 || raw_value == nullptr)
+        {
+            std::free(raw_value);
+            return fallback;
+        }
+        const std::string owned_value{raw_value};
+        std::free(raw_value);
+        const char *value = owned_value.c_str();
+#else
         const char *value = std::getenv(name);
+#endif
         if (value == nullptr || *value == '\0')
         {
             return fallback;
@@ -239,8 +252,6 @@ technique DrawRed
             return "Running";
         case GpuTextureOutputStopState::StopRequested:
             return "StopRequested";
-        case GpuTextureOutputStopState::StopBoundaryReached:
-            return "StopBoundaryReached";
         case GpuTextureOutputStopState::EndDataCaptureRequested:
             return "EndDataCaptureRequested";
         case GpuTextureOutputStopState::OutputDeactivated:
@@ -1270,7 +1281,7 @@ technique DrawRed
         }
 
         const char *path = obs_data_get_string(settings, "path");
-        context->path = path != nullptr ? std::filesystem::path{path} : std::filesystem::path{};
+        context->path = path != nullptr ? std::filesystem::u8path(path) : std::filesystem::path{};
         context->container = alpha_recorder::obs::alpha_movie_container_for_recording_path(
             context->path,
             alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc);
@@ -1622,9 +1633,8 @@ technique DrawRed
             previous_state = context->stop_state;
             if (context->stop_state == GpuTextureOutputStopState::Running ||
                 context->stop_state == GpuTextureOutputStopState::StopRequested ||
-                context->stop_state == GpuTextureOutputStopState::StopBoundaryReached ||
                 context->stop_state == GpuTextureOutputStopState::EndDataCaptureRequested ||
-                context->stop_state == GpuTextureOutputStopState::MuxFinalized)
+                context->stop_state == GpuTextureOutputStopState::OutputDeactivated)
             {
                 context->stop_state = GpuTextureOutputStopState::OutputDeactivated;
             }
@@ -1679,6 +1689,7 @@ technique DrawRed
             context->packet_callback_connected = false;
             context->deactivate_signal_connected = false;
             context->stop_finalized = false;
+            context->sink_error.clear();
             context->stop_state = GpuTextureOutputStopState::Idle;
             context->packets_at_stop_request = 0U;
             context->packets_at_stop_boundary = 0U;
@@ -1703,7 +1714,10 @@ technique DrawRed
 
         std::string error_message;
         if (!ensure_output_directory(context->path, &error_message) ||
-            !context->sink.open(alpha_recorder::obs::GpuTextureAlphaOutputSinkConfig{context->path, context->container},
+            !context->sink.open(alpha_recorder::obs::GpuTextureAlphaOutputSinkConfig{
+                                    context->path,
+                                    context->container,
+                                    context->replay_texture_count * 2U},
                                 &error_message) ||
             !setup_graph(*context, &error_message))
         {
@@ -1787,7 +1801,7 @@ technique DrawRed
 
         blog(LOG_INFO,
              "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u preset=%s tune=%s split=%s gpu=%d phase=%s delayed_replay=%s cts_driven_replay=%s replay_ring=%zu",
-             context->path.generic_string().c_str(),
+             context->path.generic_u8string().c_str(),
              context->encoder_id.c_str(),
              backend_name(backend_for_encoder_id(context->encoder_id)),
              context->width,
@@ -1843,17 +1857,19 @@ technique DrawRed
 
         const alpha_recorder::obs::GpuTextureAlphaOutputSinkStats &stats = context->sink.stats();
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] stop requested previous_state=%s packets_at_stop=%llu packets=%llu keyframes=%llu packet_bytes=%llu muxed_packets=%llu finalized=%s first_pts=%lld last_pts=%lld path=\"%s\"",
+             "[alpha_recorder_gpu_texture] stop requested previous_state=%s packets_at_stop=%llu packets=%llu keyframes=%llu packet_bytes=%llu muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%llu finalized=%s first_pts=%lld last_pts=%lld path=\"%s\"",
              stop_state_name(previous_state),
              static_cast<unsigned long long>(packets_at_stop_request),
              static_cast<unsigned long long>(stats.packet_count),
              static_cast<unsigned long long>(stats.keyframe_count),
              static_cast<unsigned long long>(stats.packet_bytes),
              static_cast<unsigned long long>(stats.muxed_packet_count),
+             static_cast<unsigned long long>(stats.max_buffered_packet_count),
+             static_cast<unsigned long long>(stats.max_buffered_packet_bytes),
              stats.finalized ? "true" : "false",
              static_cast<long long>(stats.first_pts),
              static_cast<long long>(stats.last_pts),
-             context->path.generic_string().c_str());
+             context->path.generic_u8string().c_str());
     }
 
     void gpu_texture_recording_packet(void *data, encoder_packet *packet)
@@ -1883,8 +1899,16 @@ technique DrawRed
         merge_packet_fields(*record, *packet);
         merge_replay_packet_generation(*context, *record);
         std::string error_message;
-        if (!context->sink.submit_packet(packet, &error_message) && !error_message.empty())
+        if (!context->sink.submit_packet(packet, &error_message))
         {
+            if (error_message.empty())
+            {
+                error_message = "Alpha Recorder alpha movie muxer rejected an encoded packet.";
+            }
+            if (context->sink_error.empty())
+            {
+                context->sink_error = error_message;
+            }
             obs_output_set_last_error(context->output, error_message.c_str());
             blog(LOG_ERROR, "[alpha_recorder_gpu_texture] %s", error_message.c_str());
         }
@@ -2066,7 +2090,6 @@ namespace alpha_recorder::obs
                 std::chrono::milliseconds{timeout_ms},
                 [&context]() {
                     return context->stop_state == GpuTextureOutputStopState::StopRequested ||
-                           context->stop_state == GpuTextureOutputStopState::StopBoundaryReached ||
                            context->stop_state == GpuTextureOutputStopState::MuxFinalized ||
                            context->stop_state == GpuTextureOutputStopState::EndDataCaptureRequested ||
                            context->stop_state == GpuTextureOutputStopState::OutputDeactivated ||
@@ -2122,9 +2145,7 @@ namespace alpha_recorder::obs
         {
             std::lock_guard<std::mutex> lock(context->mutex);
             if (context->stop_state == GpuTextureOutputStopState::Running ||
-                context->stop_state == GpuTextureOutputStopState::StopRequested ||
-                context->stop_state == GpuTextureOutputStopState::MuxFinalized ||
-                context->stop_state == GpuTextureOutputStopState::StopBoundaryReached)
+                context->stop_state == GpuTextureOutputStopState::StopRequested)
             {
                 context->stop_state = GpuTextureOutputStopState::EndDataCaptureRequested;
                 context->state_cv.notify_all();
@@ -2486,13 +2507,15 @@ namespace alpha_recorder::obs
         {
             return context->sink.stats().finalized;
         }
-        if (context->stop_state != GpuTextureOutputStopState::StopRequested &&
-            context->stop_state != GpuTextureOutputStopState::StopBoundaryReached &&
-            context->stop_state != GpuTextureOutputStopState::EndDataCaptureRequested &&
-            context->stop_state != GpuTextureOutputStopState::OutputDeactivated)
+        if (!context->sink_error.empty())
+        {
+            assign_error(error_message, context->sink_error);
+            return false;
+        }
+        if (context->stop_state != GpuTextureOutputStopState::OutputDeactivated)
         {
             assign_error(error_message,
-                         std::string{"Alpha Recorder GPU texture output cannot finalize before drain starts; state="} +
+                         std::string{"Alpha Recorder GPU texture output cannot finalize before output deactivation; state="} +
                              stop_state_name(context->stop_state));
             return false;
         }
@@ -2507,9 +2530,11 @@ namespace alpha_recorder::obs
         context->stop_state = GpuTextureOutputStopState::MuxFinalized;
         context->state_cv.notify_all();
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] mux finalized packets=%llu muxed_packets=%llu last_pts=%lld replay_queue_pending=%zu replay_consumed=%llu replay_underflows=%llu replay_emitted=%llu",
+             "[alpha_recorder_gpu_texture] mux finalized packets=%llu muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%llu last_pts=%lld replay_queue_pending=%zu replay_consumed=%llu replay_underflows=%llu replay_emitted=%llu",
              static_cast<unsigned long long>(context->sink.stats().packet_count),
              static_cast<unsigned long long>(context->sink.stats().muxed_packet_count),
+             static_cast<unsigned long long>(context->sink.stats().max_buffered_packet_count),
+             static_cast<unsigned long long>(context->sink.stats().max_buffered_packet_bytes),
              static_cast<long long>(context->sink.stats().last_pts),
              context->replay_generation_queue.size(),
              static_cast<unsigned long long>(context->replay_consumed_entries),
@@ -2710,6 +2735,8 @@ namespace alpha_recorder::obs
         result.keyframe_count = stats.keyframe_count;
         result.packet_bytes = stats.packet_bytes;
         result.muxed_packet_count = stats.muxed_packet_count;
+        result.max_buffered_packet_count = stats.max_buffered_packet_count;
+        result.max_buffered_packet_bytes = stats.max_buffered_packet_bytes;
         result.first_pts = stats.first_pts;
         result.last_pts = stats.last_pts;
         result.finalized = stats.finalized;

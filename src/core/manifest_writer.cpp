@@ -278,10 +278,10 @@ namespace alpha_recorder
                 write_json_string(stream, summary.finalization_format);
                 stream << ",\n";
                 stream << "  \"sidecar_path\": ";
-                write_json_string(stream, summary.sidecar_path.generic_string());
+                write_json_string(stream, summary.sidecar_path.generic_u8string());
                 stream << ",\n";
                 stream << "  \"manifest_path\": ";
-                write_json_string(stream, summary.manifest_path.generic_string());
+                write_json_string(stream, summary.manifest_path.generic_u8string());
                 stream << ",\n";
                 write_json_number(stream, "pair_count", summary.pair_count, true);
                 write_json_number(stream, "record_count", summary.pair_count, true);
@@ -344,7 +344,7 @@ namespace alpha_recorder
             {
                 if (error_message != nullptr)
                 {
-                    *error_message = std::string{"failed to open manifest: "} + manifest_path.generic_string();
+                    *error_message = std::string{"failed to open manifest: "} + manifest_path.generic_u8string();
                 }
                 return false;
             }
@@ -354,7 +354,7 @@ namespace alpha_recorder
             {
                 if (error_message != nullptr)
                 {
-                    *error_message = std::string{"failed to read manifest: "} + manifest_path.generic_string();
+                    *error_message = std::string{"failed to read manifest: "} + manifest_path.generic_u8string();
                 }
                 return false;
             }

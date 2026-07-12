@@ -23,7 +23,7 @@ namespace alpha_recorder::obs
         [[nodiscard]] virtual bool is_open() const noexcept = 0;
         [[nodiscard]] virtual bool is_accepting_packets() const noexcept = 0;
         [[nodiscard]] virtual const std::filesystem::path &path() const noexcept = 0;
-        [[nodiscard]] virtual const DirectMp4MuxerStats &stats() const noexcept = 0;
+        [[nodiscard]] virtual const AlphaMovieMuxerStats &stats() const noexcept = 0;
     };
 
     namespace
@@ -84,7 +84,7 @@ namespace alpha_recorder::obs
                 return muxer_.path();
             }
 
-            [[nodiscard]] const DirectMp4MuxerStats &stats() const noexcept override
+            [[nodiscard]] const AlphaMovieMuxerStats &stats() const noexcept override
             {
                 return muxer_.stats();
             }
@@ -99,7 +99,9 @@ namespace alpha_recorder::obs
             [[nodiscard]] bool open(const GpuTextureAlphaOutputSinkConfig &config,
                                     std::string *error_message) override
             {
-                return muxer_.open(MatroskaHevcMuxerConfig{config.path}, error_message);
+                return muxer_.open(
+                    MatroskaHevcMuxerConfig{config.path, config.tail_packet_buffer_size},
+                    error_message);
             }
 
             [[nodiscard]] bool begin_mux(obs_output_t *output, std::string *error_message) override
@@ -148,7 +150,7 @@ namespace alpha_recorder::obs
                 return muxer_.path();
             }
 
-            [[nodiscard]] const DirectMp4MuxerStats &stats() const noexcept override
+            [[nodiscard]] const AlphaMovieMuxerStats &stats() const noexcept override
             {
                 return muxer_.stats();
             }
@@ -184,23 +186,55 @@ namespace alpha_recorder::obs
 
     bool GpuTextureAlphaOutputSink::begin_mux(obs_output_t *output, std::string *error_message)
     {
-        return muxer_ == nullptr || muxer_->begin_mux(output, error_message);
+        if (muxer_ == nullptr)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "Alpha Recorder alpha movie muxer is not open.";
+            }
+            return false;
+        }
+        return muxer_->begin_mux(output, error_message);
     }
 
     bool GpuTextureAlphaOutputSink::set_visible_range(const AlphaVisiblePacketRange &range,
                                                       std::string *error_message)
     {
-        return muxer_ == nullptr || muxer_->set_visible_range(range, error_message);
+        if (muxer_ == nullptr)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "Alpha Recorder alpha movie muxer is not open.";
+            }
+            return false;
+        }
+        return muxer_->set_visible_range(range, error_message);
     }
 
     bool GpuTextureAlphaOutputSink::submit_packet(encoder_packet *packet, std::string *error_message)
     {
-        return muxer_ == nullptr || muxer_->submit_packet(packet, error_message);
+        if (muxer_ == nullptr)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "Alpha Recorder alpha movie muxer is not open.";
+            }
+            return false;
+        }
+        return muxer_->submit_packet(packet, error_message);
     }
 
     bool GpuTextureAlphaOutputSink::finalize(std::string *error_message)
     {
-        return muxer_ == nullptr || muxer_->finalize(error_message);
+        if (muxer_ == nullptr)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "Alpha Recorder alpha movie muxer is not open.";
+            }
+            return false;
+        }
+        return muxer_->finalize(error_message);
     }
 
     void GpuTextureAlphaOutputSink::close_storage() noexcept

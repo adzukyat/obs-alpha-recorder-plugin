@@ -91,8 +91,13 @@ Failure behavior:
 - If alignment or mask writing cannot keep up, keep alpha mask movie generation
   running by repeating the previous alpha frame for recoverable gaps, log the
   repeat/drop counts, and do not stop or slow the main OBS recording.
-- If finalization fails on record stop, log the error and leave any partial mask
-  movie as a debugging artifact.
+- Temporary alpha files are published only after mux finalization succeeds.
+  Failed temporary files are removed; they are not renamed to the final
+  recording path.
+- Sync-proof failure is best-effort by default: apply a usable partial visible
+  range when one exists, otherwise publish the complete alpha timeline. When
+  `Fail close on sync proof failure` is enabled under Debug, the affected alpha
+  segment is removed instead.
 - The main OBS recording must remain the highest-priority artifact.
 
 ## Settings Contract
@@ -126,6 +131,8 @@ Settings include:
   Reordered alpha texture packets cannot currently be proven sync-safe across
   supported OBS texture encoders, so these controls are intentionally not
   exposed through the UI, config, WebSocket API, or E2E harness.
+- A Debug group at the bottom of the dialog contains Diagnostic Log and
+  `Fail close on sync proof failure`. Both default to off.
 
 Persisted OBS user config keys:
 
@@ -142,6 +149,7 @@ Persisted OBS user config keys:
 | HEVC NVENC Split Encode | `AlphaRecorder.hevc_nvenc_split_encode` |
 | HEVC NVENC GPU index | `AlphaRecorder.hevc_nvenc_gpu_index` |
 | Diagnostic logging | `AlphaRecorder.diagnostic_logging` |
+| Fail close on sync proof failure | `AlphaRecorder.fail_close_on_sync_proof_failure` |
 
 NVENC Split Encode accepts `auto`, `disabled`, `forced`, `2`, and `3`. Non-auto
 Split Encode settings are passed to OBS's NVENC texture encoder as
@@ -166,6 +174,21 @@ video encoder and that encoder advertises `OBS_ENCODER_CAP_PASS_TEXTURE`.
 Encoder-name presence alone is not enough. CPU fallback HEVC writer paths retain
 their own FFmpeg openability probes where applicable.
 
+Container selection is independent from the HEVC backend. MP4, hybrid MP4, and
+fragmented MP4 recordings use the ISO BMFF MP4 flavor; MOV, hybrid MOV, and
+fragmented MOV recordings use the QuickTime flavor; MKV recordings use
+Matroska. Advanced FFmpeg recording uses `FFExtension` when OBS has not exposed
+the final output path yet. Unknown extensions use MP4.
+
+MP4/MOV write packet payloads directly and build their final sample tables at
+stop. Matroska writes directly through libavformat while retaining only twice
+the configured replay-ring length (at most 256 encoded packets), enough to
+discard the bounded delayed-replay tail.
+This keeps Matroska stop cost bounded instead of copying the complete recording
+from a second spool file. The visible start must be an IDR/keyframe; a range
+that would exclude already-written Matroska packets is rejected and follows the
+configured sync-proof failure policy.
+
 Settings can also be driven by obs-websocket vendor API for automated E2E:
 
 - Vendor: `alpha_recorder`
@@ -189,43 +212,49 @@ The current tree provides:
 
 ## Alignment Strategy
 
+Common rules:
+
 1. Keep OBS's normal recording color format independent of Alpha Recorder so
    production recording can use hardware-friendly formats such as NV12/P010.
-2. Retain the active recording output and register render, raw-video, and packet
-   callbacks on `OBS_FRONTEND_EVENT_RECORDING_STARTING`.
-3. Open the alpha movie writer on `OBS_FRONTEND_EVENT_RECORDING_STARTED`, once
-   the recording path is available.
-4. Capture the rendered Program texture after OBS renders the main mix, extract
-   its alpha into a `GS_R8` mask texture on the GPU, then read it back through a
-   small staging-surface ring before adding it to the pending-frame queue.
-5. Use OBS raw-video callbacks as the final video-output cadence source.
-6. Use encoded packet composition timestamp (`encoder_packet_time::cts`) to
-   identify the raw-video cadence frame actually admitted into the RGB
-   recording, rather than applying encoder-specific startup offsets.
-7. For texture encoders, use the next observed raw-video cadence frame after
-   CTS, because OBS queues the current rendered texture while draining the
-   previous raw-video timestamp.
-8. When OBS repeats the same cached output frame, duplicate the previous alpha
-   mask frame so the mask movie mirrors RGB duplicate/drop behavior.
-9. If the first admitted RGB frame is already a duplicate, use the duplicate's
-   raw content-origin timestamp to select the matching alpha frame.
-10. Use video packet callbacks from the active recording output only to enqueue
-    encoded-video packet ordering evidence, sorted by packet PTS.
-11. Resolve and hand off aligned mask frames on Alpha Recorder's alignment
-    worker rather than inside OBS callbacks.
-12. Cache the texture-encoder path classification from recording output
-    capabilities and OBS's active NV12/P010 texture state.
-13. Do not query per-encoder texture/mix state from packet callbacks or from the
-    `OBS_FRONTEND_EVENT_RECORDING_STARTING` transition.
-14. Pause capture on recording pause.
-15. Do not pause on `OBS_FRONTEND_EVENT_RECORDING_STOPPING`; keep capturing
-    until `OBS_FRONTEND_EVENT_RECORDING_STOPPED` so stop-edge frames can
-    reconcile.
-16. Close the mask movie on recording stop or split rotation.
-17. Never decode or modify the RGB recording in Alpha Recorder.
+2. Retain the active recording output on
+   `OBS_FRONTEND_EVENT_RECORDING_STARTING`, classify the main encoder topology,
+   and collect its encoded packet timing evidence.
+3. Pause alpha admission with the main recording, but keep stop-edge processing
+   active until OBS reports recording stopped.
+4. Never decode or modify the RGB recording, and never block or stop it because
+   an alpha segment failed.
 
-Raw-video callbacks are used only as cadence evidence for the final OBS video
-output. Packet callbacks are used only for encoded packet ordering.
+PNG MOV CPU path:
+
+1. Capture Program alpha through the staging-surface ring.
+2. Treat OBS raw-video callbacks as authoritative output cadence.
+3. Use packet CTS to identify which cadence frames were admitted, repeat the
+   previous alpha content for recoverable gaps, and perform writer work on the
+   alignment worker.
+
+HEVC GPU texture path:
+
+1. Extract Program alpha into retained GPU textures. Select the live Program
+   generation for a texture main encoder and the previous Program generation
+   for a software/raw main encoder.
+2. Start the auxiliary encoder only after the first main packet supplies the
+   target CTS. Replay retained generations in main-packet order so alpha PTS 0
+   begins on an IDR and corresponds to the first admitted RGB content.
+3. Record Program generation, render time, main packet CTS, alpha packet PTS,
+   and emitted generation in the timeline ledger. A fixed content delay or
+   backend-specific packet offset is not part of the correctness path.
+4. Before stopping, allow at most one second for queued main generations to
+   reach the auxiliary mix. Then request stop, end data capture, wait for OBS
+   output deactivation (the encoder-drain boundary), solve the final visible
+   range, finalize the muxer, and publish.
+5. Packet write failure is latched for the whole segment. A later successful
+   trailer write cannot turn a segment with a missing encoded packet into a
+   successful output.
+
+The GPU path deliberately does not register a global raw-video callback; doing
+so would reactivate OBS staging/readback and defeat the GPU-resident performance
+path. Packet callbacks remain ordering and presentation evidence, while Program
+generation is content identity.
 
 If the main Program texture produces only opaque alpha in a future OBS/runtime
 configuration, the fallback is a dedicated render path: render the active
@@ -279,7 +308,7 @@ Automation:
 
 The OBS module target and the E2E harness require a real OBS developer tree.
 `OBS_ROOT` must point to a tree with libobs headers, import libraries,
-`bin/64bit`, and `data`.
+and the platform's OBS runtime/plugin/data layout.
 
 The OBS source checkout is tracked as a git submodule at
 `deps/obs/obs-studio`. When bootstrapped from source, the staged developer tree
@@ -306,9 +335,12 @@ uses Ninja and stages the installed OBS runtime layout under
 
 `deps/obs/obs-root.cmake` is an optional CMake fragment generated by
 `cmake/scripts/BootstrapObs.cmake`. `OBS_ROOT` may also be supplied through the
-environment or the CMake preset. `cmake/FindOBS.cmake` looks for libobs headers
-and import libraries under the configured root and creates an imported
-`OBS::libobs` target when found.
+environment, the CMake preset, or `-DOBS_ROOT=...`; an explicit non-empty value
+always takes precedence over the generated fragment. Linux/WSL dependency
+discovery ignores OBS `.deps` bundles from the shared checkout so a Windows or
+macOS dependency package cannot enter an ELF link. `cmake/FindOBS.cmake` looks
+for libobs headers and import libraries under the configured root and creates
+an imported `OBS::libobs` target when found.
 
 Configure and build:
 

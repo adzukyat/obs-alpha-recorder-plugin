@@ -3,6 +3,7 @@
 #include "alpha_recorder/plugin.hpp"
 #include "direct_mp4_muxer.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -15,9 +16,10 @@ namespace alpha_recorder::obs
     {
         std::filesystem::path path{};
         AlphaMovieContainer container = AlphaMovieContainer::Mp4;
+        std::size_t tail_packet_buffer_size = 256U;
     };
 
-    using GpuTextureAlphaOutputSinkStats = DirectMp4MuxerStats;
+    using GpuTextureAlphaOutputSinkStats = AlphaMovieMuxerStats;
 
     class GpuTextureAlphaOutputSink final
     {
@@ -48,7 +50,7 @@ namespace alpha_recorder::obs
 
     private:
         std::unique_ptr<Muxer> muxer_{};
-        DirectMp4MuxerStats empty_stats_{};
+        AlphaMovieMuxerStats empty_stats_{};
     };
 
 } // namespace alpha_recorder::obs

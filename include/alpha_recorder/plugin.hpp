@@ -633,6 +633,10 @@ namespace alpha_recorder::obs
         return ".mp4";
     }
 
+    [[nodiscard]] inline AlphaMovieContainer alpha_movie_container_for_recording_format(
+        std::string_view recording_format,
+        FinalizationFormat format);
+
     [[nodiscard]] inline AlphaMovieContainer alpha_movie_container_for_recording_path(
         const std::filesystem::path &recording_path,
         FinalizationFormat format)
@@ -642,14 +646,30 @@ namespace alpha_recorder::obs
             return AlphaMovieContainer::Mov;
         }
 
-        std::string extension = recording_path.extension().string();
-        std::transform(extension.begin(), extension.end(), extension.begin(),
-                       [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-        if (extension == ".mov")
+        return alpha_movie_container_for_recording_format(recording_path.extension().string(), format);
+    }
+
+    [[nodiscard]] inline AlphaMovieContainer alpha_movie_container_for_recording_format(
+        std::string_view recording_format,
+        FinalizationFormat format)
+    {
+        if (!finalization_format_is_hevc(format))
         {
             return AlphaMovieContainer::Mov;
         }
-        if (extension == ".mkv")
+
+        std::string normalized{recording_format};
+        if (!normalized.empty() && normalized.front() == '.')
+        {
+            normalized.erase(normalized.begin());
+        }
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                       [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (normalized == "mov" || normalized == "hybrid_mov" || normalized == "fragmented_mov")
+        {
+            return AlphaMovieContainer::Mov;
+        }
+        if (normalized == "mkv")
         {
             return AlphaMovieContainer::Mkv;
         }

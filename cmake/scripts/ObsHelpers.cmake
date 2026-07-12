@@ -201,7 +201,10 @@ function(alpha_recorder_write_obs_root_config obs_root config_file)
     cmake_path(ABSOLUTE_PATH obs_root NORMALIZE OUTPUT_VARIABLE resolved_obs_root)
     cmake_path(GET config_file PARENT_PATH config_dir)
     file(MAKE_DIRECTORY "${config_dir}")
-    file(WRITE "${config_file}" "set(OBS_ROOT \"${resolved_obs_root}\" CACHE PATH \"Path to a staged OBS developer tree\" FORCE)\n")
+    file(WRITE "${config_file}"
+        "if(NOT DEFINED OBS_ROOT OR OBS_ROOT STREQUAL \"\")\n"
+        "    set(OBS_ROOT \"${resolved_obs_root}\" CACHE PATH \"Path to a staged OBS developer tree\")\n"
+        "endif()\n")
 endfunction()
 
 function(alpha_recorder_write_json_manifest output_path)

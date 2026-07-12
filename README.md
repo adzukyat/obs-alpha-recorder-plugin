@@ -24,6 +24,8 @@ Use OBS the way you already do:
 
 - Alpha-mask output using OBS texture HEVC encoders (NVENC / AMF / QSV / VAAPI
   when the matching OBS encoder is available).
+- HEVC alpha files automatically follow OBS MP4, MOV, and MKV recording
+  containers, including hybrid/fragmented MP4 and MOV profiles.
 - Lossless alpha-mask output in PNG MOV format.
 - Simple switching between encoder settings.
 - Fully synchronized start position and frames between alpha and the main video.

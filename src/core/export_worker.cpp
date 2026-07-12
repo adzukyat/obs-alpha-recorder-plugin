@@ -901,7 +901,7 @@ namespace alpha_recorder::obs
             if (!ensure_parent_directory(config.output_path))
             {
                 return set_error(error_message, std::string{"Alpha Recorder could not create the mask video directory: "} +
-                                                    config.output_path.parent_path().generic_string());
+                                                    config.output_path.parent_path().generic_u8string());
             }
 
             const AVCodec *const encoder = select_output_encoder(config.finalization_format);
@@ -994,7 +994,7 @@ namespace alpha_recorder::obs
                 {
                     delete impl;
                     return set_error(error_message, std::string{"Alpha Recorder could not open the mask video file: "} +
-                                                        config.output_path.generic_string() + " (" + av_error_message(ret) + ")");
+                                                        config.output_path.generic_u8string() + " (" + av_error_message(ret) + ")");
                 }
             }
 
