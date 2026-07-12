@@ -913,6 +913,7 @@ namespace alpha_recorder::obs
         bool accepting_packets = false;
         bool header_written = false;
         bool first_packet = true;
+        bool quicktime_flavor = false;
         obs_encoder_t *encoder = nullptr;
         std::uint32_t width = 0U;
         std::uint32_t height = 0U;
@@ -934,6 +935,7 @@ namespace alpha_recorder::obs
             accepting_packets = false;
             header_written = false;
             first_packet = true;
+            quicktime_flavor = false;
             width = 0U;
             height = 0U;
             timebase_num = 1U;
@@ -967,12 +969,22 @@ namespace alpha_recorder::obs
 
             ByteWriter ftyp;
             const std::size_t start = ftyp.begin_box("ftyp");
-            ftyp.fourcc("isom");
-            ftyp.u32(0x00000200U);
-            ftyp.fourcc("isom");
-            ftyp.fourcc("iso2");
-            ftyp.fourcc("mp41");
-            ftyp.fourcc("hvc1");
+            if (quicktime_flavor)
+            {
+                ftyp.fourcc("qt  ");
+                ftyp.u32(0x00000200U);
+                ftyp.fourcc("qt  ");
+                ftyp.fourcc("hvc1");
+            }
+            else
+            {
+                ftyp.fourcc("isom");
+                ftyp.u32(0x00000200U);
+                ftyp.fourcc("isom");
+                ftyp.fourcc("iso2");
+                ftyp.fourcc("mp41");
+                ftyp.fourcc("hvc1");
+            }
             ftyp.end_box(start);
             if (!serializer_write_all(mp4_serializer, ftyp.bytes().data(), ftyp.bytes().size()))
             {
@@ -1097,6 +1109,7 @@ namespace alpha_recorder::obs
         }
 
         impl_->path = config.path;
+        impl_->quicktime_flavor = config.quicktime_flavor;
         impl_->serializer_open = true;
         return true;
     }

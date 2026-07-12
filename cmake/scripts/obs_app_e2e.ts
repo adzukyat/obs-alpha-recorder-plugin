@@ -1075,7 +1075,7 @@ async function waitForPath(path: string, timeoutSeconds: number): Promise<void> 
 
 function assertNoInvalidAlphaArtifacts(artifactRoot: string): void {
   const invalidArtifacts = readdirSync(artifactRoot).filter(
-    (entry) => entry.includes(".alpha.tmp.") || entry.includes(".sync-invalid"),
+    (entry) => entry.includes(".alpha.tmp.") || entry.includes(".sync-invalid") || entry.endsWith(".spool"),
   );
   if (invalidArtifacts.length > 0) {
     throw new Error(`Invalid alpha artifacts were left in the recording directory: ${invalidArtifacts.join(", ")}`);
@@ -1084,12 +1084,20 @@ function assertNoInvalidAlphaArtifacts(artifactRoot: string): void {
 
 function alphaPathForRgb(rgbPath: string, expectedFinalizationFormat: string): string {
   const basePath = rgbPath.replace(/\.[^.\\/]+$/, "");
-  const alphaExtension = expectedFinalizationFormat === "mask_png_mov" ? ".mov" : ".mp4";
+  const rgbExtension = rgbPath.match(/(\.[^.\\/]+)$/)?.[1]?.toLowerCase() ?? ".mp4";
+  const alphaExtension =
+    expectedFinalizationFormat === "mask_png_mov"
+      ? ".mov"
+      : rgbExtension === ".mkv" || rgbExtension === ".mov" || rgbExtension === ".mp4"
+        ? rgbExtension
+        : ".mp4";
   return `${basePath}.alpha${alphaExtension}`;
 }
 
 function invalidAlphaArtifacts(artifactRoot: string): string[] {
-  return readdirSync(artifactRoot).filter((entry) => entry.includes(".alpha.tmp.") || entry.includes(".sync-invalid"));
+  return readdirSync(artifactRoot).filter(
+    (entry) => entry.includes(".alpha.tmp.") || entry.includes(".sync-invalid") || entry.endsWith(".spool"),
+  );
 }
 
 async function waitForAlphaOutputSettled(

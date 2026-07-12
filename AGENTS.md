@@ -34,7 +34,8 @@ own transparency channel.
   slow the main OBS recording.
 - Alpha output is written beside the OBS recording. For example:
   - `.alpha.mov` for PNG MOV.
-  - `.alpha.mp4` for HEVC NVENC/AMF.
+  - `.alpha.mp4`, `.alpha.mov`, or `.alpha.mkv` for HEVC GPU outputs, matching
+    the OBS recording container when it is MP4, MOV, or MKV.
 
 ## Editing Guardrails
 

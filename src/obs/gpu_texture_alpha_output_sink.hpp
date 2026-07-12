@@ -1,9 +1,11 @@
 #pragma once
 
+#include "alpha_recorder/plugin.hpp"
 #include "direct_mp4_muxer.hpp"
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 
 namespace alpha_recorder::obs
@@ -12,6 +14,7 @@ namespace alpha_recorder::obs
     struct GpuTextureAlphaOutputSinkConfig
     {
         std::filesystem::path path{};
+        AlphaMovieContainer container = AlphaMovieContainer::Mp4;
     };
 
     using GpuTextureAlphaOutputSinkStats = DirectMp4MuxerStats;
@@ -19,7 +22,9 @@ namespace alpha_recorder::obs
     class GpuTextureAlphaOutputSink final
     {
     public:
-        GpuTextureAlphaOutputSink() = default;
+        class Muxer;
+
+        GpuTextureAlphaOutputSink();
         ~GpuTextureAlphaOutputSink() noexcept;
 
         GpuTextureAlphaOutputSink(const GpuTextureAlphaOutputSink &) = delete;
@@ -42,7 +47,8 @@ namespace alpha_recorder::obs
         [[nodiscard]] const GpuTextureAlphaOutputSinkStats &stats() const noexcept;
 
     private:
-        DirectMp4Muxer muxer_{};
+        std::unique_ptr<Muxer> muxer_{};
+        DirectMp4MuxerStats empty_stats_{};
     };
 
 } // namespace alpha_recorder::obs

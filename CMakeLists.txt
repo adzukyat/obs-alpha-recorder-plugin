@@ -157,6 +157,7 @@ set_target_properties(alpha_recorder_core PROPERTIES
 set(_alpha_recorder_direct_mp4_sources
     src/obs/direct_mp4_muxer.cpp
     src/obs/gpu_texture_alpha_output_sink.cpp
+    src/obs/matroska_hevc_muxer.cpp
 )
 endif()
 
@@ -260,6 +261,7 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
     target_link_libraries(alpha_recorder_e2e_output PRIVATE alpha_recorder_core OBS::libobs)
     target_include_directories(alpha_recorder_e2e_output PRIVATE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        ${_alpha_recorder_ffmpeg_include_dirs}
     )
     set_target_properties(alpha_recorder_e2e_output PROPERTIES
         OUTPUT_NAME "alpha_recorder_e2e"
@@ -827,6 +829,12 @@ if(_alpha_recorder_build_full_targets)
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER nvenc_hevc
         )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mp4 fhd60-rgb-nvenc-hevc-alpha-hevc-nvenc-mp4
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            RECORD_FORMAT mp4
+            EXPERIMENTAL
+        )
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_gop120 fhd60-rgb-nvenc-hevc-alpha-hevc-nvenc-gop120
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER nvenc_hevc
@@ -847,6 +855,7 @@ if(_alpha_recorder_build_full_targets)
     else()
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mp4 "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_gop120 "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
     endif()
     if(_alpha_recorder_obs_app_e2e_has_amf)

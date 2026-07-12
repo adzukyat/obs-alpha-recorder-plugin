@@ -80,8 +80,9 @@ The plugin follows OBS's recording path and naming rules. If OBS records
 `C:\Recordings\MyRec.mkv`, Alpha Recorder writes:
 
 - `C:\Recordings\MyRec.alpha.mov` for PNG MOV.
-- `C:\Recordings\MyRec.alpha.mp4` for HEVC NVENC, HEVC AMF, HEVC QSV, or HEVC
-  VAAPI.
+- `C:\Recordings\MyRec.alpha.mkv` for HEVC NVENC, HEVC AMF, HEVC QSV, or HEVC
+  VAAPI when the OBS recording is MKV. HEVC alpha also follows MP4 and MOV
+  recording containers; unknown recording extensions fall back to `.alpha.mp4`.
 
 Failure behavior:
 
@@ -155,10 +156,10 @@ Supported finalization formats:
 | Format id | Output | Notes |
 | --- | --- | --- |
 | `mask_png_mov` | Lossless grayscale PNG MOV `.mov` | CPU-heavy fallback, disk-light relative to raw masks |
-| `mask_hevc_nvenc` | HEVC NVENC `.mp4` | Uses OBS texture encoder `obs_nvenc_hevc_tex` |
-| `mask_hevc_amf` | HEVC AMF `.mp4` | Uses OBS texture encoder `h265_texture_amf` |
-| `mask_hevc_qsv` | HEVC QSV `.mp4` | Uses OBS texture encoder `obs_qsv11_hevc` |
-| `mask_hevc_vaapi` | HEVC VAAPI `.mp4` | Uses OBS texture encoder `hevc_ffmpeg_vaapi_tex` |
+| `mask_hevc_nvenc` | HEVC NVENC `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `obs_nvenc_hevc_tex`; container follows the OBS recording |
+| `mask_hevc_amf` | HEVC AMF `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `h265_texture_amf`; container follows the OBS recording |
+| `mask_hevc_qsv` | HEVC QSV `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `obs_qsv11_hevc`; container follows the OBS recording |
+| `mask_hevc_vaapi` | HEVC VAAPI `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `hevc_ffmpeg_vaapi_tex`; container follows the OBS recording |
 
 HEVC GPU texture options are exposed only when OBS registers the matching HEVC
 video encoder and that encoder advertises `OBS_ENCODER_CAP_PASS_TEXTURE`.
@@ -516,8 +517,9 @@ The OBS app E2E target:
   allowing only small start/terminal/count mismatches.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
-- For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports
-  `hevc`, and the output does not use an alpha pixel format.
+- For HEVC targets, verifies the alpha output container follows the OBS
+  recording container for MP4, MOV, and MKV, `ffprobe` reports `hevc`, and the
+  output does not use an alpha pixel format.
 
 The plugin logs one per-segment OBS performance summary covering
 capture/readback CPU time, GPU submission timing, alignment-worker batches,

@@ -145,6 +145,7 @@ technique DrawRed
         alpha_recorder::obs::GpuTextureAlphaOutputSink sink{};
 
         std::filesystem::path path{};
+        alpha_recorder::obs::AlphaMovieContainer container = alpha_recorder::obs::AlphaMovieContainer::Mp4;
         std::string encoder_id{kDefaultEncoderId};
         std::uint32_t width = 0U;
         std::uint32_t height = 0U;
@@ -1270,6 +1271,9 @@ technique DrawRed
 
         const char *path = obs_data_get_string(settings, "path");
         context->path = path != nullptr ? std::filesystem::path{path} : std::filesystem::path{};
+        context->container = alpha_recorder::obs::alpha_movie_container_for_recording_path(
+            context->path,
+            alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc);
 
         const char *encoder_id = obs_data_get_string(settings, "encoder_id");
         context->encoder_id = encoder_id != nullptr && *encoder_id != '\0' ? encoder_id : kDefaultEncoderId;
@@ -1699,7 +1703,7 @@ technique DrawRed
 
         std::string error_message;
         if (!ensure_output_directory(context->path, &error_message) ||
-            !context->sink.open(alpha_recorder::obs::GpuTextureAlphaOutputSinkConfig{context->path},
+            !context->sink.open(alpha_recorder::obs::GpuTextureAlphaOutputSinkConfig{context->path, context->container},
                                 &error_message) ||
             !setup_graph(*context, &error_message))
         {

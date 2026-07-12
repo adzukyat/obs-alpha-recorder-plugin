@@ -242,6 +242,29 @@ namespace
         return directory;
     }
 
+    std::string active_profile_recording_format(config_t *profile_config)
+    {
+        if (profile_config == nullptr)
+        {
+            return {};
+        }
+
+        const char *mode = config_get_string(profile_config, "Output", "Mode");
+        if (text_equals(mode, "Advanced"))
+        {
+            const char *recording_type = config_get_string(profile_config, "AdvOut", "RecType");
+            if (text_equals(recording_type, "FFmpeg"))
+            {
+                return {};
+            }
+            const char *format = config_get_string(profile_config, "AdvOut", "RecFormat2");
+            return format == nullptr ? std::string{} : std::string{format};
+        }
+
+        const char *format = config_get_string(profile_config, "SimpleOutput", "RecFormat2");
+        return format == nullptr ? std::string{} : std::string{format};
+    }
+
     std::filesystem::path recording_file_path_from_output(obs_output_t *recording_output)
     {
         if (recording_output == nullptr)
@@ -331,7 +354,25 @@ namespace
         return directory;
     }
 
-    std::filesystem::path temporary_gpu_texture_output_path(obs_output_t *recording_output)
+    alpha_recorder::obs::AlphaMovieContainer gpu_texture_output_container(obs_output_t *recording_output,
+                                                                          alpha_recorder::obs::FinalizationFormat format)
+    {
+        std::filesystem::path recording_path = current_recording_file_path(recording_output);
+        if (recording_path.empty())
+        {
+            config_t *profile_config = obs_frontend_get_profile_config();
+            const std::string recording_format = active_profile_recording_format(profile_config);
+            if (!recording_format.empty())
+            {
+                recording_path = std::filesystem::path{"recording." + recording_format};
+            }
+        }
+
+        return alpha_recorder::obs::alpha_movie_container_for_recording_path(recording_path, format);
+    }
+
+    std::filesystem::path temporary_gpu_texture_output_path(obs_output_t *recording_output,
+                                                            alpha_recorder::obs::FinalizationFormat format)
     {
         const std::filesystem::path directory = recording_output_directory(recording_output);
         if (directory.empty())
@@ -341,7 +382,9 @@ namespace
 
         const auto now = std::chrono::steady_clock::now().time_since_epoch();
         const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-        return directory / (std::string{".alpha-recorder-"} + std::to_string(ticks) + ".alpha.tmp.mp4");
+        const auto container = gpu_texture_output_container(recording_output, format);
+        return directory / (std::string{".alpha-recorder-"} + std::to_string(ticks) + ".alpha.tmp" +
+                            std::string{alpha_recorder::obs::alpha_movie_container_extension(container)});
     }
 
     bool move_completed_gpu_texture_output(const std::filesystem::path &temporary_path,
@@ -387,7 +430,7 @@ namespace
             if (error_message != nullptr)
             {
                 *error_message =
-                    "Alpha Recorder could not rename the temporary GPU texture alpha MP4 to the final output path.";
+                    "Alpha Recorder could not rename the temporary GPU texture alpha movie to the final output path.";
             }
             return false;
         }
@@ -407,7 +450,7 @@ namespace
         std::error_code error;
         std::filesystem::remove(writer_path, error);
         blog(error ? LOG_WARNING : LOG_INFO,
-             "Alpha Recorder removed failed GPU texture alpha MP4: path=\"%s\" final=\"%s\" removed=%s reason=\"%s\" remove_error=\"%s\"",
+             "Alpha Recorder removed failed GPU texture alpha movie: path=\"%s\" final=\"%s\" removed=%s reason=\"%s\" remove_error=\"%s\"",
              writer_path.generic_string().c_str(),
              final_path.generic_string().c_str(),
              error ? "false" : "true",
@@ -717,7 +760,8 @@ namespace
             }
             else
             {
-                const std::filesystem::path temporary_mask_path = temporary_gpu_texture_output_path(recording_output_);
+                const std::filesystem::path temporary_mask_path =
+                    temporary_gpu_texture_output_path(recording_output_, settings.finalization_format);
                 if (!temporary_mask_path.empty())
                 {
                     if (!open_gpu_texture_segment_locked({}, temporary_mask_path, video_info, false))
@@ -1206,7 +1250,7 @@ namespace
                 {
                     const std::string log_reason = nonfatal_sync_log_reason(sync_failure_reason);
                     blog(LOG_WARNING,
-                         "[alpha_recorder] sync proof not certified; publishing GPU texture alpha MP4 %s: path=\"%s\" final=\"%s\" media_time=%lld duration=%lld reason=\"%s\"",
+                         "[alpha_recorder] sync proof not certified; publishing GPU texture alpha movie %s: path=\"%s\" final=\"%s\" media_time=%lld duration=%lld reason=\"%s\"",
                          has_partial_visible_range ? "with a best-effort edit range" : "without an edit range",
                          actual_writer_path.generic_string().c_str(),
                          final_writer_path.generic_string().c_str(),
@@ -1256,7 +1300,7 @@ namespace
                         visible_range_certified = false;
                         const std::string log_reason = nonfatal_sync_log_reason(sync_failure_reason);
                         blog(LOG_WARNING,
-                             "[alpha_recorder] sync proof edit range not applied; publishing GPU texture alpha MP4 without an edit range: path=\"%s\" final=\"%s\" reason=\"%s\"",
+                             "[alpha_recorder] sync proof edit range not applied; publishing GPU texture alpha movie without an edit range: path=\"%s\" final=\"%s\" reason=\"%s\"",
                              actual_writer_path.generic_string().c_str(),
                              final_writer_path.generic_string().c_str(),
                              log_reason.c_str());
@@ -1301,7 +1345,7 @@ namespace
                 finalize_failure_reason =
                     error_message != nullptr && !error_message->empty()
                         ? *error_message
-                        : "Alpha Recorder failed to certify or finalize the GPU texture alpha MP4.";
+                        : "Alpha Recorder failed to certify or finalize the GPU texture alpha movie.";
                 if (!data_capture_end_requested)
                 {
                     std::string deactivate_error;
@@ -1326,7 +1370,7 @@ namespace
                 finalize_failure_reason =
                     error_message != nullptr && !error_message->empty()
                         ? *error_message
-                        : "Alpha Recorder failed to publish the GPU texture alpha MP4.";
+                        : "Alpha Recorder failed to publish the GPU texture alpha movie.";
             }
             if (finalize_failed)
             {
@@ -1347,7 +1391,7 @@ namespace
                     {
                         *error_message = !last_error_text.empty()
                                              ? last_error_text
-                                             : "Alpha Recorder failed to finalize the GPU texture alpha MP4.";
+                                             : "Alpha Recorder failed to finalize the GPU texture alpha movie.";
                     }
                 }
                 return false;

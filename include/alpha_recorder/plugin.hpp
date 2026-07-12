@@ -1,9 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <string>
 #include <string_view>
 
 struct config_data;
@@ -18,6 +21,13 @@ namespace alpha_recorder::obs
         MaskHevcAmf,
         MaskHevcQsv,
         MaskHevcVaapi,
+    };
+
+    enum class AlphaMovieContainer
+    {
+        Mp4,
+        Mov,
+        Mkv,
     };
 
     enum class HevcQualityProfile
@@ -591,6 +601,70 @@ namespace alpha_recorder::obs
         return ".mov";
     }
 
+    [[nodiscard]] inline constexpr bool finalization_format_is_hevc(FinalizationFormat format) noexcept
+    {
+        switch (format)
+        {
+        case FinalizationFormat::MaskHevcNvenc:
+        case FinalizationFormat::MaskHevcAmf:
+        case FinalizationFormat::MaskHevcQsv:
+        case FinalizationFormat::MaskHevcVaapi:
+            return true;
+
+        case FinalizationFormat::MaskPngMov:
+            return false;
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] inline constexpr std::string_view alpha_movie_container_extension(AlphaMovieContainer container) noexcept
+    {
+        switch (container)
+        {
+        case AlphaMovieContainer::Mp4:
+            return ".mp4";
+        case AlphaMovieContainer::Mov:
+            return ".mov";
+        case AlphaMovieContainer::Mkv:
+            return ".mkv";
+        }
+
+        return ".mp4";
+    }
+
+    [[nodiscard]] inline AlphaMovieContainer alpha_movie_container_for_recording_path(
+        const std::filesystem::path &recording_path,
+        FinalizationFormat format)
+    {
+        if (!finalization_format_is_hevc(format))
+        {
+            return AlphaMovieContainer::Mov;
+        }
+
+        std::string extension = recording_path.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (extension == ".mov")
+        {
+            return AlphaMovieContainer::Mov;
+        }
+        if (extension == ".mkv")
+        {
+            return AlphaMovieContainer::Mkv;
+        }
+        return AlphaMovieContainer::Mp4;
+    }
+
+    [[nodiscard]] inline std::filesystem::path recording_alpha_movie_path_for_container(
+        const std::filesystem::path &recording_path,
+        AlphaMovieContainer container)
+    {
+        std::filesystem::path movie_path = recording_path;
+        movie_path.replace_extension(std::string{".alpha"} + std::string{alpha_movie_container_extension(container)});
+        return movie_path;
+    }
+
     [[nodiscard]] inline std::filesystem::path finalization_output_path(const std::filesystem::path &sidecar_path,
                                                                         FinalizationFormat format)
     {
@@ -602,9 +676,9 @@ namespace alpha_recorder::obs
     [[nodiscard]] inline std::filesystem::path recording_alpha_movie_path(const std::filesystem::path &recording_path,
                                                                           FinalizationFormat format)
     {
-        std::filesystem::path movie_path = recording_path;
-        movie_path.replace_extension(std::string{".alpha"} + std::string{finalization_format_output_extension(format)});
-        return movie_path;
+        return recording_alpha_movie_path_for_container(
+            recording_path,
+            alpha_movie_container_for_recording_path(recording_path, format));
     }
 
     [[nodiscard]] inline std::string_view finalization_format_config_value(FinalizationFormat format) noexcept

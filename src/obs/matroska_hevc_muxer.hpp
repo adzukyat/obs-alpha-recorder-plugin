@@ -1,6 +1,7 @@
 #pragma once
 
 #include "alpha_output_sink.hpp"
+#include "direct_mp4_muxer.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -14,33 +15,21 @@ using obs_output_t = struct obs_output;
 namespace alpha_recorder::obs
 {
 
-    struct DirectMp4MuxerConfig
+    struct MatroskaHevcMuxerConfig
     {
         std::filesystem::path path{};
-        bool quicktime_flavor = false;
     };
 
-    struct DirectMp4MuxerStats
-    {
-        std::uint64_t packet_count = 0U;
-        std::uint64_t keyframe_count = 0U;
-        std::uint64_t packet_bytes = 0U;
-        std::uint64_t muxed_packet_count = 0U;
-        std::int64_t first_pts = 0;
-        std::int64_t last_pts = 0;
-        bool finalized = false;
-    };
-
-    class DirectMp4Muxer final
+    class MatroskaHevcMuxer final
     {
     public:
-        DirectMp4Muxer();
-        ~DirectMp4Muxer() noexcept;
+        MatroskaHevcMuxer();
+        ~MatroskaHevcMuxer() noexcept;
 
-        DirectMp4Muxer(const DirectMp4Muxer &) = delete;
-        DirectMp4Muxer &operator=(const DirectMp4Muxer &) = delete;
+        MatroskaHevcMuxer(const MatroskaHevcMuxer &) = delete;
+        MatroskaHevcMuxer &operator=(const MatroskaHevcMuxer &) = delete;
 
-        [[nodiscard]] bool open(const DirectMp4MuxerConfig &config,
+        [[nodiscard]] bool open(const MatroskaHevcMuxerConfig &config,
                                 std::string *error_message = nullptr);
         [[nodiscard]] bool begin(obs_output_t *output, std::string *error_message = nullptr);
         [[nodiscard]] bool set_visible_range(const AlphaVisiblePacketRange &range,
@@ -54,7 +43,6 @@ namespace alpha_recorder::obs
 
         [[nodiscard]] bool is_open() const noexcept;
         [[nodiscard]] bool is_accepting_packets() const noexcept;
-        [[nodiscard]] bool supports_visible_range() const noexcept;
         [[nodiscard]] const std::filesystem::path &path() const noexcept;
         [[nodiscard]] const DirectMp4MuxerStats &stats() const noexcept;
 

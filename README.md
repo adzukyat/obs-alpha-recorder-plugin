@@ -13,7 +13,7 @@ Use OBS the way you already do:
 1. Open OBS.
 2. Start Recording.
 3. Stop Recording.
-4. Find an extra `.alpha.mov` or `.alpha.mp4` file beside your video.
+4. Find an extra `.alpha.mov`, `.alpha.mp4`, or `.alpha.mkv` file beside your video.
 
 > [!IMPORTANT]
 > Alpha Recorder does not add alpha to the normal recording file. The main video
