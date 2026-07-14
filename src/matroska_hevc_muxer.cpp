@@ -746,21 +746,6 @@ namespace alpha_recorder::obs
         close_storage();
     }
 
-    bool MatroskaHevcMuxer::is_open() const noexcept
-    {
-        return impl_->storage_open;
-    }
-
-    bool MatroskaHevcMuxer::is_accepting_packets() const noexcept
-    {
-        return impl_->accepting_packets;
-    }
-
-    const std::filesystem::path &MatroskaHevcMuxer::path() const noexcept
-    {
-        return impl_->path;
-    }
-
     const AlphaMovieMuxerStats &MatroskaHevcMuxer::stats() const noexcept
     {
         return impl_->stats;

@@ -1,4 +1,4 @@
-#include "alpha_recorder/export_worker.hpp"
+#include "alpha_mask_video_writer.hpp"
 #include "alpha_recorder/plugin.hpp"
 #include "gpu_texture_recording_output.hpp"
 
@@ -39,7 +39,7 @@ namespace alpha_recorder::obs
                 return gpu_texture_hevc_encoder_runtime_available(format, reason);
             }
 
-            return finalization_format_runtime_available(format, reason);
+            return alpha_mask_video_writer_runtime_available(reason);
         }
 
         void write_settings(obs_data_t *response, const Settings &settings)

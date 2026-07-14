@@ -1,13 +1,17 @@
 #pragma once
 
 #include "alpha_recorder/plugin.hpp"
-#include "direct_mp4_muxer.hpp"
+#include "alpha_output_sink.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
+
+struct encoder_packet;
+struct obs_output;
+using obs_output_t = struct obs_output;
 
 namespace alpha_recorder::obs
 {
@@ -43,9 +47,6 @@ namespace alpha_recorder::obs
         void close_storage() noexcept;
         void abort() noexcept;
 
-        [[nodiscard]] bool is_open() const noexcept;
-        [[nodiscard]] bool is_accepting_packets() const noexcept;
-        [[nodiscard]] const std::filesystem::path &path() const noexcept;
         [[nodiscard]] const GpuTextureAlphaOutputSinkStats &stats() const noexcept;
 
     private:

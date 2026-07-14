@@ -1,5 +1,6 @@
 #pragma once
 
+#include "alpha_recorder/plugin.hpp"
 #include "alpha_output_sink.hpp"
 #include "gpu_texture_timeline_ledger.hpp"
 

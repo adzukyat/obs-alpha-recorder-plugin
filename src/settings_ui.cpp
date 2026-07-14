@@ -47,7 +47,7 @@
 #include <string_view>
 #include <thread>
 
-#include "alpha_recorder/export_worker.hpp"
+#include "alpha_mask_video_writer.hpp"
 #include "alpha_recorder/plugin.hpp"
 #include "alpha_recorder/version.hpp"
 #include "diagnostic_log.hpp"
@@ -76,7 +76,7 @@ namespace
             return alpha_recorder::obs::gpu_texture_hevc_encoder_runtime_available(format, reason);
         }
 
-        return alpha_recorder::obs::finalization_format_runtime_available(format, reason);
+        return alpha_recorder::obs::alpha_mask_video_writer_runtime_available(reason);
     }
 
     struct VersionTriple

@@ -23,6 +23,11 @@ The alpha movie is a standalone grayscale mask video. The captured alpha values
 are encoded as visible pixel intensity; the file is not expected to carry its
 own transparency channel.
 
+Production implementation files live directly under `src/`; do not recreate a
+`core`/`obs` directory split. The separate `alpha_recorder_obs_app_e2e_source`
+module is test-only and contains only the moving-alpha OBS source used by the
+real app E2E harness.
+
 ## User-Facing Contract
 
 - Users start and stop recording with OBS's normal controls.
@@ -89,12 +94,6 @@ Run the focused cadence regression:
 
 ```sh
 ctest --test-dir out/build/macos-arm64 -C RelWithDebInfo -R alpha_recorder.unit.recording_session_cadence --output-on-failure
-```
-
-Run deterministic E2E:
-
-```sh
-cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_e2e
 ```
 
 Run real OBS app E2E:

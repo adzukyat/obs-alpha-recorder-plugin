@@ -1,5 +1,6 @@
 #include "gpu_texture_alpha_output_sink.hpp"
 
+#include "direct_mp4_muxer.hpp"
 #include "matroska_hevc_muxer.hpp"
 
 namespace alpha_recorder::obs
@@ -20,9 +21,6 @@ namespace alpha_recorder::obs
         virtual void close_storage() noexcept = 0;
         virtual void abort() noexcept = 0;
 
-        [[nodiscard]] virtual bool is_open() const noexcept = 0;
-        [[nodiscard]] virtual bool is_accepting_packets() const noexcept = 0;
-        [[nodiscard]] virtual const std::filesystem::path &path() const noexcept = 0;
         [[nodiscard]] virtual const AlphaMovieMuxerStats &stats() const noexcept = 0;
     };
 
@@ -67,21 +65,6 @@ namespace alpha_recorder::obs
             void abort() noexcept override
             {
                 muxer_.abort();
-            }
-
-            [[nodiscard]] bool is_open() const noexcept override
-            {
-                return muxer_.is_open();
-            }
-
-            [[nodiscard]] bool is_accepting_packets() const noexcept override
-            {
-                return muxer_.is_accepting_packets();
-            }
-
-            [[nodiscard]] const std::filesystem::path &path() const noexcept override
-            {
-                return muxer_.path();
             }
 
             [[nodiscard]] const AlphaMovieMuxerStats &stats() const noexcept override
@@ -133,21 +116,6 @@ namespace alpha_recorder::obs
             void abort() noexcept override
             {
                 muxer_.abort();
-            }
-
-            [[nodiscard]] bool is_open() const noexcept override
-            {
-                return muxer_.is_open();
-            }
-
-            [[nodiscard]] bool is_accepting_packets() const noexcept override
-            {
-                return muxer_.is_accepting_packets();
-            }
-
-            [[nodiscard]] const std::filesystem::path &path() const noexcept override
-            {
-                return muxer_.path();
             }
 
             [[nodiscard]] const AlphaMovieMuxerStats &stats() const noexcept override
@@ -252,22 +220,6 @@ namespace alpha_recorder::obs
             muxer_->abort();
             muxer_.reset();
         }
-    }
-
-    bool GpuTextureAlphaOutputSink::is_open() const noexcept
-    {
-        return muxer_ != nullptr && muxer_->is_open();
-    }
-
-    bool GpuTextureAlphaOutputSink::is_accepting_packets() const noexcept
-    {
-        return muxer_ != nullptr && muxer_->is_accepting_packets();
-    }
-
-    const std::filesystem::path &GpuTextureAlphaOutputSink::path() const noexcept
-    {
-        static const std::filesystem::path empty_path{};
-        return muxer_ == nullptr ? empty_path : muxer_->path();
     }
 
     const GpuTextureAlphaOutputSinkStats &GpuTextureAlphaOutputSink::stats() const noexcept

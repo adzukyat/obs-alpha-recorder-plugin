@@ -8,7 +8,7 @@
 
 #include <util/config-file.h>
 
-#include "alpha_recorder/export_worker.hpp"
+#include "alpha_mask_video_writer.hpp"
 #include "alpha_recorder/plugin.hpp"
 
 int main()
@@ -71,17 +71,6 @@ int main()
         return 5;
     }
 
-    const std::filesystem::path alpha_sidecar = std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"};
-    if (alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskPngMov) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
-        alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
-        alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
-        alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskHevcQsv) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
-        alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskHevcVaapi) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"})
-    {
-        std::cerr << "finalization output path helper returned an unexpected value\n";
-        return 6;
-    }
-
     const std::filesystem::path recording_path = std::filesystem::path{"C:/Recordings/MyRec.mkv"};
     if (alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskPngMov) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
         alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mkv"} ||
@@ -94,9 +83,7 @@ int main()
         alpha_recorder::obs::alpha_movie_container_for_recording_format("fragmented_mov", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mov ||
         alpha_recorder::obs::alpha_movie_container_for_recording_format("hybrid_mp4", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mp4 ||
         alpha_recorder::obs::alpha_movie_container_for_recording_format("MKV", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mkv ||
-        alpha_recorder::obs::alpha_movie_container_for_recording_format("mkv", alpha_recorder::obs::FinalizationFormat::MaskPngMov) != alpha_recorder::obs::AlphaMovieContainer::Mov ||
-        alpha_recorder::obs::recording_sidecar_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"} ||
-        alpha_recorder::obs::recording_manifest_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.manifest.json"})
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("mkv", alpha_recorder::obs::FinalizationFormat::MaskPngMov) != alpha_recorder::obs::AlphaMovieContainer::Mov)
     {
         std::cerr << "recording path helpers do not match the expected OBS naming convention\n";
         return 7;
@@ -116,18 +103,6 @@ int main()
     {
         std::cerr << "finalization format config value mismatch\n";
         return 9;
-    }
-
-    if (alpha_recorder::obs::frame_pts_from_elapsed_ns(33366667ULL, 30000U, 1001U) != 1U)
-    {
-        std::cerr << "fractional frame-rate pts conversion did not use fps_den\n";
-        return 10;
-    }
-
-    if (alpha_recorder::obs::frame_pts_from_elapsed_ns(1000000000ULL, 60U, 1U) != 60U)
-    {
-        std::cerr << "integer frame-rate pts conversion mismatch\n";
-        return 11;
     }
 
     alpha_recorder::obs::FinalizationFormat parsed_format = alpha_recorder::obs::FinalizationFormat::MaskPngMov;

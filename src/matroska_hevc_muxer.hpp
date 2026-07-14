@@ -42,9 +42,6 @@ namespace alpha_recorder::obs
         void close_storage() noexcept;
         void abort() noexcept;
 
-        [[nodiscard]] bool is_open() const noexcept;
-        [[nodiscard]] bool is_accepting_packets() const noexcept;
-        [[nodiscard]] const std::filesystem::path &path() const noexcept;
         [[nodiscard]] const AlphaMovieMuxerStats &stats() const noexcept;
 
     private:

@@ -49,16 +49,13 @@ endif()
 
 if(NOT SKIP_BUILD)
     execute_process(
-        COMMAND "${CMAKE_COMMAND}" --build "${BUILD_DIR}" --config "${CONFIGURATION}" --target alpha_recorder_plugin alpha_recorder_e2e_output
+        COMMAND "${CMAKE_COMMAND}" --build "${BUILD_DIR}" --config "${CONFIGURATION}" --target alpha_recorder_plugin alpha_recorder_obs_app_e2e_source
         COMMAND_ERROR_IS_FATAL ANY
     )
 endif()
 
 if(NOT SKIP_STAGE)
-    set(stage_args)
-    if(UNIX AND NOT APPLE)
-        list(APPEND stage_args "-DSKIP_PLUGIN_OVERLAY=ON")
-    endif()
+    set(stage_args "-DINCLUDE_TEST_SOURCE=ON")
     execute_process(
         COMMAND "${CMAKE_COMMAND}"
             "-DREPO_ROOT=${REPO_ROOT}"

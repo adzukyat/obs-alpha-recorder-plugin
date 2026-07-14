@@ -1,4 +1,4 @@
-#include "alpha_recorder/export_worker.hpp"
+#include "alpha_mask_video_writer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -12,7 +12,6 @@
 #include <mutex>
 #include <queue>
 #include <string>
-#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -22,7 +21,6 @@ extern "C"
 {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-#include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
@@ -130,36 +128,9 @@ namespace alpha_recorder::obs
             return std::clamp(target_bytes, kMinimumQueuedMaskBytes, kMaximumQueuedMaskBytes);
         }
 
-        const AVCodec *select_output_encoder(FinalizationFormat format)
+        const AVCodec *select_png_encoder()
         {
-            switch (format)
-            {
-            case FinalizationFormat::MaskPngMov:
-                return avcodec_find_encoder(AV_CODEC_ID_PNG);
-
-            case FinalizationFormat::MaskHevcNvenc:
-                return avcodec_find_encoder_by_name("hevc_nvenc");
-
-            case FinalizationFormat::MaskHevcAmf:
-                return avcodec_find_encoder_by_name("hevc_amf");
-
-            case FinalizationFormat::MaskHevcQsv:
-            case FinalizationFormat::MaskHevcVaapi:
-                return nullptr;
-            }
-
-            return nullptr;
-        }
-
-        AlphaMaskVideoWriterConfig capability_probe_config(FinalizationFormat format)
-        {
-            AlphaMaskVideoWriterConfig config{};
-            config.finalization_format = format;
-            config.width = 1920U;
-            config.height = 1080U;
-            config.fps_num = 30U;
-            config.fps_den = 1U;
-            return config;
+            return avcodec_find_encoder(AV_CODEC_ID_PNG);
         }
 
         bool validate_dimensions(std::uint32_t width, std::uint32_t height, std::string *error_message)
@@ -173,131 +144,9 @@ namespace alpha_recorder::obs
             return true;
         }
 
-        const char *nvenc_preset_value(HevcEncoderPreset preset) noexcept
+        void configure_png_encoder(AVCodecContext &encoder, const AVCodec &codec,
+                                   const AlphaMaskVideoWriterConfig &config)
         {
-            switch (preset)
-            {
-            case HevcEncoderPreset::NvencLossless:
-                return "lossless";
-            case HevcEncoderPreset::NvencP1:
-                return "p1";
-            case HevcEncoderPreset::NvencP2:
-                return "p2";
-            case HevcEncoderPreset::NvencP3:
-                return "p3";
-            case HevcEncoderPreset::NvencP4:
-                return "p4";
-            case HevcEncoderPreset::NvencP5:
-                return "p5";
-            case HevcEncoderPreset::NvencP6:
-                return "p6";
-            case HevcEncoderPreset::NvencP7:
-                return "p7";
-            case HevcEncoderPreset::AmfSpeed:
-            case HevcEncoderPreset::AmfBalanced:
-            case HevcEncoderPreset::AmfQuality:
-                break;
-            }
-
-            return "p3";
-        }
-
-        const char *amf_quality_value(HevcEncoderPreset preset) noexcept
-        {
-            switch (preset)
-            {
-            case HevcEncoderPreset::AmfSpeed:
-                return "speed";
-            case HevcEncoderPreset::AmfBalanced:
-                return "balanced";
-            case HevcEncoderPreset::AmfQuality:
-                return "quality";
-            case HevcEncoderPreset::NvencLossless:
-            case HevcEncoderPreset::NvencP1:
-            case HevcEncoderPreset::NvencP2:
-            case HevcEncoderPreset::NvencP3:
-            case HevcEncoderPreset::NvencP4:
-            case HevcEncoderPreset::NvencP5:
-            case HevcEncoderPreset::NvencP6:
-            case HevcEncoderPreset::NvencP7:
-                break;
-            }
-
-            return "balanced";
-        }
-
-        std::uint32_t profile_default_cq(HevcQualityProfile profile, std::uint32_t requested_cq) noexcept
-        {
-            if (requested_cq <= 51U)
-            {
-                return requested_cq;
-            }
-
-            switch (profile)
-            {
-            case HevcQualityProfile::Lossless:
-                return 0U;
-            case HevcQualityProfile::HighQuality:
-                return 19U;
-            case HevcQualityProfile::Balanced:
-                return 23U;
-            case HevcQualityProfile::Fast:
-                return 28U;
-            }
-
-            return 19U;
-        }
-
-        int configured_gop_size(const AlphaMaskVideoWriterConfig &config) noexcept
-        {
-            const std::uint32_t default_gop = config.fps_num == 0U ? 30U : config.fps_num;
-            const std::uint32_t requested_gop = clamp_hevc_gop_size(config.hevc_encoder.gop_size);
-            return static_cast<int>(requested_gop == 0U ? default_gop : requested_gop);
-        }
-
-        int hevc_nvenc_split_encode_value(HevcNvencSplitEncodeMode mode) noexcept
-        {
-            switch (mode)
-            {
-            case HevcNvencSplitEncodeMode::Auto:
-                return 0;
-            case HevcNvencSplitEncodeMode::Disabled:
-                return 15;
-            case HevcNvencSplitEncodeMode::Forced:
-                return 1;
-            case HevcNvencSplitEncodeMode::TwoWay:
-                return 2;
-            case HevcNvencSplitEncodeMode::ThreeWay:
-                return 3;
-            }
-
-            return 0;
-        }
-
-        bool set_encoder_int_option(AVCodecContext &encoder,
-                                    const char *name,
-                                    std::int64_t value,
-                                    bool allow_missing,
-                                    std::string *error_message)
-        {
-            const int ret = av_opt_set_int(encoder.priv_data, name, value, 0);
-            if (ret == AVERROR_OPTION_NOT_FOUND && allow_missing)
-            {
-                return true;
-            }
-            if (ret < 0)
-            {
-                return set_error(error_message, std::string{"Alpha Recorder could not configure NVENC option '"} +
-                                                    name + "': " + av_error_message(ret));
-            }
-
-            return true;
-        }
-
-        bool configure_encoder(AVCodecContext &encoder, const AVCodec &codec, const AlphaMaskVideoWriterConfig &config,
-                               std::string *error_message)
-        {
-            (void)codec;
             encoder.codec_type = AVMEDIA_TYPE_VIDEO;
             encoder.codec_id = codec.id;
             encoder.width = static_cast<int>(config.width);
@@ -312,100 +161,9 @@ namespace alpha_recorder::obs
             encoder.color_trc = AVCOL_TRC_BT709;
             encoder.colorspace = AVCOL_SPC_BT709;
             encoder.thread_count = 0;
-
-            switch (config.finalization_format)
-            {
-            case FinalizationFormat::MaskPngMov:
-                encoder.gop_size = 1;
-                encoder.pix_fmt = AV_PIX_FMT_GRAY8;
-                (void)av_opt_set_int(encoder.priv_data, "compression_level", 0, 0);
-                return true;
-
-            case FinalizationFormat::MaskHevcNvenc:
-                encoder.gop_size = configured_gop_size(config);
-                encoder.max_b_frames = 0;
-                encoder.pix_fmt = AV_PIX_FMT_YUV420P;
-                if (config.hevc_encoder.nvenc_gpu_index >= 0 &&
-                    !set_encoder_int_option(encoder, "gpu", config.hevc_encoder.nvenc_gpu_index, false, error_message))
-                {
-                    return false;
-                }
-                if (config.hevc_encoder.nvenc_split_encode != HevcNvencSplitEncodeMode::Auto &&
-                    !set_encoder_int_option(encoder, "split_encode_mode",
-                                            hevc_nvenc_split_encode_value(config.hevc_encoder.nvenc_split_encode),
-                                            false, error_message))
-                {
-                    return false;
-                }
-                if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
-                {
-                    (void)av_opt_set(encoder.priv_data, "preset", "lossless", 0);
-                    (void)av_opt_set(encoder.priv_data, "tune", "lossless", 0);
-                    (void)av_opt_set(encoder.priv_data, "rc", "constqp", 0);
-                    (void)av_opt_set_int(encoder.priv_data, "qp", 0, 0);
-                    return true;
-                }
-
-                (void)av_opt_set(encoder.priv_data, "preset", nvenc_preset_value(config.hevc_encoder.preset), 0);
-                (void)av_opt_set(encoder.priv_data, "tune", hevc_nvenc_tune_config_value(config.hevc_encoder.nvenc_tune).data(), 0);
-                (void)av_opt_set(encoder.priv_data, "rc", "vbr", 0);
-                (void)av_opt_set_int(encoder.priv_data, "cq", profile_default_cq(config.hevc_encoder.quality_profile,
-                                                                                  config.hevc_encoder.quality_cq),
-                                     0);
-                if (config.hevc_encoder.adaptive_quantization)
-                {
-                    (void)av_opt_set_int(encoder.priv_data, "spatial-aq", 1, 0);
-                    (void)av_opt_set_int(encoder.priv_data, "temporal-aq", 1, 0);
-                }
-                return true;
-
-            case FinalizationFormat::MaskHevcAmf:
-                encoder.gop_size = configured_gop_size(config);
-                encoder.max_b_frames = 0;
-                encoder.pix_fmt = AV_PIX_FMT_YUV420P;
-                (void)av_opt_set(encoder.priv_data, "usage", "transcoding", 0);
-                if (config.hevc_encoder.quality_profile == HevcQualityProfile::Lossless)
-                {
-                    (void)av_opt_set(encoder.priv_data, "quality", "quality", 0);
-                    (void)av_opt_set_int(encoder.priv_data, "qp_i", 0, 0);
-                    (void)av_opt_set_int(encoder.priv_data, "qp_p", 0, 0);
-                    return true;
-                }
-
-                (void)av_opt_set(encoder.priv_data, "quality", amf_quality_value(config.hevc_encoder.preset), 0);
-                (void)av_opt_set(encoder.priv_data, "rc", "cqp", 0);
-                (void)av_opt_set_int(encoder.priv_data, "qp_i", profile_default_cq(config.hevc_encoder.quality_profile,
-                                                                                   config.hevc_encoder.quality_cq),
-                                     0);
-                (void)av_opt_set_int(encoder.priv_data, "qp_p", profile_default_cq(config.hevc_encoder.quality_profile,
-                                                                                   config.hevc_encoder.quality_cq),
-                                     0);
-                if (config.hevc_encoder.adaptive_quantization)
-                {
-                    (void)av_opt_set(encoder.priv_data, "vbaq", "true", 0);
-                }
-                return true;
-
-            case FinalizationFormat::MaskHevcQsv:
-            case FinalizationFormat::MaskHevcVaapi:
-                return set_error(error_message,
-                                 std::string{finalization_format_display_name(config.finalization_format)} +
-                                     " is only supported through the OBS GPU texture output path.");
-            }
-
-            return set_error(error_message, "Alpha Recorder received an unsupported mask format.");
-        }
-
-        void fill_chroma_plane(std::uint8_t *data, int linesize, int width, int height, std::uint8_t value)
-        {
-            for (int row = 0; row < height; ++row)
-            {
-                std::uint8_t *const dest = data + (static_cast<std::size_t>(row) * static_cast<std::size_t>(linesize));
-                for (int column = 0; column < width; ++column)
-                {
-                    dest[column] = value;
-                }
-            }
+            encoder.gop_size = 1;
+            encoder.pix_fmt = AV_PIX_FMT_GRAY8;
+            (void)av_opt_set_int(encoder.priv_data, "compression_level", 0, 0);
         }
 
         bool copy_alpha_to_frame(AVFrame &frame, const std::uint8_t *alpha, std::uint32_t stride, std::string *error_message)
@@ -415,36 +173,18 @@ namespace alpha_recorder::obs
                 return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
             }
 
-            const AVPixelFormat format = static_cast<AVPixelFormat>(frame.format);
-            if (format == AV_PIX_FMT_GRAY8)
+            if (frame.format != AV_PIX_FMT_GRAY8)
             {
-                for (int row = 0; row < frame.height; ++row)
-                {
-                    const std::uint8_t *const src = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
-                    std::uint8_t *const dest = frame.data[0] + (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[0]));
-                    std::copy(src, src + frame.width, dest);
-                }
-                return true;
+                return set_error(error_message, "Alpha Recorder configured an unsupported mask pixel format.");
             }
 
-            if (format == AV_PIX_FMT_YUV420P)
+            for (int row = 0; row < frame.height; ++row)
             {
-                for (int row = 0; row < frame.height; ++row)
-                {
-                    const std::uint8_t *const src = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
-                    std::uint8_t *const dest = frame.data[0] + (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[0]));
-                    for (int column = 0; column < frame.width; ++column)
-                    {
-                        dest[column] = src[column];
-                    }
-                }
-
-                fill_chroma_plane(frame.data[1], frame.linesize[1], (frame.width + 1) / 2, (frame.height + 1) / 2, 128U);
-                fill_chroma_plane(frame.data[2], frame.linesize[2], (frame.width + 1) / 2, (frame.height + 1) / 2, 128U);
-                return true;
+                const std::uint8_t *const src = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
+                std::uint8_t *const dest = frame.data[0] + (static_cast<std::size_t>(row) * static_cast<std::size_t>(frame.linesize[0]));
+                std::copy(src, src + frame.width, dest);
             }
-
-            return set_error(error_message, "Alpha Recorder configured an unsupported mask pixel format.");
+            return true;
         }
 
         [[nodiscard]] std::uint64_t elapsed_ns(std::chrono::steady_clock::time_point start,
@@ -904,12 +644,10 @@ namespace alpha_recorder::obs
                                                     config.output_path.parent_path().generic_u8string());
             }
 
-            const AVCodec *const encoder = select_output_encoder(config.finalization_format);
+            const AVCodec *const encoder = select_png_encoder();
             if (encoder == nullptr)
             {
-                return set_error(error_message, std::string{"Alpha Recorder could not find "} +
-                                                    std::string{finalization_format_display_name(config.finalization_format)} +
-                                                    " in the bundled FFmpeg stack.");
+                return set_error(error_message, "Alpha Recorder could not find the PNG encoder in the bundled FFmpeg stack.");
             }
 
             auto *impl = new Impl{};
@@ -935,11 +673,7 @@ namespace alpha_recorder::obs
                 return set_error(error_message, "Alpha Recorder could not allocate the mask video encoder.");
             }
 
-            if (!configure_encoder(*impl->encoder, *encoder, config, error_message))
-            {
-                delete impl;
-                return false;
-            }
+            configure_png_encoder(*impl->encoder, *encoder, config);
 
             if ((impl->format->oformat->flags & AVFMT_GLOBALHEADER) != 0)
             {
@@ -952,21 +686,6 @@ namespace alpha_recorder::obs
                 delete impl;
                 return set_error(error_message, std::string{"Alpha Recorder could not open the mask video encoder: "} +
                                                     av_error_message(ret));
-            }
-
-            if (config.finalization_format == FinalizationFormat::MaskHevcNvenc && impl->encoder->priv_data != nullptr)
-            {
-                std::int64_t option_value = 0;
-                if (av_opt_get_int(impl->encoder->priv_data, "split_encode_mode", 0, &option_value) >= 0)
-                {
-                    impl->stats.nvenc_split_encode_option_available = true;
-                    impl->stats.nvenc_split_encode_option_value = option_value;
-                }
-                if (av_opt_get_int(impl->encoder->priv_data, "gpu", 0, &option_value) >= 0)
-                {
-                    impl->stats.nvenc_gpu_option_available = true;
-                    impl->stats.nvenc_gpu_option_value = option_value;
-                }
             }
 
             impl->video_stream = avformat_new_stream(impl->format, encoder);
@@ -1039,65 +758,6 @@ namespace alpha_recorder::obs
         }
     }
 
-    bool AlphaMaskVideoWriter::write_frame(const std::uint8_t *alpha,
-                                           std::uint32_t stride,
-                                           std::string *error_message,
-                                           AlphaMaskVideoWriterFrameDisposition *disposition) noexcept
-    {
-        if (impl_ == nullptr || impl_->encoder == nullptr || impl_->frame == nullptr)
-        {
-            return set_error(error_message, "Alpha Recorder mask video writer is not open.");
-        }
-
-        if (alpha == nullptr || stride < static_cast<std::uint32_t>(impl_->encoder->width))
-        {
-            return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
-        }
-
-        const std::size_t row_bytes = static_cast<std::size_t>(impl_->encoder->width);
-        const std::size_t frame_bytes = row_bytes * static_cast<std::size_t>(impl_->encoder->height);
-        if (impl_->encoder->height != 0 && frame_bytes / static_cast<std::size_t>(impl_->encoder->height) != row_bytes)
-        {
-            return set_error(error_message, "Alpha Recorder received invalid mask video dimensions.");
-        }
-
-        auto queued_alpha = std::make_shared<std::vector<std::uint8_t>>(frame_bytes);
-        for (int row = 0; row < impl_->encoder->height; ++row)
-        {
-            const std::uint8_t *const source = alpha + (static_cast<std::size_t>(row) * static_cast<std::size_t>(stride));
-            std::uint8_t *const dest = queued_alpha->data() + (static_cast<std::size_t>(row) * row_bytes);
-            std::copy(source, source + row_bytes, dest);
-        }
-
-        return impl_->enqueue_frame(std::move(queued_alpha), static_cast<std::uint32_t>(impl_->encoder->width),
-                                    error_message, disposition);
-    }
-
-    bool AlphaMaskVideoWriter::write_frame(std::vector<std::uint8_t> alpha,
-                                           std::string *error_message,
-                                           AlphaMaskVideoWriterFrameDisposition *disposition) noexcept
-    {
-        if (impl_ == nullptr || impl_->encoder == nullptr || impl_->frame == nullptr)
-        {
-            return set_error(error_message, "Alpha Recorder mask video writer is not open.");
-        }
-
-        const std::size_t row_bytes = static_cast<std::size_t>(impl_->encoder->width);
-        const std::size_t frame_bytes = row_bytes * static_cast<std::size_t>(impl_->encoder->height);
-        if (impl_->encoder->height != 0 && frame_bytes / static_cast<std::size_t>(impl_->encoder->height) != row_bytes)
-        {
-            return set_error(error_message, "Alpha Recorder received invalid mask video dimensions.");
-        }
-
-        if (alpha.size() != frame_bytes)
-        {
-            return set_error(error_message, "Alpha Recorder received an invalid alpha mask frame.");
-        }
-
-        return impl_->enqueue_frame(std::make_shared<std::vector<std::uint8_t>>(std::move(alpha)),
-                                    static_cast<std::uint32_t>(impl_->encoder->width), error_message, disposition);
-    }
-
     bool AlphaMaskVideoWriter::write_frame(std::shared_ptr<const std::vector<std::uint8_t>> alpha,
                                            std::string *error_message,
                                            AlphaMaskVideoWriterFrameDisposition *disposition) noexcept
@@ -1157,214 +817,18 @@ namespace alpha_recorder::obs
         return impl_ == nullptr ? empty_path : impl_->output_path;
     }
 
-    std::uint64_t AlphaMaskVideoWriter::frame_count() const noexcept
+    bool alpha_mask_video_writer_runtime_available(std::string *reason) noexcept
     {
-        return impl_ == nullptr ? 0U : impl_->frame_count;
-    }
-
-    bool finalization_format_runtime_available(FinalizationFormat format, std::string *reason) noexcept
-    {
-        try
+        if (select_png_encoder() == nullptr)
         {
-            if (!finalization_format_is_supported(format))
-            {
-                return set_error(reason, "unsupported finalization format");
-            }
-
-            if (select_output_encoder(format) == nullptr)
-            {
-                return set_error(reason, std::string{finalization_format_display_name(format)} +
-                                             " is not available in the bundled FFmpeg stack");
-            }
-
-            if (format == FinalizationFormat::MaskHevcNvenc || format == FinalizationFormat::MaskHevcAmf)
-            {
-                const AVCodec *const encoder = select_output_encoder(format);
-                AVCodecContext *context = avcodec_alloc_context3(encoder);
-                if (context == nullptr)
-                {
-                    return set_error(reason, std::string{finalization_format_display_name(format)} +
-                                                 " could not allocate an FFmpeg encoder context");
-                }
-
-                std::string configure_error;
-                const AlphaMaskVideoWriterConfig probe_config = capability_probe_config(format);
-                bool available = configure_encoder(*context, *encoder, probe_config, &configure_error);
-                if (available)
-                {
-                    const int ret = avcodec_open2(context, encoder, nullptr);
-                    if (ret < 0)
-                    {
-                        available = false;
-                        configure_error = std::string{finalization_format_display_name(format)} +
-                                          " could not open on this system: " + av_error_message(ret);
-                    }
-                }
-
-                avcodec_free_context(&context);
-                if (!available)
-                {
-                    return set_error(reason, configure_error.empty()
-                                                 ? std::string{finalization_format_display_name(format)} +
-                                                       " could not open on this system"
-                                                 : configure_error);
-                }
-            }
-
-            if (reason != nullptr)
-            {
-                reason->clear();
-            }
-            return true;
-        }
-        catch (const std::exception &ex)
-        {
-            return set_error(reason, std::string{"finalization capability check failed: "} + ex.what());
-        }
-        catch (...)
-        {
-            return set_error(reason, "finalization capability check failed.");
-        }
-    }
-
-    bool hevc_nvenc_split_encode_runtime_available(HevcNvencSplitEncodeMode mode, std::string *reason) noexcept
-    {
-        try
-        {
-            if (mode == HevcNvencSplitEncodeMode::Auto)
-            {
-                if (reason != nullptr)
-                {
-                    reason->clear();
-                }
-                return true;
-            }
-
-            const AVCodec *const encoder = select_output_encoder(FinalizationFormat::MaskHevcNvenc);
-            if (encoder == nullptr)
-            {
-                return set_error(reason, "HEVC NVENC is not available in the bundled FFmpeg stack.");
-            }
-
-            AVCodecContext *context = avcodec_alloc_context3(encoder);
-            if (context == nullptr)
-            {
-                return set_error(reason, "HEVC NVENC could not allocate an FFmpeg encoder context.");
-            }
-
-            const AVOption *const splitEncodeOption =
-                context->priv_data == nullptr
-                    ? nullptr
-                    : av_opt_find(context->priv_data, "split_encode_mode", nullptr, 0, AV_OPT_SEARCH_CHILDREN);
-            if (splitEncodeOption == nullptr)
-            {
-                avcodec_free_context(&context);
-                return set_error(reason, "HEVC NVENC Split Encode is not available in the bundled FFmpeg stack.");
-            }
-
-            std::string configure_error;
-            const bool available = set_encoder_int_option(*context, "split_encode_mode",
-                                                          hevc_nvenc_split_encode_value(mode), false,
-                                                          &configure_error);
-            avcodec_free_context(&context);
-            if (!available)
-            {
-                return set_error(reason, configure_error.empty()
-                                             ? "HEVC NVENC Split Encode could not be configured."
-                                             : configure_error);
-            }
-
-            if (reason != nullptr)
-            {
-                reason->clear();
-            }
-            return true;
-        }
-        catch (const std::exception &ex)
-        {
-            return set_error(reason, std::string{"HEVC NVENC Split Encode capability check failed: "} + ex.what());
-        }
-        catch (...)
-        {
-            return set_error(reason, "HEVC NVENC Split Encode capability check failed.");
-        }
-    }
-
-    bool hevc_nvenc_encoder_settings_runtime_available(const HevcEncoderSettings &settings,
-                                                       std::string *reason) noexcept
-    {
-        try
-        {
-            if (!hevc_nvenc_split_encode_runtime_available(settings.nvenc_split_encode, reason))
-            {
-                return false;
-            }
-
-            const AVCodec *const encoder = select_output_encoder(FinalizationFormat::MaskHevcNvenc);
-            if (encoder == nullptr)
-            {
-                return set_error(reason, "HEVC NVENC is not available in the bundled FFmpeg stack.");
-            }
-
-            AVCodecContext *context = avcodec_alloc_context3(encoder);
-            if (context == nullptr)
-            {
-                return set_error(reason, "HEVC NVENC could not allocate an FFmpeg encoder context.");
-            }
-
-            AlphaMaskVideoWriterConfig probe_config = capability_probe_config(FinalizationFormat::MaskHevcNvenc);
-            probe_config.hevc_encoder = settings;
-
-            std::string configure_error;
-            bool available = configure_encoder(*context, *encoder, probe_config, &configure_error);
-            if (available)
-            {
-                const int ret = avcodec_open2(context, encoder, nullptr);
-                if (ret < 0)
-                {
-                    available = false;
-                    configure_error = "HEVC NVENC could not open with the selected settings: " +
-                                      av_error_message(ret);
-                }
-            }
-
-            avcodec_free_context(&context);
-            if (!available)
-            {
-                return set_error(reason, configure_error.empty()
-                                             ? "HEVC NVENC could not open with the selected settings."
-                                             : configure_error);
-            }
-
-            if (reason != nullptr)
-            {
-                reason->clear();
-            }
-            return true;
-        }
-        catch (const std::exception &ex)
-        {
-            return set_error(reason, std::string{"HEVC NVENC selected settings capability check failed: "} +
-                                         ex.what());
-        }
-        catch (...)
-        {
-            return set_error(reason, "HEVC NVENC selected settings capability check failed.");
-        }
-    }
-
-    FinalizationFormat preferred_runtime_finalization_format() noexcept
-    {
-        for (const FinalizationFormat format : {FinalizationFormat::MaskHevcNvenc, FinalizationFormat::MaskHevcAmf,
-                                                FinalizationFormat::MaskPngMov})
-        {
-            if (finalization_format_runtime_available(format))
-            {
-                return format;
-            }
+            return set_error(reason, "PNG is not available in the bundled FFmpeg stack");
         }
 
-        return finalization_format_default();
+        if (reason != nullptr)
+        {
+            reason->clear();
+        }
+        return true;
     }
 
     std::size_t alpha_mask_writer_queue_frame_limit(std::uint32_t fps_num, std::uint32_t fps_den) noexcept

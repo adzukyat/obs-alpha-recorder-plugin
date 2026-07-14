@@ -1,9 +1,7 @@
 include_guard(GLOBAL)
 
-option(ALPHA_RECORDER_BUILD_OBS_PLUGIN "Build the OBS module wrapper" ON)
+option(ALPHA_RECORDER_BUILD_OBS_PLUGIN "Build the Alpha Recorder OBS plugin" ON)
 option(ALPHA_RECORDER_BUILD_UNIT_TESTS "Build the unit test targets" ON)
-option(ALPHA_RECORDER_BUILD_CORE_UNIT_TESTS "Build unit tests that require the full core dependency stack" ON)
-option(ALPHA_RECORDER_BUILD_E2E_TESTS "Build the E2E test targets" ON)
 option(ALPHA_RECORDER_ENABLE_OBS_APP_E2E "Register the slow real OBS app E2E test" OFF)
 
 function(alpha_recorder_set_project_options)

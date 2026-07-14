@@ -90,7 +90,6 @@ namespace alpha_recorder::obs
         [[nodiscard]] bool has_work() const noexcept;
         [[nodiscard]] std::size_t pending_alpha_size() const noexcept;
         [[nodiscard]] std::size_t pending_output_size() const noexcept;
-        [[nodiscard]] std::size_t pending_encoded_size() const noexcept;
 
         void mark_pending_encoded_texture_encoded() noexcept;
 

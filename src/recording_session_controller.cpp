@@ -5,7 +5,6 @@
 #include "diagnostic_log.hpp"
 #include "gpu_texture_recording_output.hpp"
 #include "recording_session_controller_cadence.hpp"
-#include "recording_session_controller_gate.hpp"
 #include "recording_telemetry.hpp"
 
 #include <algorithm>
@@ -920,12 +919,10 @@ namespace
 
             alpha_recorder::obs::AlphaOutputSinkConfig config{};
             config.output_path = mask_path;
-            config.finalization_format = finalization_format_;
             config.width = video_info.output_width;
             config.height = video_info.output_height;
             config.fps_num = video_info.fps_num;
             config.fps_den = video_info.fps_den;
-            config.hevc_encoder = settings_.hevc_encoder;
             max_pending_alpha_frames_ =
                 alignment_alpha_queue_frame_limit(config.fps_num, config.fps_den);
             max_pending_output_frames_ =
@@ -1042,12 +1039,10 @@ namespace
 
             alpha_recorder::obs::AlphaOutputSinkConfig log_config{};
             log_config.output_path = mask_path;
-            log_config.finalization_format = finalization_format_;
             log_config.width = video_info.output_width;
             log_config.height = video_info.output_height;
             log_config.fps_num = video_info.fps_num;
             log_config.fps_den = video_info.fps_den;
-            log_config.hevc_encoder = settings_.hevc_encoder;
             max_pending_alpha_frames_ = 0U;
             max_pending_output_frames_ = 0U;
             video_info_ = video_info;
@@ -1491,20 +1486,20 @@ namespace
                 buffer, sizeof(buffer),
                 "Alpha Recorder segment start: path=\"%s\" format=%s video={width=%u height=%u fps=%u/%u} alignment_queue={alpha_limit_frames=%zu output_limit_frames=%zu encoded_reorder_frames=%zu plausible_delta_ns=%llu} writer_queue={limit_frames=%zu limit_bytes=%s} hevc={profile=%s cq=%u preset=%s nvenc_tune=%s gop=%u aq=%s nvenc_split=%s nvenc_gpu=%d}",
                 mask_path.generic_u8string().c_str(),
-                std::string{alpha_recorder::obs::finalization_format_config_value(config.finalization_format)}.c_str(),
+                std::string{alpha_recorder::obs::finalization_format_config_value(finalization_format_)}.c_str(),
                 config.width, config.height, config.fps_num, config.fps_den,
                 max_pending_alpha_frames_, max_pending_output_frames_, kMaxEncoderReorderFrames,
                 static_cast<unsigned long long>(plausible_alignment_delta_ns(config.fps_num, config.fps_den)),
                 queue_frame_limit,
                 format_bytes(static_cast<std::uint64_t>(queue_byte_limit)).c_str(),
-                std::string{alpha_recorder::obs::hevc_quality_profile_config_value(config.hevc_encoder.quality_profile)}.c_str(),
-                config.hevc_encoder.quality_cq,
-                std::string{alpha_recorder::obs::hevc_encoder_preset_config_value(config.hevc_encoder.preset)}.c_str(),
-                std::string{alpha_recorder::obs::hevc_nvenc_tune_config_value(config.hevc_encoder.nvenc_tune)}.c_str(),
-                config.hevc_encoder.gop_size,
-                bool_text(config.hevc_encoder.adaptive_quantization),
-                std::string{alpha_recorder::obs::hevc_nvenc_split_encode_config_value(config.hevc_encoder.nvenc_split_encode)}.c_str(),
-                static_cast<int>(config.hevc_encoder.nvenc_gpu_index));
+                std::string{alpha_recorder::obs::hevc_quality_profile_config_value(settings_.hevc_encoder.quality_profile)}.c_str(),
+                settings_.hevc_encoder.quality_cq,
+                std::string{alpha_recorder::obs::hevc_encoder_preset_config_value(settings_.hevc_encoder.preset)}.c_str(),
+                std::string{alpha_recorder::obs::hevc_nvenc_tune_config_value(settings_.hevc_encoder.nvenc_tune)}.c_str(),
+                settings_.hevc_encoder.gop_size,
+                bool_text(settings_.hevc_encoder.adaptive_quantization),
+                std::string{alpha_recorder::obs::hevc_nvenc_split_encode_config_value(settings_.hevc_encoder.nvenc_split_encode)}.c_str(),
+                static_cast<int>(settings_.hevc_encoder.nvenc_gpu_index));
             alpha_recorder::obs::append_diagnostic_log_line(buffer);
         }
 
@@ -1539,7 +1534,7 @@ namespace
             char buffer[12288];
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} timestamp_spans={packet_cts_ms=%.3f raw_output_ms=%.3f alpha_capture_ms=%.3f first_packet_cts=%llu last_packet_cts=%llu first_raw=%llu last_raw=%llu first_alpha=%llu last_alpha=%llu} alignment_delta={output_minus_packet_cts={%s} alpha_minus_output_content={%s}} packet_timing={fer_minus_cts={%s} cts_delta={%s} fer_delta={%s} texture_stall_corrections=%llu} queues={alpha_max=%zu alpha_limit=%zu output_max=%zu output_limit=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s writer_limit_frames=%zu writer_limit_bytes=%s writer_overflow_repeats=%llu} alignment_recovery={repeated=%llu missing_output=%llu missing_alpha=%llu texture_stall=%llu black=%llu alpha_dropped=%llu output_dropped=%llu} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s} encode_breakdown={make_writable_avg_ms=%.3f make_writable_max_ms=%.3f copy_avg_ms=%.3f copy_max_ms=%.3f send_avg_ms=%.3f send_max_ms=%.3f receive_avg_ms=%.3f receive_max_ms=%.3f packet_write_avg_ms=%.3f packet_write_max_ms=%.3f emitted_packets=%llu} nvenc_options={split_available=%s split_value=%lld gpu_available=%s gpu_value=%lld}",
+                "Alpha Recorder performance telemetry: path=\"%s\" capture_total={%s callbacks=%llu captured=%llu} readback={%s} gpu_submit={render={%s} stage={%s}} alignment_worker={%s frames=%llu raw=%llu packets=%llu} timestamp_spans={packet_cts_ms=%.3f raw_output_ms=%.3f alpha_capture_ms=%.3f first_packet_cts=%llu last_packet_cts=%llu first_raw=%llu last_raw=%llu first_alpha=%llu last_alpha=%llu} alignment_delta={output_minus_packet_cts={%s} alpha_minus_output_content={%s}} packet_timing={fer_minus_cts={%s} cts_delta={%s} fer_delta={%s} texture_stall_corrections=%llu} queues={alpha_max=%zu alpha_limit=%zu output_max=%zu output_limit=%zu encoded_max=%zu writer_max_frames=%zu writer_max_bytes=%s writer_limit_frames=%zu writer_limit_bytes=%s writer_overflow_repeats=%llu} alignment_recovery={repeated=%llu missing_output=%llu missing_alpha=%llu texture_stall=%llu black=%llu alpha_dropped=%llu output_dropped=%llu} writer={enqueue={count=%llu avg_ms=%.3f max_ms=%.3f} encode={count=%llu avg_ms=%.3f max_ms=%.3f} finalize_ms=%.3f queued=%s} encode_breakdown={make_writable_avg_ms=%.3f make_writable_max_ms=%.3f copy_avg_ms=%.3f copy_max_ms=%.3f send_avg_ms=%.3f send_max_ms=%.3f receive_avg_ms=%.3f receive_max_ms=%.3f packet_write_avg_ms=%.3f packet_write_max_ms=%.3f emitted_packets=%llu}",
                 mask_path.generic_u8string().c_str(), capture_total.c_str(),
                 static_cast<unsigned long long>(live_telemetry_.rendered_callbacks),
                 static_cast<unsigned long long>(live_telemetry_.captured_frames), capture_map.c_str(),
@@ -1589,11 +1584,7 @@ namespace
                 ns_to_ms(writer_stats.encode_receive_time_ns_max),
                 writer_packet_avg_ms(writer_stats.encode_packet_write_time_ns_total),
                 ns_to_ms(writer_stats.encode_packet_write_time_ns_max),
-                static_cast<unsigned long long>(writer_stats.emitted_packets),
-                bool_text(writer_stats.nvenc_split_encode_option_available),
-                static_cast<long long>(writer_stats.nvenc_split_encode_option_value),
-                bool_text(writer_stats.nvenc_gpu_option_available),
-                static_cast<long long>(writer_stats.nvenc_gpu_option_value));
+                static_cast<unsigned long long>(writer_stats.emitted_packets));
             return std::string{buffer};
         }
 

@@ -124,11 +124,6 @@ namespace alpha_recorder::obs
         return pending_output_frames_.size();
     }
 
-    std::size_t AlphaAlignmentEngine::pending_encoded_size() const noexcept
-    {
-        return pending_encoded_alpha_frames_.size();
-    }
-
     void AlphaAlignmentEngine::mark_pending_encoded_texture_encoded() noexcept
     {
         for (EncodedAlphaFrame &encoded_frame : pending_encoded_alpha_frames_)

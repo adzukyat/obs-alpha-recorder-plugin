@@ -8,7 +8,7 @@ endif()
 
 project(alpha_recorder_plugin
     VERSION "${ALPHA_RECORDER_PROJECT_VERSION}"
-    DESCRIPTION "OBS native plugin scaffold for pair-based RGBA recording"
+    DESCRIPTION "OBS plugin for recording a time-aligned grayscale alpha-mask movie"
     LANGUAGES C CXX
 )
 
@@ -26,11 +26,9 @@ endif()
 
 include(ProjectOptions)
 include(Warnings)
-include(FetchDeps)
 include(GNUInstallDirs)
 
 alpha_recorder_set_project_options()
-alpha_recorder_fetch_test_deps()
 
 include(CTest)
 
@@ -69,38 +67,19 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/obs/obsconfig.h"
 #define OBS_BETA 0
 ")
 
-add_library(alpha_recorder_e2e_scenario STATIC
-    src/core/e2e_scenario.cpp
-)
-alpha_recorder_setup_target(alpha_recorder_e2e_scenario)
-alpha_recorder_apply_warnings(alpha_recorder_e2e_scenario)
-target_include_directories(alpha_recorder_e2e_scenario
-    PUBLIC
-        $<BUILD_INTERFACE:${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-)
-set_target_properties(alpha_recorder_e2e_scenario PROPERTIES
-    OUTPUT_NAME "alpha_recorder_e2e_scenario"
-    FOLDER "alpha_recorder/core"
-    POSITION_INDEPENDENT_CODE ON
-)
-
 set(_alpha_recorder_build_full_targets OFF)
-if(ALPHA_RECORDER_BUILD_OBS_PLUGIN OR ALPHA_RECORDER_BUILD_E2E_TESTS OR ALPHA_RECORDER_BUILD_CORE_UNIT_TESTS)
+if(ALPHA_RECORDER_BUILD_OBS_PLUGIN OR (BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS))
     set(_alpha_recorder_build_full_targets ON)
 endif()
 
 if(_alpha_recorder_build_full_targets)
 find_package(OBS REQUIRED MODULE)
-find_package(jansson REQUIRED)
-find_package(FFmpeg REQUIRED avcodec avformat avutil swscale)
+find_package(FFmpeg REQUIRED avcodec avformat avutil)
 
 set(_alpha_recorder_ffmpeg_include_dirs
     "${FFmpeg_avcodec_INCLUDE_DIR}"
     "${FFmpeg_avformat_INCLUDE_DIR}"
     "${FFmpeg_avutil_INCLUDE_DIR}"
-    "${FFmpeg_swscale_INCLUDE_DIR}"
 )
 list(REMOVE_DUPLICATES _alpha_recorder_ffmpeg_include_dirs)
 
@@ -130,59 +109,40 @@ elseif(UNIX)
     list(APPEND CMAKE_BUILD_RPATH ${alpha_recorder_obs_runtime_lib_dirs})
 endif()
 
-add_library(alpha_recorder_core STATIC
-    src/core/pair_gate.cpp
-    src/core/manifest_writer.cpp
-    src/core/export_worker.cpp
-    src/core/sidecar_reader.cpp
-    src/core/sidecar_writer.cpp
-    src/core/settings.cpp
-)
-alpha_recorder_setup_target(alpha_recorder_core)
-alpha_recorder_apply_warnings(alpha_recorder_core)
-target_link_libraries(alpha_recorder_core PRIVATE OBS::libobs)
-target_link_libraries(alpha_recorder_core PUBLIC alpha_recorder_e2e_scenario jansson::jansson FFmpeg::avcodec FFmpeg::avformat FFmpeg::avutil FFmpeg::swscale)
-target_include_directories(alpha_recorder_core
-    BEFORE PRIVATE
-        ${_alpha_recorder_ffmpeg_include_dirs}
-)
-target_include_directories(alpha_recorder_core
-    PUBLIC
-        $<BUILD_INTERFACE:${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-)
-set_target_properties(alpha_recorder_core PROPERTIES
-    OUTPUT_NAME "alpha_recorder_core"
-    FOLDER "alpha_recorder/core"
-    POSITION_INDEPENDENT_CODE ON
-)
-
-set(_alpha_recorder_direct_mp4_sources
-    src/obs/direct_mp4_muxer.cpp
-    src/obs/gpu_texture_alpha_output_sink.cpp
-    src/obs/matroska_hevc_muxer.cpp
+set(_alpha_recorder_gpu_texture_muxer_sources
+    src/direct_mp4_muxer.cpp
+    src/gpu_texture_alpha_output_sink.cpp
+    src/matroska_hevc_muxer.cpp
 )
 endif()
 
 if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     add_library(alpha_recorder_plugin MODULE
-        src/obs/alpha_alignment_engine.cpp
-        src/obs/alpha_plane_extractor.cpp
-        ${_alpha_recorder_direct_mp4_sources}
-        src/obs/diagnostic_log.cpp
-        src/obs/gpu_texture_recording_output.cpp
-        src/obs/gpu_texture_timeline_ledger.cpp
-        src/obs/plugin.cpp
-        src/obs/recording_session_controller.cpp
-        src/obs/settings_ui.cpp
-        src/obs/websocket_vendor_api.cpp
+        src/alpha_alignment_engine.cpp
+        src/alpha_mask_video_writer.cpp
+        src/alpha_plane_extractor.cpp
+        ${_alpha_recorder_gpu_texture_muxer_sources}
+        src/diagnostic_log.cpp
+        src/gpu_texture_recording_output.cpp
+        src/gpu_texture_timeline_ledger.cpp
+        src/plugin.cpp
+        src/recording_session_controller.cpp
+        src/settings.cpp
+        src/settings_ui.cpp
+        src/websocket_vendor_api.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_plugin)
     alpha_recorder_apply_warnings(alpha_recorder_plugin)
     target_compile_definitions(alpha_recorder_plugin PRIVATE QT_NO_VERSION_TAGGING)
-    target_link_libraries(alpha_recorder_plugin PRIVATE alpha_recorder_core OBS::libobs OBS::frontend-api)
+    target_link_libraries(alpha_recorder_plugin PRIVATE
+        OBS::libobs
+        OBS::frontend-api
+        FFmpeg::avcodec
+        FFmpeg::avformat
+        FFmpeg::avutil
+    )
     target_include_directories(alpha_recorder_plugin PRIVATE
+        $<BUILD_INTERFACE:${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/plugins/obs-websocket/lib>
         ${_alpha_recorder_ffmpeg_include_dirs}
@@ -190,7 +150,7 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
 
     set_target_properties(alpha_recorder_plugin PROPERTIES
         OUTPUT_NAME "alpha_recorder"
-        FOLDER "alpha_recorder/obs"
+        FOLDER "alpha_recorder"
     )
 
     if(APPLE)
@@ -252,119 +212,33 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
     endif()
 endif()
 
-if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_E2E_TESTS)
-    add_library(alpha_recorder_e2e_output MODULE
-        src/obs/plugin.cpp
-        src/obs/obs_output_bridge.cpp
-        src/obs/e2e_moving_alpha_source.cpp
-        ${_alpha_recorder_direct_mp4_sources}
+if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
+    add_library(alpha_recorder_obs_app_e2e_source MODULE EXCLUDE_FROM_ALL
+        src/obs_app_e2e_source.cpp
     )
-    alpha_recorder_setup_target(alpha_recorder_e2e_output)
-    alpha_recorder_apply_warnings(alpha_recorder_e2e_output)
-    target_compile_definitions(alpha_recorder_e2e_output PRIVATE ALPHA_RECORDER_ENABLE_E2E_OUTPUT_MODULE)
-    target_link_libraries(alpha_recorder_e2e_output PRIVATE alpha_recorder_core OBS::libobs)
-    target_include_directories(alpha_recorder_e2e_output PRIVATE
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        ${_alpha_recorder_ffmpeg_include_dirs}
-    )
-    set_target_properties(alpha_recorder_e2e_output PROPERTIES
-        OUTPUT_NAME "alpha_recorder_e2e"
-        FOLDER "alpha_recorder/tests/e2e"
+    alpha_recorder_setup_target(alpha_recorder_obs_app_e2e_source)
+    alpha_recorder_apply_warnings(alpha_recorder_obs_app_e2e_source)
+    target_link_libraries(alpha_recorder_obs_app_e2e_source PRIVATE OBS::libobs)
+    set_target_properties(alpha_recorder_obs_app_e2e_source PROPERTIES
+        OUTPUT_NAME "alpha_recorder_obs_app_e2e_source"
+        FOLDER "alpha_recorder/tests/obs-app-e2e"
     )
 
     if(APPLE)
-        set_target_properties(alpha_recorder_e2e_output PROPERTIES
+        set_target_properties(alpha_recorder_obs_app_e2e_source PROPERTIES
             BUNDLE TRUE
             BUNDLE_EXTENSION plugin
-        )
-        add_custom_command(TARGET alpha_recorder_e2e_output POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "$<TARGET_BUNDLE_DIR:alpha_recorder_e2e_output>"
-                    "${alpha_recorder_obs_plugin_dir}/alpha_recorder_e2e.plugin"
-            COMMAND codesign --force --sign - "${alpha_recorder_obs_plugin_dir}/alpha_recorder_e2e.plugin"
-            VERBATIM
-        )
-    else()
-        add_custom_command(TARGET alpha_recorder_e2e_output POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${alpha_recorder_obs_plugin_dir}"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "$<TARGET_FILE:alpha_recorder_e2e_output>"
-                    "${alpha_recorder_obs_plugin_dir}/$<TARGET_FILE_NAME:alpha_recorder_e2e_output>"
-            VERBATIM
         )
     endif()
 endif()
 
-if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
-    add_executable(alpha_recorder_unit_e2e_scenario
-        tests/unit/e2e_scenario_test.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_unit_e2e_scenario)
-    alpha_recorder_apply_warnings(alpha_recorder_unit_e2e_scenario)
-    target_link_libraries(alpha_recorder_unit_e2e_scenario PRIVATE alpha_recorder_e2e_scenario)
-    set_target_properties(alpha_recorder_unit_e2e_scenario PROPERTIES
-        FOLDER "alpha_recorder/tests/unit"
-    )
-    add_test(NAME alpha_recorder.unit.e2e_scenario COMMAND alpha_recorder_unit_e2e_scenario)
-    set_tests_properties(alpha_recorder.unit.e2e_scenario PROPERTIES LABELS "unit")
-endif()
-
-if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_UNIT_TESTS AND ALPHA_RECORDER_BUILD_CORE_UNIT_TESTS)
-    add_executable(alpha_recorder_unit_pair_gate
-        tests/unit/pair_gate_test.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_unit_pair_gate)
-    alpha_recorder_apply_warnings(alpha_recorder_unit_pair_gate)
-    target_link_libraries(alpha_recorder_unit_pair_gate PRIVATE alpha_recorder_core)
-    set_target_properties(alpha_recorder_unit_pair_gate PROPERTIES
-        FOLDER "alpha_recorder/tests/unit"
-    )
-    add_test(NAME alpha_recorder.unit.pair_gate COMMAND alpha_recorder_unit_pair_gate)
-    set_tests_properties(alpha_recorder.unit.pair_gate PROPERTIES LABELS "unit")
-
-    add_executable(alpha_recorder_unit_frame_matcher
-        tests/unit/frame_matcher_test.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_unit_frame_matcher)
-    alpha_recorder_apply_warnings(alpha_recorder_unit_frame_matcher)
-    target_link_libraries(alpha_recorder_unit_frame_matcher PRIVATE alpha_recorder_core)
-    set_target_properties(alpha_recorder_unit_frame_matcher PROPERTIES
-        FOLDER "alpha_recorder/tests/unit"
-    )
-    add_test(NAME alpha_recorder.unit.frame_matcher COMMAND alpha_recorder_unit_frame_matcher)
-    set_tests_properties(alpha_recorder.unit.frame_matcher PROPERTIES LABELS "unit")
-
-    add_executable(alpha_recorder_unit_sidecar_writer
-        tests/unit/sidecar_writer_test.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_unit_sidecar_writer)
-    alpha_recorder_apply_warnings(alpha_recorder_unit_sidecar_writer)
-    target_link_libraries(alpha_recorder_unit_sidecar_writer PRIVATE alpha_recorder_core)
-    set_target_properties(alpha_recorder_unit_sidecar_writer PROPERTIES
-        FOLDER "alpha_recorder/tests/unit"
-    )
-    add_test(NAME alpha_recorder.unit.sidecar_writer COMMAND alpha_recorder_unit_sidecar_writer)
-    set_tests_properties(alpha_recorder.unit.sidecar_writer PROPERTIES LABELS "unit")
-
-    add_executable(alpha_recorder_unit_recording_session_pause
-        tests/unit/recording_session_controller_pause_test.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_unit_recording_session_pause)
-    alpha_recorder_apply_warnings(alpha_recorder_unit_recording_session_pause)
-    target_include_directories(alpha_recorder_unit_recording_session_pause PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/obs)
-    set_target_properties(alpha_recorder_unit_recording_session_pause PROPERTIES
-        FOLDER "alpha_recorder/tests/unit"
-    )
-    add_test(NAME alpha_recorder.unit.recording_session_pause COMMAND alpha_recorder_unit_recording_session_pause)
-    set_tests_properties(alpha_recorder.unit.recording_session_pause PROPERTIES LABELS "unit")
-
+if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_UNIT_TESTS)
     add_executable(alpha_recorder_unit_recording_session_cadence
         tests/unit/recording_session_controller_cadence_test.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_unit_recording_session_cadence)
     alpha_recorder_apply_warnings(alpha_recorder_unit_recording_session_cadence)
-    target_include_directories(alpha_recorder_unit_recording_session_cadence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/obs)
+    target_include_directories(alpha_recorder_unit_recording_session_cadence PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     set_target_properties(alpha_recorder_unit_recording_session_cadence PROPERTIES
         FOLDER "alpha_recorder/tests/unit"
     )
@@ -373,11 +247,11 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
 
     add_executable(alpha_recorder_unit_alpha_alignment_engine
         tests/unit/alpha_alignment_engine_test.cpp
-        src/obs/alpha_alignment_engine.cpp
+        src/alpha_alignment_engine.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_unit_alpha_alignment_engine)
     alpha_recorder_apply_warnings(alpha_recorder_unit_alpha_alignment_engine)
-    target_include_directories(alpha_recorder_unit_alpha_alignment_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/obs)
+    target_include_directories(alpha_recorder_unit_alpha_alignment_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     set_target_properties(alpha_recorder_unit_alpha_alignment_engine PROPERTIES
         FOLDER "alpha_recorder/tests/unit"
     )
@@ -386,12 +260,12 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
 
     add_executable(alpha_recorder_unit_gpu_texture_timeline_ledger
         tests/unit/gpu_texture_timeline_ledger_test.cpp
-        src/obs/gpu_texture_timeline_ledger.cpp
+        src/gpu_texture_timeline_ledger.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_unit_gpu_texture_timeline_ledger)
     alpha_recorder_apply_warnings(alpha_recorder_unit_gpu_texture_timeline_ledger)
     target_include_directories(alpha_recorder_unit_gpu_texture_timeline_ledger PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/obs
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}
     )
@@ -403,10 +277,23 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
 
     add_executable(alpha_recorder_unit_settings
         tests/unit/settings_test.cpp
+        src/alpha_mask_video_writer.cpp
+        src/settings.cpp
     )
     alpha_recorder_setup_target(alpha_recorder_unit_settings)
     alpha_recorder_apply_warnings(alpha_recorder_unit_settings)
-    target_link_libraries(alpha_recorder_unit_settings PRIVATE alpha_recorder_core OBS::libobs)
+    target_link_libraries(alpha_recorder_unit_settings PRIVATE
+        OBS::libobs
+        FFmpeg::avcodec
+        FFmpeg::avformat
+        FFmpeg::avutil
+    )
+    target_include_directories(alpha_recorder_unit_settings PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}
+        ${_alpha_recorder_ffmpeg_include_dirs}
+    )
     set_target_properties(alpha_recorder_unit_settings PROPERTIES
         FOLDER "alpha_recorder/tests/unit"
     )
@@ -415,70 +302,6 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
         LABELS "unit"
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${alpha_recorder_obs_runtime_bin_dir};PATH=path_list_prepend:${_alpha_recorder_obs_deps_root}/bin"
     )
-endif()
-
-if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_E2E_TESTS)
-    add_executable(alpha_recorder_e2e_host
-        tests/e2e/host/main.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_e2e_host)
-    alpha_recorder_apply_warnings(alpha_recorder_e2e_host)
-    target_link_libraries(alpha_recorder_e2e_host PRIVATE alpha_recorder_core OBS::libobs)
-    set_target_properties(alpha_recorder_e2e_host PROPERTIES
-        FOLDER "alpha_recorder/tests/e2e"
-    )
-    add_executable(alpha_recorder_test_encoder
-        tests/e2e/test_encoder/main.cpp
-    )
-    alpha_recorder_setup_target(alpha_recorder_test_encoder)
-    alpha_recorder_apply_warnings(alpha_recorder_test_encoder)
-    target_link_libraries(alpha_recorder_test_encoder PRIVATE alpha_recorder_core)
-    set_target_properties(alpha_recorder_test_encoder PROPERTIES
-        FOLDER "alpha_recorder/tests/e2e"
-    )
-
-    set(alpha_recorder_e2e_artifact_root "${CMAKE_CURRENT_BINARY_DIR}/Testing/Temporary/alpha_recorder_e2e")
-    set(alpha_recorder_e2e_host_environment_modification
-        "ALPHA_RECORDER_STAGE_DIR=set:${OBS_ROOT}"
-        "PATH=path_list_prepend:${alpha_recorder_obs_runtime_bin_dir}"
-    )
-    if(UNIX AND NOT APPLE)
-        foreach(alpha_recorder_obs_runtime_lib_dir IN LISTS alpha_recorder_obs_runtime_lib_dirs)
-            list(APPEND alpha_recorder_e2e_host_environment_modification
-                "LD_LIBRARY_PATH=path_list_prepend:${alpha_recorder_obs_runtime_lib_dir}"
-            )
-        endforeach()
-    endif()
-
-    function(alpha_recorder_add_e2e_scenario scenario_name scenario_path)
-        set(host_test_name "alpha_recorder.e2e.${scenario_name}.host")
-        set(encoder_test_name "alpha_recorder.e2e.${scenario_name}.test_encoder")
-
-        add_test(NAME ${host_test_name}
-            COMMAND alpha_recorder_e2e_host
-                --scenario "${scenario_path}"
-                --artifact-root "${alpha_recorder_e2e_artifact_root}"
-        )
-        set_tests_properties(${host_test_name} PROPERTIES
-            LABELS "e2e"
-            ENVIRONMENT_MODIFICATION "${alpha_recorder_e2e_host_environment_modification}"
-        )
-
-        add_test(NAME ${encoder_test_name}
-            COMMAND alpha_recorder_test_encoder
-                --scenario "${scenario_path}"
-                --artifact-root "${alpha_recorder_e2e_artifact_root}"
-        )
-        set_tests_properties(${encoder_test_name} PROPERTIES
-            LABELS "e2e"
-            DEPENDS ${host_test_name}
-            ENVIRONMENT_MODIFICATION "ALPHA_RECORDER_STAGE_DIR=set:${OBS_ROOT}"
-        )
-    endfunction()
-
-    alpha_recorder_add_e2e_scenario(happy_path "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/basic_pair.scenario")
-    alpha_recorder_add_e2e_scenario(drop_backpressure "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/drop_backpressure.scenario")
-    alpha_recorder_add_e2e_scenario(split_rotation "${CMAKE_CURRENT_SOURCE_DIR}/tests/e2e/scenarios/split_rotation.scenario")
 endif()
 
 if(_alpha_recorder_build_full_targets AND TARGET alpha_recorder_plugin)
@@ -494,26 +317,9 @@ if(_alpha_recorder_build_full_targets AND TARGET alpha_recorder_plugin)
         DEPENDS alpha_recorder_plugin
         VERBATIM
     )
-    if(TARGET alpha_recorder_e2e_output)
-        add_dependencies(alpha_recorder_stage_obs_tree alpha_recorder_e2e_output)
-    endif()
-
-    if(BUILD_TESTING AND ALPHA_RECORDER_BUILD_E2E_TESTS)
-        add_custom_target(alpha_recorder_run_e2e
-            COMMAND ${CMAKE_COMMAND}
-                "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
-                "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-                "-DSTAGE_DIR=${alpha_recorder_stage_dir}"
-                "-DOBS_ROOT=${OBS_ROOT}"
-                "-DCONFIGURATION=$<CONFIG>"
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunE2E.cmake"
-            DEPENDS alpha_recorder_stage_obs_tree
-            VERBATIM
-        )
-    endif()
 endif()
 
-if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_ENABLE_OBS_APP_E2E)
+if(BUILD_TESTING AND TARGET alpha_recorder_plugin AND ALPHA_RECORDER_ENABLE_OBS_APP_E2E)
     add_test(NAME alpha_recorder.e2e.obs_app
         COMMAND ${CMAKE_COMMAND}
             "-DREPO_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
@@ -529,7 +335,7 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_ENABL
     )
 endif()
 
-if(_alpha_recorder_build_full_targets)
+if(TARGET alpha_recorder_plugin)
     set(_alpha_recorder_ffmpeg_hints
         "${alpha_recorder_obs_runtime_bin_dir}"
         "${OBS_ROOT}/bin"
@@ -968,14 +774,6 @@ if(_alpha_recorder_build_full_targets)
     )
 endif()
 
-install(TARGETS alpha_recorder_e2e_scenario ARCHIVE DESTINATION lib)
-
-if(TARGET alpha_recorder_core)
-    install(TARGETS alpha_recorder_core
-        ARCHIVE DESTINATION lib
-    )
-endif()
-
 if(TARGET alpha_recorder_plugin)
     install(TARGETS alpha_recorder_plugin
         RUNTIME DESTINATION obs-plugins/64bit
@@ -983,6 +781,3 @@ if(TARGET alpha_recorder_plugin)
         BUNDLE DESTINATION obs-plugins
     )
 endif()
-
-install(DIRECTORY include/ DESTINATION include PATTERN "*.in" EXCLUDE)
-install(DIRECTORY "${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}/" DESTINATION include)

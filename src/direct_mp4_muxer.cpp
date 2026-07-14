@@ -1383,26 +1383,6 @@ namespace alpha_recorder::obs
         close_storage();
     }
 
-    bool DirectMp4Muxer::is_open() const noexcept
-    {
-        return impl_->serializer_open;
-    }
-
-    bool DirectMp4Muxer::is_accepting_packets() const noexcept
-    {
-        return impl_->accepting_packets;
-    }
-
-    bool DirectMp4Muxer::supports_visible_range() const noexcept
-    {
-        return true;
-    }
-
-    const std::filesystem::path &DirectMp4Muxer::path() const noexcept
-    {
-        return impl_->path;
-    }
-
     const DirectMp4MuxerStats &DirectMp4Muxer::stats() const noexcept
     {
         return impl_->stats;

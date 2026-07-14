@@ -157,12 +157,6 @@ Run focused unit tests:
 ctest --test-dir out/build/windows-x64-msvc -C RelWithDebInfo -L unit --output-on-failure
 ```
 
-Run deterministic E2E tests:
-
-```sh
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_e2e
-```
-
 Run the real OBS app E2E path:
 
 ```sh

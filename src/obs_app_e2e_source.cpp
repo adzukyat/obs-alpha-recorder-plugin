@@ -1,5 +1,3 @@
-#include "alpha_recorder/plugin.hpp"
-
 #include <algorithm>
 #include <cstdint>
 
@@ -7,6 +5,9 @@
 
 #include <graphics/graphics.h>
 #include <graphics/vec4.h>
+
+OBS_DECLARE_MODULE()
+OBS_MODULE_USE_DEFAULT_LOCALE("alpha_recorder", "en-US")
 
 namespace
 {
@@ -159,9 +160,9 @@ namespace
 
 } // namespace
 
-namespace alpha_recorder::obs
+namespace
 {
-    bool register_e2e_sources() noexcept
+    bool register_moving_alpha_source() noexcept
     {
         obs_source_info info = {};
         info.id = kSourceId;
@@ -179,4 +180,14 @@ namespace alpha_recorder::obs
         obs_register_source(&info);
         return true;
     }
-} // namespace alpha_recorder::obs
+} // namespace
+
+extern "C" bool obs_module_load(void)
+{
+    return register_moving_alpha_source();
+}
+
+MODULE_EXPORT const char *obs_module_description(void)
+{
+    return "Alpha Recorder OBS app E2E moving-alpha source";
+}

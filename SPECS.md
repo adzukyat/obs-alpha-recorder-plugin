@@ -31,18 +31,15 @@ E2E path that can run without desktop automation.
 - When no finalization format has been saved, the plugin uses the safe PNG MOV
   fallback. Hardware HEVC formats are preserved when explicitly selected and are
   exposed only when the matching runtime backend is available.
-- Scenario files are retained only for synthetic/non-UI E2E paths.
 - External capture apps are not part of the product path.
 - The shipping OBS runtime writes the playable alpha mask movie directly.
-- Raw sidecar and manifest primitives remain only for synthetic/non-UI
-  E2E support.
 - Build and staging produce one normal user OBS plugin artifact named
   `alpha_recorder`.
 - The `alpha_recorder` artifact contains both runtime recording hooks and
   `Tools > Alpha Recorder Settings`.
-- The separate `alpha_recorder_e2e` module is test-only for deterministic and
-  synthetic E2E support.
-- `alpha_recorder_e2e` must not register runtime UI or obs-websocket hooks.
+- Real OBS app E2E additionally stages the test-only
+  `alpha_recorder_obs_app_e2e_source` module, which registers only the moving
+  alpha test source and is never included in release packages.
 
 ## Non-Goals
 
@@ -163,7 +160,7 @@ Supported finalization formats:
 
 | Format id | Output | Notes |
 | --- | --- | --- |
-| `mask_png_mov` | Lossless grayscale PNG MOV `.mov` | CPU-heavy fallback, disk-light relative to raw masks |
+| `mask_png_mov` | Lossless grayscale PNG MOV `.mov` | CPU-heavy fallback |
 | `mask_hevc_nvenc` | HEVC NVENC `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `obs_nvenc_hevc_tex`; container follows the OBS recording |
 | `mask_hevc_amf` | HEVC AMF `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `h265_texture_amf`; container follows the OBS recording |
 | `mask_hevc_qsv` | HEVC QSV `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `obs_qsv11_hevc`; container follows the OBS recording |
@@ -171,8 +168,7 @@ Supported finalization formats:
 
 HEVC GPU texture options are exposed only when OBS registers the matching HEVC
 video encoder and that encoder advertises `OBS_ENCODER_CAP_PASS_TEXTURE`.
-Encoder-name presence alone is not enough. CPU fallback HEVC writer paths retain
-their own FFmpeg openability probes where applicable.
+Encoder-name presence alone is not enough.
 
 Container selection is independent from the HEVC backend. MP4, hybrid MP4, and
 fragmented MP4 recordings use the ISO BMFF MP4 flavor; MOV, hybrid MOV, and
@@ -196,17 +192,17 @@ Settings can also be driven by obs-websocket vendor API for automated E2E:
 
 ## Technical Design
 
-The repo contains core primitives for admission gating, sidecar support,
-settings, and live mask movie encoding. The OBS integration adds live capture,
-lifecycle wiring, settings, and automated control.
+Production implementation files live in one flat `src/` directory. The shipping
+module owns recording lifecycle integration, alpha capture and alignment, mask
+movie encoding, settings, and automated control.
 
 The current tree provides:
 
 - OBS recording lifecycle hooks plus a Tools menu settings dialog.
-- A core static library for pair gating, sidecar primitives, settings,
-  and live mask movie encoding.
+- Direct PNG MOV writing for the CPU path and OBS texture-encoder output for HEVC
+  GPU paths.
 - Unit test executables registered with CTest.
-- Deterministic E2E executables and CMake-native staging helpers.
+- A test-only moving-alpha OBS source module used only by app E2E.
 - A cross-platform OBS app E2E path driven by CMake and obs-websocket.
 - CMake presets for Windows x64 MSVC, macOS, and Linux x64.
 
@@ -306,7 +302,7 @@ Automation:
 
 ## Build and Staging Contract
 
-The OBS module target and the E2E harness require a real OBS developer tree.
+The OBS module targets and the app E2E harness require a real OBS developer tree.
 `OBS_ROOT` must point to a tree with libobs headers, import libraries,
 and the platform's OBS runtime/plugin/data layout.
 
@@ -372,9 +368,9 @@ Stage a portable OBS tree with Alpha Recorder overlaid:
 cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_stage_obs_tree
 ```
 
-Staging overlays one normal user plugin artifact, `alpha_recorder`. When
-deterministic E2E support is built, staging may also overlay the separate
-test-only `alpha_recorder_e2e` module.
+Normal staging overlays one user plugin artifact, `alpha_recorder`. The OBS app
+E2E runner additionally overlays `alpha_recorder_obs_app_e2e_source` so the test
+scene can use its moving-alpha source.
 
 Staged plugin locations:
 
@@ -401,13 +397,13 @@ rejected.
 
 The canonical project release version lives in the root `VERSION` file. CMake
 uses that file for `project(... VERSION ...)` and generates
-`alpha_recorder/version.hpp`, which is the runtime source for manifest
-`project_version` metadata. The release workflow also rejects a signed release
-tag when its `vX.X.X` payload does not match `VERSION`.
+`alpha_recorder/version.hpp`, which supplies the installed version shown in the
+settings dialog. The release workflow also rejects a signed release tag when its
+`vX.X.X` payload does not match `VERSION`.
 
 The release artifacts contain the user plugin package layout plus `README.md`,
 `LICENSE`, and `VERSION`; they do not include the staged OBS runtime or the
-test-only `alpha_recorder_e2e` module.
+test-only `alpha_recorder_obs_app_e2e_source` module.
 
 - Windows: `alpha-recorder-vX.X.X-windows-x64.zip`.
 - macOS: `alpha-recorder-vX.X.X-macos-arm64.zip`.
@@ -462,17 +458,6 @@ All unit tests:
 ctest --test-dir out/build/macos-arm64 -C RelWithDebInfo -L unit --output-on-failure
 ```
 
-Deterministic E2E:
-
-```sh
-cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_e2e
-```
-
-The deterministic E2E host starts libobs, loads the staged
-`alpha_recorder_e2e` module, produces RGB raw and alpha mask artifacts, and the
-verifier parses those files rather than checking file existence alone. Scenario
-files under `tests/e2e/scenarios` are E2E-only inputs.
-
 Automated OBS app E2E:
 
 ```sh
@@ -488,7 +473,6 @@ cmake -DREPO_ROOT="$PWD" -DBUILD_FROM_SOURCE=ON -P cmake/scripts/BootstrapObs.cm
 cmake --preset linux-x64
 cmake --build --preset linux-x64-relwithdebinfo
 ctest --preset linux-x64-relwithdebinfo --output-on-failure
-cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_e2e
 cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
 ```
 
@@ -513,7 +497,8 @@ tools, obs-websocket plugin, and `bun` on PATH.
 
 The OBS app E2E target:
 
-- Builds and stages OBS plus the plugin into an isolated app/runtime tree.
+- Builds and stages OBS, the user plugin, and the test-only moving-alpha source
+  module into an isolated app/runtime tree.
 - Creates an isolated OBS profile and scene collection.
 - On macOS, uses isolated `HOME` and `CFFIXED_USER_HOME`.
 - On Linux, uses isolated `HOME` and `XDG_CONFIG_HOME` because the pinned OBS
@@ -542,8 +527,8 @@ The OBS app E2E target:
   under the artifact root.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are
   playable.
-- Adds a test-only moving colored object over a transparent background with an
-  opaque binary frame-code strip.
+- Uses `alpha_recorder_obs_app_e2e_source` to add a moving colored object over a
+  transparent background with an opaque binary frame-code strip.
 - Decodes RGB and alpha mask frames for PNG MOV and HEVC targets.
 - Verifies zero frame-code offset plus moving mask bounds frame-by-frame,
   allowing only small start/terminal/count mismatches.
@@ -557,9 +542,9 @@ The plugin logs one per-segment OBS performance summary covering
 capture/readback CPU time, GPU submission timing, alignment-worker batches,
 alignment recovery counts, queue depths, writer overflow repeat count, and
 mask encode timing. If diagnostic logging is enabled, the same summary plus
-segment-start encoder settings, dynamic alignment/writer queue limits, NVENC
-option readback, and encode-stage timing breakdowns are appended to the plugin
-diagnostic log file. The OBS app E2E harness copies OBS performance summaries into
+segment-start encoder settings, dynamic alignment/writer queue limits, and
+encode-stage timing breakdowns are appended to the plugin diagnostic log file.
+The OBS app E2E harness copies OBS performance summaries into
 `alpha-recorder-performance.json`.
 
 If OBS logs `Encoding overloaded!`, severe skipped frames due to encoding lag,
@@ -607,8 +592,8 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 Runtime matrix rules:
 
 - Configure probes `hevc_nvenc` and `hevc_amf` on the target machine with a
-  realistic 1080p FFmpeg encode for the legacy CPU HEVC writer and standard
-  hardware matrix targets.
+  1080p FFmpeg encode before registering the corresponding hardware app E2E
+  matrix targets.
 - Configure registers only matching alpha HEVC targets whose encoder opens.
 - RGB NVENC targets additionally require the staged OBS NVENC plugin.
 - The target matrix is runtime-aware rather than OS-only.
@@ -631,7 +616,6 @@ Runtime matrix rules:
 
 Completed:
 
-- Pair admission logic with all-or-nothing frame-pair acceptance.
 - `Tools > Alpha Recorder Settings` dialog with Enabled, Finalization Format,
   and HEVC encoder tuning controls.
 - OBS user config persistence for enabled state, finalization format, and HEVC
@@ -662,7 +646,7 @@ Completed:
 - Texture-encoder path classification cached before packet handling so packet
   callbacks only enqueue packet PTS/CTS evidence.
 - Lightweight per-segment performance telemetry for capture/readback,
-  alignment-worker batches/recovery, queue depths, split-encode option readback,
+  alignment-worker batches/recovery, queue depths, selected encoder settings,
   and mask encode-stage timing.
 - Optional diagnostic log file with a settings-dialog reveal button.
 - Alpha mask movie finalization on stop and split rotation.
@@ -671,25 +655,19 @@ Completed:
   `alpha_recorder.SetSettings`.
 - obs-websocket settings coverage for HEVC quality profile, CQ, preset, NVENC
   tune, GOP, adaptive quantization, NVENC Split Encode, and NVENC GPU index.
-- CMake-native OBS bootstrap, staging, deterministic E2E, and OBS app E2E
-  scripts:
+- CMake-native OBS bootstrap, staging, and OBS app E2E scripts:
   - `cmake/scripts/BootstrapObs.cmake`
   - `cmake/scripts/StageObsTree.cmake`
-  - `cmake/scripts/RunE2E.cmake`
   - `cmake/scripts/RunObsAppE2E.cmake`
 - Cross-platform OBS app E2E helper, run with Bun:
   - `cmake/scripts/obs_app_e2e.ts`
-- Deterministic split-rotation E2E scenario:
-  - `tests/e2e/scenarios/split_rotation.scenario`
-- Deterministic E2E validation of RGB raw artifacts, alpha mask artifacts, and
-  split-rotation behavior through the OBS module boundary.
 - Cross-platform OBS app E2E harness that verifies RGB and alpha mask movie
   outputs, including zero frame-code offset plus frame-by-frame sync between a
   moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths.
 - Optional CTest registration behind:
   - `ALPHA_RECORDER_ENABLE_OBS_APP_E2E`
-- OBS staging updates that copy the full OBS plugin set before overlaying Alpha
-  Recorder binaries.
+- OBS staging that copies the full OBS plugin set before overlaying Alpha
+  Recorder and, for app E2E only, the moving-alpha source module.
 
 Still useful follow-up work:
 
