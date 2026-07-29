@@ -2362,6 +2362,7 @@ finalization_format=${args.finalizationFormat}
         hevc_nvenc_tune: args.hevcNvencTune,
         hevc_gop_size: args.hevcGopSize,
         diagnostic_logging: args.allowOverload,
+        fail_close_on_sync_proof_failure: !args.allowOverload,
       },
     });
     if (setSettings.responseData?.ok === false) {

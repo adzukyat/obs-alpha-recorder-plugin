@@ -132,6 +132,7 @@ technique DrawRed
     {
         std::int64_t pts = 0;
         std::uint64_t generation = 0U;
+        bool ambiguous = false;
     };
 
     struct GpuTextureRecordingOutputContext
@@ -186,6 +187,7 @@ technique DrawRed
         std::vector<ReplayGenerationEntry> replay_packet_generations{};
         std::int64_t replay_next_packet_pts = 0;
         bool replay_has_next_packet_pts = false;
+        std::int64_t replay_next_alpha_input_pts = 0;
         std::uint64_t replay_consumed_entries = 0U;
         std::uint64_t replay_last_emitted_generation = 0U;
         bool replay_has_last_emitted_generation = false;
@@ -495,6 +497,11 @@ technique DrawRed
             1ULL,
             (1000000000ULL * static_cast<std::uint64_t>(fps_den)) /
                 static_cast<std::uint64_t>(fps_num));
+    }
+
+    std::int64_t configured_encoder_pts_step(const GpuTextureRecordingOutputContext &context) noexcept
+    {
+        return static_cast<std::int64_t>(std::max<std::uint32_t>(1U, context.fps_den));
     }
 
     std::uint32_t configured_keyint_seconds(const GpuTextureRecordingOutputContext &context) noexcept
@@ -854,9 +861,32 @@ technique DrawRed
         if (record == nullptr)
         {
             context.replay_packet_generations.push_back(ReplayGenerationEntry{pts, generation});
+        }
+        else if (record->generation != generation)
+        {
+            record->ambiguous = true;
+        }
+
+        alpha_recorder::obs::GpuTexturePacketRecord *packet =
+            find_packet_record_by_pts(context.alpha_packet_records, pts);
+        if (packet == nullptr)
+        {
             return;
         }
-        record->generation = generation;
+
+        record = find_replay_generation_by_pts(context.replay_packet_generations, pts);
+        if (record == nullptr || record->ambiguous ||
+            (packet->has_generation && packet->emitted_generation != generation))
+        {
+            packet->has_generation = false;
+            packet->ambiguous_generation = true;
+            return;
+        }
+
+        packet->input_generation = generation;
+        packet->emitted_generation = generation;
+        packet->has_generation = true;
+        packet->ambiguous_generation = false;
     }
 
     void merge_replay_packet_generation(GpuTextureRecordingOutputContext &context,
@@ -870,6 +900,13 @@ technique DrawRed
             find_replay_generation_by_pts(context.replay_packet_generations, record.pts);
         if (generation == nullptr)
         {
+            return;
+        }
+        if (generation->ambiguous ||
+            (record.has_generation && record.emitted_generation != generation->generation))
+        {
+            record.has_generation = false;
+            record.ambiguous_generation = true;
             return;
         }
         record.input_generation = generation->generation;
@@ -1185,9 +1222,6 @@ technique DrawRed
                         source->context->replay_generation_queue.erase(entry);
                         ++source->context->replay_consumed_entries;
                     }
-                    remember_replay_packet_generation(*source->context,
-                                                      replay_queued_pts,
-                                                      emitted_generation);
                     if (source->context->replay_generation_queue.empty())
                     {
                         source->context->replay_has_next_packet_pts = false;
@@ -1204,9 +1238,29 @@ technique DrawRed
                         source->context->replay_has_next_packet_pts = true;
                     }
                 }
-                source->context->replay_last_emitted_generation = emitted_generation;
-                source->context->replay_has_last_emitted_generation = true;
-                ++source->context->replay_emitted_frames;
+                if (!replay_before_consume_start)
+                {
+                    const std::int64_t alpha_input_pts =
+                        source->context->replay_next_alpha_input_pts;
+                    remember_replay_packet_generation(*source->context,
+                                                      alpha_input_pts,
+                                                      emitted_generation);
+
+                    const std::int64_t pts_step =
+                        configured_encoder_pts_step(*source->context);
+                    if (alpha_input_pts <= std::numeric_limits<std::int64_t>::max() - pts_step)
+                    {
+                        source->context->replay_next_alpha_input_pts += pts_step;
+                    }
+                    else
+                    {
+                        source->context->replay_next_alpha_input_pts =
+                            std::numeric_limits<std::int64_t>::max();
+                    }
+                    source->context->replay_last_emitted_generation = emitted_generation;
+                    source->context->replay_has_last_emitted_generation = true;
+                    ++source->context->replay_emitted_frames;
+                }
             }
             else if (source->context->replay_configured &&
                      source->context->replay_next_generation == emitted_generation)
@@ -1706,6 +1760,7 @@ technique DrawRed
             context->replay_packet_generations.clear();
             context->replay_next_packet_pts = 0;
             context->replay_has_next_packet_pts = false;
+            context->replay_next_alpha_input_pts = 0;
             context->replay_consumed_entries = 0U;
             context->replay_last_emitted_generation = 0U;
             context->replay_has_last_emitted_generation = false;
@@ -2530,7 +2585,7 @@ namespace alpha_recorder::obs
         context->stop_state = GpuTextureOutputStopState::MuxFinalized;
         context->state_cv.notify_all();
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] mux finalized packets=%llu muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%llu last_pts=%lld replay_queue_pending=%zu replay_consumed=%llu replay_underflows=%llu replay_emitted=%llu",
+             "[alpha_recorder_gpu_texture] mux finalized packets=%llu muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%llu last_pts=%lld replay_queue_pending=%zu replay_consumed=%llu replay_underflows=%llu replay_emitted=%llu replay_generation_slots=%zu replay_next_alpha_pts=%lld",
              static_cast<unsigned long long>(context->sink.stats().packet_count),
              static_cast<unsigned long long>(context->sink.stats().muxed_packet_count),
              static_cast<unsigned long long>(context->sink.stats().max_buffered_packet_count),
@@ -2539,7 +2594,9 @@ namespace alpha_recorder::obs
              context->replay_generation_queue.size(),
              static_cast<unsigned long long>(context->replay_consumed_entries),
              static_cast<unsigned long long>(context->replay_queue_underflows),
-             static_cast<unsigned long long>(context->replay_emitted_frames));
+             static_cast<unsigned long long>(context->replay_emitted_frames),
+             context->replay_packet_generations.size(),
+             static_cast<long long>(context->replay_next_alpha_input_pts));
         return true;
     }
 

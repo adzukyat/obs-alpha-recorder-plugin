@@ -89,12 +89,16 @@ Failure behavior:
   running by repeating the previous alpha frame for recoverable gaps, log the
   repeat/drop counts, and do not stop or slow the main OBS recording.
 - Temporary alpha files are published only after mux finalization succeeds.
-  Failed temporary files are removed; they are not renamed to the final
-  recording path.
-- Sync-proof failure is best-effort by default: apply a usable partial visible
-  range when one exists, otherwise publish the complete alpha timeline. When
+  Encoder or mux failures remove incomplete temporary files; they are not
+  renamed to the final recording path.
+- Sync-proof failure is best-effort by default: apply a usable proven start
+  when one exists, extend it through the available alpha tail, and cap it to
+  the written main-video frame count; otherwise publish the complete alpha
+  timeline. When
   `Fail close on sync proof failure` is enabled under Debug, the affected alpha
-  segment is removed instead.
+  segment is not published under the normal `.alpha` name. A successfully
+  finalized diagnostic movie is retained as `.alpha.sync-invalid.<container>`
+  so the unproven recording remains available for investigation.
 - The main OBS recording must remain the highest-priority artifact.
 
 ## Settings Contract

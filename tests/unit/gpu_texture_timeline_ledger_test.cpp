@@ -473,6 +473,39 @@ int main()
         }
     }
 
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.main_packets = {
+            main_packet(0, 1000),
+            main_packet(1001, 2000),
+            main_packet(3003, 3000),
+        };
+        input.alpha_packets = {
+            alpha_packet(0, 1000, 0),
+            alpha_packet(1001, 2000, 1),
+            alpha_packet(2002, 3000, 2),
+            alpha_packet(3003, 4000, 2),
+        };
+        input.alpha_renders = {
+            render(0, 1000, 0),
+            render(1, 2000, 1),
+            render(2, 3000, 2),
+            render(3, 4000, 2),
+        };
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (result.error != alpha_recorder::obs::TimelineSolveError::None ||
+            result.solution.range.media_time != 0 ||
+            result.solution.range.duration != 3003)
+        {
+            std::cerr << "dense alpha input slots did not survive a main PTS gap and tail repeat\n";
+            return 18;
+        }
+    }
+
     std::cout << "gpu texture timeline ledger test passed\n";
     return 0;
 }
