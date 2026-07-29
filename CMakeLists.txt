@@ -142,6 +142,7 @@ if(_alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD_OBS_PLUGIN)
         src/diagnostic_log.cpp
         src/gpu_texture_recording_output.cpp
         src/gpu_texture_timeline_ledger.cpp
+        src/replay_generation_ledger.cpp
         src/plugin.cpp
         src/recording_session_controller.cpp
         src/settings.cpp
@@ -291,6 +292,23 @@ if(BUILD_TESTING AND _alpha_recorder_build_full_targets AND ALPHA_RECORDER_BUILD
     )
     add_test(NAME alpha_recorder.unit.gpu_texture_timeline_ledger COMMAND alpha_recorder_unit_gpu_texture_timeline_ledger)
     set_tests_properties(alpha_recorder.unit.gpu_texture_timeline_ledger PROPERTIES LABELS "unit")
+
+    add_executable(alpha_recorder_unit_replay_generation_ledger
+        tests/unit/replay_generation_ledger_test.cpp
+        src/replay_generation_ledger.cpp
+    )
+    alpha_recorder_setup_target(alpha_recorder_unit_replay_generation_ledger)
+    alpha_recorder_apply_warnings(alpha_recorder_unit_replay_generation_ledger)
+    target_include_directories(alpha_recorder_unit_replay_generation_ledger PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${ALPHA_RECORDER_GENERATED_INCLUDE_DIR}
+    )
+    set_target_properties(alpha_recorder_unit_replay_generation_ledger PROPERTIES
+        FOLDER "alpha_recorder/tests/unit"
+    )
+    add_test(NAME alpha_recorder.unit.replay_generation_ledger COMMAND alpha_recorder_unit_replay_generation_ledger)
+    set_tests_properties(alpha_recorder.unit.replay_generation_ledger PROPERTIES LABELS "unit")
 
     add_executable(alpha_recorder_unit_settings
         tests/unit/settings_test.cpp
@@ -519,8 +537,8 @@ if(TARGET alpha_recorder_plugin)
     set(_alpha_recorder_obs_app_e2e_skipped_targets)
 
     function(alpha_recorder_add_obs_app_e2e_target target_name stage_suffix)
-        set(options ALLOW_OVERLOAD EXPERIMENTAL WITH_AUDIO VERIFY_NLE_TIMELINE)
-        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS RECORD_FORMAT RECORD_SECONDS MAX_RECORD_SECONDS SYNC_RECORD_SECONDS SYNC_ATTEMPTS DURABILITY_RECORD_SECONDS HEVC_GOP_SIZE)
+        set(options ALLOW_OVERLOAD EXPERIMENTAL WITH_AUDIO VERIFY_NLE_TIMELINE STRICT_ALL_FRAMES REQUIRE_MAIN_PTS_GAP REQUIRE_PACKET_REORDER REQUIRE_REPLAY_UNDERFLOW REQUIRE_REPLAY_CATCHUP REQUIRE_OVERLOAD REQUIRE_TAIL_REPEAT BEST_EFFORT_SYNC)
+        set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS FPS_NUM FPS_DEN RECORD_FORMAT OUTPUT_MODE RECORD_AUDIO_ENCODER RECORD_SECONDS MAX_RECORD_SECONDS SYNC_RECORD_SECONDS SYNC_ATTEMPTS DURABILITY_RECORD_SECONDS HEVC_GOP_SIZE PHASE_SWEEP_STEPS PAUSE_AT_MS PAUSE_DURATION_MS SPLIT_AT_MS OVERLOAD_PULSE_AT_MS OVERLOAD_PULSE_DURATION_MS OVERLOAD_PULSE_DELAY_MS TEST_FAULT FAULT_SEGMENT REPLAY_GAP_PACKETS EXPECT_RESULT)
         set(multi_value_args)
         cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
 
@@ -539,8 +557,20 @@ if(TARGET alpha_recorder_plugin)
         if(NOT ARG_FPS)
             set(ARG_FPS "60")
         endif()
+        if(NOT ARG_FPS_NUM)
+            set(ARG_FPS_NUM "${ARG_FPS}")
+        endif()
+        if(NOT ARG_FPS_DEN)
+            set(ARG_FPS_DEN "1")
+        endif()
         if(NOT ARG_RECORD_FORMAT)
             set(ARG_RECORD_FORMAT "mkv")
+        endif()
+        if(NOT ARG_OUTPUT_MODE)
+            set(ARG_OUTPUT_MODE "simple")
+        endif()
+        if(NOT ARG_RECORD_AUDIO_ENCODER)
+            set(ARG_RECORD_AUDIO_ENCODER "aac")
         endif()
         if(ARG_RECORD_SECONDS AND NOT ARG_SYNC_RECORD_SECONDS)
             set(ARG_SYNC_RECORD_SECONDS "${ARG_RECORD_SECONDS}")
@@ -560,6 +590,36 @@ if(TARGET alpha_recorder_plugin)
         if(NOT DEFINED ARG_HEVC_GOP_SIZE)
             set(ARG_HEVC_GOP_SIZE "0")
         endif()
+        if(NOT ARG_PHASE_SWEEP_STEPS)
+            set(ARG_PHASE_SWEEP_STEPS "0")
+        endif()
+        if(NOT DEFINED ARG_PAUSE_AT_MS)
+            set(ARG_PAUSE_AT_MS "-1")
+        endif()
+        if(NOT DEFINED ARG_PAUSE_DURATION_MS)
+            set(ARG_PAUSE_DURATION_MS "0")
+        endif()
+        if(NOT DEFINED ARG_SPLIT_AT_MS)
+            set(ARG_SPLIT_AT_MS "-1")
+        endif()
+        if(NOT DEFINED ARG_OVERLOAD_PULSE_AT_MS)
+            set(ARG_OVERLOAD_PULSE_AT_MS "-1")
+        endif()
+        if(NOT DEFINED ARG_OVERLOAD_PULSE_DURATION_MS)
+            set(ARG_OVERLOAD_PULSE_DURATION_MS "0")
+        endif()
+        if(NOT DEFINED ARG_OVERLOAD_PULSE_DELAY_MS)
+            set(ARG_OVERLOAD_PULSE_DELAY_MS "0")
+        endif()
+        if(NOT DEFINED ARG_FAULT_SEGMENT)
+            set(ARG_FAULT_SEGMENT "0")
+        endif()
+        if(NOT DEFINED ARG_REPLAY_GAP_PACKETS)
+            set(ARG_REPLAY_GAP_PACKETS "24")
+        endif()
+        if(NOT ARG_EXPECT_RESULT)
+            set(ARG_EXPECT_RESULT "normal")
+        endif()
         if(ARG_ALLOW_OVERLOAD)
             set(ARG_ALLOW_OVERLOAD_VALUE "ON")
         else()
@@ -575,6 +635,20 @@ if(TARGET alpha_recorder_plugin)
         else()
             set(ARG_VERIFY_NLE_TIMELINE_VALUE "OFF")
         endif()
+        foreach(_alpha_recorder_bool_name IN ITEMS
+                STRICT_ALL_FRAMES
+                REQUIRE_MAIN_PTS_GAP
+                REQUIRE_PACKET_REORDER
+                REQUIRE_REPLAY_UNDERFLOW
+                REQUIRE_REPLAY_CATCHUP
+                REQUIRE_OVERLOAD
+                REQUIRE_TAIL_REPEAT)
+            if(ARG_${_alpha_recorder_bool_name})
+                set(ARG_${_alpha_recorder_bool_name}_VALUE "ON")
+            else()
+                set(ARG_${_alpha_recorder_bool_name}_VALUE "OFF")
+            endif()
+        endforeach()
 
         add_custom_target(${target_name}
             COMMAND ${CMAKE_COMMAND}
@@ -588,7 +662,11 @@ if(TARGET alpha_recorder_plugin)
                 "-DWIDTH=${ARG_WIDTH}"
                 "-DHEIGHT=${ARG_HEIGHT}"
                 "-DFPS=${ARG_FPS}"
+                "-DFPS_NUM=${ARG_FPS_NUM}"
+                "-DFPS_DEN=${ARG_FPS_DEN}"
                 "-DRECORD_FORMAT=${ARG_RECORD_FORMAT}"
+                "-DOUTPUT_MODE=${ARG_OUTPUT_MODE}"
+                "-DRECORD_AUDIO_ENCODER=${ARG_RECORD_AUDIO_ENCODER}"
                 "-DSYNC_RECORD_SECONDS=${ARG_SYNC_RECORD_SECONDS}"
                 "-DSYNC_ATTEMPTS=${ARG_SYNC_ATTEMPTS}"
                 "-DDURABILITY_RECORD_SECONDS=${ARG_DURABILITY_RECORD_SECONDS}"
@@ -596,6 +674,25 @@ if(TARGET alpha_recorder_plugin)
                 "-DALLOW_OVERLOAD=${ARG_ALLOW_OVERLOAD_VALUE}"
                 "-DWITH_AUDIO=${ARG_WITH_AUDIO_VALUE}"
                 "-DVERIFY_NLE_TIMELINE=${ARG_VERIFY_NLE_TIMELINE_VALUE}"
+                "-DSTRICT_ALL_FRAMES=${ARG_STRICT_ALL_FRAMES_VALUE}"
+                "-DPHASE_SWEEP_STEPS=${ARG_PHASE_SWEEP_STEPS}"
+                "-DREQUIRE_MAIN_PTS_GAP=${ARG_REQUIRE_MAIN_PTS_GAP_VALUE}"
+                "-DREQUIRE_PACKET_REORDER=${ARG_REQUIRE_PACKET_REORDER_VALUE}"
+                "-DREQUIRE_REPLAY_UNDERFLOW=${ARG_REQUIRE_REPLAY_UNDERFLOW_VALUE}"
+                "-DREQUIRE_REPLAY_CATCHUP=${ARG_REQUIRE_REPLAY_CATCHUP_VALUE}"
+                "-DREQUIRE_OVERLOAD=${ARG_REQUIRE_OVERLOAD_VALUE}"
+                "-DREQUIRE_TAIL_REPEAT=${ARG_REQUIRE_TAIL_REPEAT_VALUE}"
+                "-DPAUSE_AT_MS=${ARG_PAUSE_AT_MS}"
+                "-DPAUSE_DURATION_MS=${ARG_PAUSE_DURATION_MS}"
+                "-DSPLIT_AT_MS=${ARG_SPLIT_AT_MS}"
+                "-DOVERLOAD_PULSE_AT_MS=${ARG_OVERLOAD_PULSE_AT_MS}"
+                "-DOVERLOAD_PULSE_DURATION_MS=${ARG_OVERLOAD_PULSE_DURATION_MS}"
+                "-DOVERLOAD_PULSE_DELAY_MS=${ARG_OVERLOAD_PULSE_DELAY_MS}"
+                "-DBEST_EFFORT_SYNC=${ARG_BEST_EFFORT_SYNC}"
+                "-DTEST_FAULT=${ARG_TEST_FAULT}"
+                "-DFAULT_SEGMENT=${ARG_FAULT_SEGMENT}"
+                "-DREPLAY_GAP_PACKETS=${ARG_REPLAY_GAP_PACKETS}"
+                "-DEXPECT_RESULT=${ARG_EXPECT_RESULT}"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/RunObsAppE2E.cmake"
             VERBATIM
         )
@@ -765,12 +862,293 @@ if(TARGET alpha_recorder_plugin)
             SYNC_ATTEMPTS 1
             DURABILITY_RECORD_SECONDS 12
             HEVC_GOP_SIZE 120
+            BEST_EFFORT_SYNC
             ALLOW_OVERLOAD
             EXPERIMENTAL
         )
     else()
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_4k60_allow_overload_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
     endif()
+
+    set(_alpha_recorder_sync_pr_targets)
+    set(_alpha_recorder_sync_nightly_targets)
+    set(_alpha_recorder_sync_release_targets)
+    if(_alpha_recorder_obs_app_e2e_has_nvenc)
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_sync_pr_strict
+            sync-pr-strict
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 2
+            SYNC_ATTEMPTS 2
+            DURABILITY_RECORD_SECONDS 3
+            STRICT_ALL_FRAMES
+            EXPERIMENTAL
+        )
+        list(APPEND _alpha_recorder_sync_pr_targets
+            alpha_recorder_run_obs_app_e2e_sync_pr_strict)
+
+        foreach(_alpha_recorder_sync_fault IN ITEMS
+                missing-prefix
+                missing-alpha-generation
+                missing-tail
+                ambiguous-generation)
+            string(REPLACE "-" "_" _alpha_recorder_sync_fault_target
+                "${_alpha_recorder_sync_fault}")
+            alpha_recorder_add_obs_app_e2e_target(
+                alpha_recorder_run_obs_app_e2e_sync_fault_${_alpha_recorder_sync_fault_target}
+                sync-fault-${_alpha_recorder_sync_fault}
+                FINALIZATION_FORMAT mask_hevc_nvenc
+                RGB_ENCODER software
+                SYNC_RECORD_SECONDS 1
+                SYNC_ATTEMPTS 1
+                DURABILITY_RECORD_SECONDS 1
+                TEST_FAULT ${_alpha_recorder_sync_fault}
+                EXPECT_RESULT sync-invalid
+                EXPERIMENTAL
+            )
+            list(APPEND _alpha_recorder_sync_nightly_targets
+                alpha_recorder_run_obs_app_e2e_sync_fault_${_alpha_recorder_sync_fault_target})
+        endforeach()
+        list(APPEND _alpha_recorder_sync_pr_targets
+            alpha_recorder_run_obs_app_e2e_sync_fault_missing_alpha_generation)
+
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_fault_best_effort
+            sync-fault-best-effort
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 1
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 1
+            TEST_FAULT missing-tail
+            BEST_EFFORT_SYNC
+            EXPECT_RESULT normal
+            EXPERIMENTAL
+        )
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_fault_mux_finalize
+            sync-fault-mux-finalize
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 1
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 1
+            TEST_FAULT mux-finalize
+            EXPECT_RESULT no-alpha
+            EXPERIMENTAL
+        )
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_fault_deactivate_timeout
+            sync-fault-deactivate-timeout
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 1
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 1
+            TEST_FAULT deactivate-timeout
+            EXPECT_RESULT no-alpha
+            EXPERIMENTAL
+        )
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_fault_publish_rename
+            sync-fault-publish-rename
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 1
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 1
+            TEST_FAULT publish-rename
+            EXPECT_RESULT temp-preserved
+            EXPERIMENTAL
+        )
+        list(APPEND _alpha_recorder_sync_nightly_targets
+            alpha_recorder_run_obs_app_e2e_sync_fault_best_effort
+            alpha_recorder_run_obs_app_e2e_sync_fault_mux_finalize
+            alpha_recorder_run_obs_app_e2e_sync_fault_deactivate_timeout
+            alpha_recorder_run_obs_app_e2e_sync_fault_publish_rename)
+
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_phase_sweep
+            sync-phase-sweep
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 0.35
+            SYNC_ATTEMPTS 20
+            DURABILITY_RECORD_SECONDS 1
+            PHASE_SWEEP_STEPS 20
+            EXPERIMENTAL
+        )
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_5994
+            sync-5994
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            FPS_NUM 60000
+            FPS_DEN 1001
+            SYNC_RECORD_SECONDS 2
+            SYNC_ATTEMPTS 3
+            DURABILITY_RECORD_SECONDS 5
+            EXPERIMENTAL
+        )
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_pause_resume
+            sync-pause-resume
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            OUTPUT_MODE advanced-standard
+            SYNC_RECORD_SECONDS 3
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 4
+            PAUSE_AT_MS 750
+            PAUSE_DURATION_MS 500
+            EXPERIMENTAL
+        )
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_split
+            sync-split
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            OUTPUT_MODE advanced-standard
+            SYNC_RECORD_SECONDS 6
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 7
+            SPLIT_AT_MS 750
+            BEST_EFFORT_SYNC
+            ALLOW_OVERLOAD
+            EXPECT_RESULT split-published
+            EXPERIMENTAL
+        )
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_split_failure_isolated
+            sync-split-failure-isolated
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            OUTPUT_MODE advanced-standard
+            SYNC_RECORD_SECONDS 6
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 7
+            SPLIT_AT_MS 750
+            TEST_FAULT mux-finalize
+            FAULT_SEGMENT 1
+            BEST_EFFORT_SYNC
+            ALLOW_OVERLOAD
+            EXPECT_RESULT split-isolated
+            EXPERIMENTAL
+        )
+        list(APPEND _alpha_recorder_sync_nightly_targets
+            alpha_recorder_run_obs_app_e2e_sync_phase_sweep
+            alpha_recorder_run_obs_app_e2e_sync_5994
+            alpha_recorder_run_obs_app_e2e_sync_pause_resume
+            alpha_recorder_run_obs_app_e2e_sync_split
+            alpha_recorder_run_obs_app_e2e_sync_split_failure_isolated)
+
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_replay_gap_recovery
+            sync-replay-gap-recovery
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 4
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 5
+            TEST_FAULT replay-evidence-gap
+            REPLAY_GAP_PACKETS 24
+            BEST_EFFORT_SYNC
+            REQUIRE_REPLAY_UNDERFLOW
+            REQUIRE_REPLAY_CATCHUP
+            REQUIRE_TAIL_REPEAT
+            EXPERIMENTAL
+        )
+        list(APPEND _alpha_recorder_sync_release_targets
+            alpha_recorder_run_obs_app_e2e_sync_replay_gap_recovery)
+
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_overload_fail_closed
+            sync-overload-fail-closed
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 4
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 5
+            OVERLOAD_PULSE_AT_MS 750
+            OVERLOAD_PULSE_DURATION_MS 900
+            OVERLOAD_PULSE_DELAY_MS 25
+            ALLOW_OVERLOAD
+            REQUIRE_OVERLOAD
+            EXPECT_RESULT sync-invalid
+            EXPERIMENTAL
+        )
+        list(APPEND _alpha_recorder_sync_release_targets
+            alpha_recorder_run_obs_app_e2e_sync_overload_fail_closed)
+    else()
+        foreach(_alpha_recorder_sync_target IN ITEMS
+                alpha_recorder_run_obs_app_e2e_sync_pr_strict
+                alpha_recorder_run_obs_app_e2e_sync_fault_missing_prefix
+                alpha_recorder_run_obs_app_e2e_sync_fault_missing_alpha_generation
+                alpha_recorder_run_obs_app_e2e_sync_fault_missing_tail
+                alpha_recorder_run_obs_app_e2e_sync_fault_ambiguous_generation
+                alpha_recorder_run_obs_app_e2e_sync_fault_best_effort
+                alpha_recorder_run_obs_app_e2e_sync_fault_mux_finalize
+                alpha_recorder_run_obs_app_e2e_sync_fault_deactivate_timeout
+                alpha_recorder_run_obs_app_e2e_sync_fault_publish_rename
+                alpha_recorder_run_obs_app_e2e_sync_phase_sweep
+                alpha_recorder_run_obs_app_e2e_sync_5994
+                alpha_recorder_run_obs_app_e2e_sync_pause_resume
+                alpha_recorder_run_obs_app_e2e_sync_split
+                alpha_recorder_run_obs_app_e2e_sync_split_failure_isolated
+                alpha_recorder_run_obs_app_e2e_sync_replay_gap_recovery
+                alpha_recorder_run_obs_app_e2e_sync_overload_fail_closed)
+            alpha_recorder_skip_obs_app_e2e_target(
+                ${_alpha_recorder_sync_target}
+                "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
+        endforeach()
+    endif()
+
+    if(_alpha_recorder_obs_app_e2e_has_nvenc_rgb)
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_packet_reorder
+            sync-packet-reorder
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            SYNC_RECORD_SECONDS 2
+            SYNC_ATTEMPTS 3
+            DURABILITY_RECORD_SECONDS 5
+            REQUIRE_PACKET_REORDER
+            EXPECT_RESULT normal-or-sync-invalid
+            EXPERIMENTAL
+        )
+        list(APPEND _alpha_recorder_sync_nightly_targets
+            alpha_recorder_run_obs_app_e2e_sync_packet_reorder)
+        list(APPEND _alpha_recorder_sync_release_targets
+            alpha_recorder_run_obs_app_e2e_4k60_allow_overload_rgb_nvenc_hevc_alpha_hevc_nvenc)
+    else()
+        alpha_recorder_skip_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_packet_reorder
+            "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
+    endif()
+
+    add_custom_target(alpha_recorder_test_sync_unit
+        COMMAND ${CMAKE_CTEST_COMMAND}
+            --test-dir "${CMAKE_CURRENT_BINARY_DIR}"
+            -C $<CONFIG>
+            -L unit
+            --output-on-failure
+        DEPENDS
+            alpha_recorder_unit_recording_session_cadence
+            alpha_recorder_unit_alpha_alignment_engine
+            alpha_recorder_unit_gpu_texture_timeline_ledger
+            alpha_recorder_unit_replay_generation_ledger
+            alpha_recorder_unit_settings
+        VERBATIM
+    )
+    add_custom_target(alpha_recorder_test_sync_pr
+        DEPENDS alpha_recorder_test_sync_unit ${_alpha_recorder_sync_pr_targets}
+    )
+    add_custom_target(alpha_recorder_test_sync_nightly
+        DEPENDS alpha_recorder_test_sync_pr ${_alpha_recorder_sync_nightly_targets}
+    )
+    add_custom_target(alpha_recorder_test_sync_release
+        DEPENDS alpha_recorder_test_sync_nightly ${_alpha_recorder_sync_release_targets}
+    )
 
     string(REPLACE ";" "\n  " _alpha_recorder_obs_app_e2e_registered_summary "${_alpha_recorder_obs_app_e2e_registered_targets}")
     string(REPLACE ";" "\n  " _alpha_recorder_obs_app_e2e_skipped_summary "${_alpha_recorder_obs_app_e2e_skipped_targets}")

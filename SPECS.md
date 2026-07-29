@@ -240,9 +240,16 @@ HEVC GPU texture path:
 2. Start the auxiliary encoder only after the first main packet supplies the
    target CTS. Replay retained generations in main-packet order so alpha PTS 0
    begins on an IDR and corresponds to the first admitted RGB content.
+   When several delayed main-packet records are available for one alpha slot,
+   select the newest record at or before that slot and discard older backlog in
+   one operation. Never replay stale generations one frame at a time after
+   pressure subsides.
 3. Record Program generation, render time, main packet CTS, alpha packet PTS,
    and emitted generation in the timeline ledger. A fixed content delay or
-   backend-specific packet offset is not part of the correctness path.
+   backend-specific packet offset is not part of the correctness path. Missing
+   or regressive evidence repeats the last emitted generation while preserving
+   the next alpha PTS slot. Conflicting generations for one main PTS mark the
+   corresponding alpha slot ambiguous rather than choosing either value.
 4. Before stopping, allow at most one second for queued main generations to
    reach the auxiliary mix. Then request stop, end data capture, wait for OBS
    output deactivation (the encoder-drain boundary), solve the final visible
@@ -255,6 +262,21 @@ The GPU path deliberately does not register a global raw-video callback; doing
 so would reactivate OBS staging/readback and defeat the GPU-resident performance
 path. Packet callbacks remain ordering and presentation evidence, while Program
 generation is content identity.
+
+Pause state follows the OBS alpha encoder's atomic pause state, not only the
+frontend event's bookkeeping flag. Program renders continue to be observed
+while paused so the newest generation is available at resume, but alpha replay
+PTS advances only for slots the encoder accepts. A dedicated copy of the last
+emitted texture remains immutable across the pause boundary; if a requested
+generation is no longer retained, the output repeats that copy and still
+advances one PTS slot so recovery cannot create a permanent offset. Delayed
+encoded packets may still be collected during the boundary.
+
+Strict sync proof rejects a segment when OBS reports graphics-lagged frames
+during its capture interval. The current ledger cannot prove which Program
+generation a dropped graphics cadence would have supplied. Best-effort mode
+keeps the completed alpha movie, while strict mode publishes only the
+`.sync-invalid` evidence name.
 
 If the main Program texture produces only opaque alpha in a future OBS/runtime
 configuration, the fallback is a dedicated render path: render the active
@@ -468,6 +490,25 @@ All unit tests:
 ctest --test-dir out/build/macos-arm64 -C RelWithDebInfo -L unit --output-on-failure
 ```
 
+Synchronization regression tiers:
+
+```sh
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_pr
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_nightly
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_release
+```
+
+- `alpha_recorder_test_sync_pr` runs all unit tests, a strict decoded
+  full-frame smoke test, and a representative strict proof-failure evidence
+  test.
+- `alpha_recorder_test_sync_nightly` adds the complete timeline fault set,
+  best-effort publishing, mux/deactivate/rename failures, a 20-bucket
+  start/stop phase sweep, 60000/1001 cadence, pause/resume, split rotation,
+  split failure isolation, and the real NVENC main packet-reorder case.
+- `alpha_recorder_test_sync_release` additionally exercises delayed replay
+  backlog recovery, strict graphics-overload evidence behavior, and the
+  available 4K60 overload profile.
+
 Automated OBS app E2E:
 
 ```sh
@@ -522,6 +563,13 @@ The OBS app E2E target:
   launch, each requiring decoded zero frame-code offset.
 - Runs one 30-second durability recording after the startup sync gate passes to
   catch sustained capture, writer, encoder, and stop-edge failures.
+- Supports rational cadence through separate FPS numerator and denominator
+  settings; the 60000/1001 regression checks PTS-domain duration and decoded
+  frame identity rather than rounded wall-clock FPS.
+- Can sweep recording start and stop across 20 positions inside one graphics
+  cadence interval.
+- Can schedule pause/resume, output splitting, and a bounded test-source render
+  stall without relying on desktop input automation.
 - Uses OBS's default hardware-friendly NV12 color format in the app-level E2E
   profile while Alpha Recorder extracts alpha through its own GPU-side path.
 - Can run the RGB recording profile with software encoding, explicit NVENC
@@ -541,7 +589,14 @@ The OBS app E2E target:
   transparent background with an opaque binary frame-code strip.
 - Decodes RGB and alpha mask frames for PNG MOV and HEVC targets.
 - Verifies zero frame-code offset plus moving mask bounds frame-by-frame,
-  allowing only small start/terminal/count mismatches.
+  with a strict mode that requires every shared frame to match.
+- For declared recovery tests, permits localized mismatches only when a
+  sufficiently matching zero-offset prefix and terminal suffix are both
+  observed. A zero-offset tie with too few matching frames is not accepted.
+- Collects main packet PTS gaps/reorder depth and GPU replay underflow,
+  catch-up, stale-skip, repeat, missing-texture, and ambiguous-slot counters.
+  Tests that require one of these conditions fail when the condition was not
+  actually observed.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
 - For HEVC targets, verifies the alpha output container follows the OBS
@@ -557,10 +612,18 @@ encode-stage timing breakdowns are appended to the plugin diagnostic log file.
 The OBS app E2E harness copies OBS performance summaries into
 `alpha-recorder-performance.json`.
 
-If OBS logs `Encoding overloaded!`, severe skipped frames due to encoding lag,
-or severe render lag, the app E2E stops recording and fails immediately with an
-overload-specific error instead of continuing to decoded sync verification.
-Tiny skipped-frame summaries are not treated as overload by themselves.
+By default, if OBS logs `Encoding overloaded!`, severe skipped frames due to
+encoding lag, or severe render lag, the app E2E stops recording and fails with
+an overload-specific error. An explicit allow-overload profile continues long
+enough to verify recovery or strict fail-close behavior. Tiny skipped-frame
+summaries are not treated as overload by themselves.
+
+Fault injection is active only when the staged E2E process has
+`ALPHA_RECORDER_E2E_TEST=1`. Timeline faults cover missing prefix, missing alpha
+generation, missing tail, and ambiguous generation. Lifecycle faults cover
+deactivate timeout, mux finalization, publish rename, split-segment isolation,
+and a delayed replay-evidence batch. These controls are not user settings and
+have no effect without the E2E gate.
 
 ## OBS App E2E Matrix
 
@@ -583,6 +646,14 @@ Registered target families include:
 - `alpha_recorder_run_obs_app_e2e_wqhd60_rgb_amf_hevc_alpha_*`
 - `alpha_recorder_run_obs_app_e2e_4k30_rgb_nvenc_hevc_alpha_*`
 - `alpha_recorder_run_obs_app_e2e_4k30_rgb_amf_hevc_alpha_*`
+- `alpha_recorder_run_obs_app_e2e_sync_pr_strict`
+- `alpha_recorder_run_obs_app_e2e_sync_phase_sweep`
+- `alpha_recorder_run_obs_app_e2e_sync_5994`
+- `alpha_recorder_run_obs_app_e2e_sync_pause_resume`
+- `alpha_recorder_run_obs_app_e2e_sync_split`
+- `alpha_recorder_run_obs_app_e2e_sync_replay_gap_recovery`
+- `alpha_recorder_run_obs_app_e2e_sync_overload_fail_closed`
+- `alpha_recorder_run_obs_app_e2e_sync_packet_reorder`
 
 Example sync-bug exposure matrix:
 
@@ -674,6 +745,12 @@ Completed:
 - Cross-platform OBS app E2E harness that verifies RGB and alpha mask movie
   outputs, including zero frame-code offset plus frame-by-frame sync between a
   moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths.
+- Pure replay-generation ledger regression covering callback permutations,
+  dense and fractional PTS domains, repeats, ambiguity, generation regression,
+  and delayed-backlog catch-up without stale replay.
+- Real OBS regressions for phase sweep, 59.94 fps, pause/resume, split rotation,
+  isolated split failure, delayed replay evidence, graphics overload, and main
+  packet reorder.
 - Optional CTest registration behind:
   - `ALPHA_RECORDER_ENABLE_OBS_APP_E2E`
 - OBS staging that copies the full OBS plugin set before overlaying Alpha
@@ -681,8 +758,10 @@ Completed:
 
 Still useful follow-up work:
 
-- Broaden automated coverage for pause/unpause scenarios.
-- Add stress coverage for encoder pressure or unusually slow finalization.
+- Run the runtime-aware nightly/release tiers on AMF, QSV, and VAAPI hardware
+  in addition to the currently available NVENC machine.
+- Add longer multi-hour durability coverage outside the normal local release
+  gate.
 - Improve localized error text and recovery guidance.
 
 ## Open Questions

@@ -6,6 +6,7 @@
 #include "gpu_texture_recording_output.hpp"
 #include "recording_session_controller_cadence.hpp"
 #include "recording_telemetry.hpp"
+#include "test_fault_injection.hpp"
 
 #include <algorithm>
 #include <array>
@@ -699,14 +700,38 @@ namespace
 
         void set_recording_paused(bool paused)
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!session_active_)
+            obs_output_t *gpu_texture_output = nullptr;
             {
-                recording_paused_ = false;
-                return;
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!session_active_)
+                {
+                    recording_paused_ = false;
+                    return;
+                }
+
+                recording_paused_ = paused;
+                if (gpu_texture_path_ && gpu_texture_output_ != nullptr)
+                {
+                    gpu_texture_output = obs_output_get_ref(gpu_texture_output_);
+                }
             }
 
-            recording_paused_ = paused;
+            if (gpu_texture_output != nullptr)
+            {
+                std::string pause_error;
+                const bool changed =
+                    alpha_recorder::obs::gpu_texture_recording_output_set_paused(
+                        gpu_texture_output, paused, &pause_error);
+                obs_output_release(gpu_texture_output);
+                if (!changed)
+                {
+                    log_and_show_error(
+                        pause_error.empty()
+                            ? "Alpha Recorder could not mirror the main recording pause state."
+                            : pause_error,
+                        false);
+                }
+            }
         }
 
         bool prepare_capture_session()
@@ -753,6 +778,7 @@ namespace
             video_info_ = video_info;
             recording_path_.clear();
             next_sequence_ = 0;
+            gpu_texture_segment_index_ = 0U;
             reset_gpu_texture_timing_locked();
             alignment_engine_.reset_all();
             raw_video_cadence_.reset();
@@ -1049,6 +1075,7 @@ namespace
                 log_and_show_error(message, show_popup);
                 return false;
             }
+            ++gpu_texture_segment_index_;
             gpu_texture_output_start_video_time_ = obs_get_video_frame_time();
 
             alpha_recorder::obs::AlphaOutputSinkConfig log_config{};
@@ -1261,10 +1288,14 @@ namespace
             bool finalize_failed = false;
             bool sync_proof_failed = false;
             bool completed_output_moved = false;
+            bool publish_move_failed = false;
             bool data_capture_end_requested = false;
             std::string finalize_failure_reason;
             std::string sync_failure_reason;
             const bool strict_sync_proof = settings_.fail_close_on_sync_proof_failure;
+            const bool injected_fault_applies =
+                alpha_recorder::obs::e2e_test_fault_applies_to_segment(
+                    gpu_texture_segment_index_);
 
             // Encoder drain cannot create replay frames that have not reached the
             // auxiliary video mix yet. Keep the alpha output live briefly so its
@@ -1296,8 +1327,18 @@ namespace
             {
                 alpha_recorder::obs::gpu_texture_recording_output_end_data_capture(gpu_texture_output_);
                 data_capture_end_requested = true;
-                if (!alpha_recorder::obs::gpu_texture_recording_output_wait_deactivated(
-                        gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
+                if (injected_fault_applies &&
+                    alpha_recorder::obs::e2e_test_fault_enabled("deactivate-timeout"))
+                {
+                    finalize_failed = true;
+                    if (error_message != nullptr)
+                    {
+                        *error_message =
+                            "Alpha Recorder E2E injected GPU texture deactivate timeout.";
+                    }
+                }
+                else if (!alpha_recorder::obs::gpu_texture_recording_output_wait_deactivated(
+                             gpu_texture_output_, kGpuTextureDeactivateTimeoutMs, error_message))
                 {
                     finalize_failed = true;
                 }
@@ -1316,6 +1357,22 @@ namespace
                 {
                     visible_range_certified = true;
                 }
+            }
+            const alpha_recorder::obs::GpuTextureRecordingOutputStats
+                proof_stats =
+                    alpha_recorder::obs::gpu_texture_recording_output_stats(
+                        gpu_texture_output_);
+            if (!finalize_failed &&
+                visible_range_certified &&
+                proof_stats.lagged_frames_during_capture > 0U)
+            {
+                visible_range_certified = false;
+                range_error =
+                    "Alpha Recorder GPU texture timeline could not be proven: "
+                    "UnsupportedObsTimingModel (OBS graphics lagged frames=" +
+                    std::to_string(
+                        proof_stats.lagged_frames_during_capture) +
+                    ")";
             }
 
             if (!finalize_failed && !visible_range_certified)
@@ -1465,8 +1522,19 @@ namespace
                 }
             }
             std::string mux_finalize_error;
-            if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_finalize_mux(
-                                      gpu_texture_output_, &mux_finalize_error))
+            if (!finalize_failed && injected_fault_applies &&
+                alpha_recorder::obs::e2e_test_fault_enabled("mux-finalize"))
+            {
+                finalize_failed = true;
+                mux_finalize_error =
+                    "Alpha Recorder E2E injected GPU texture mux finalization failure.";
+                if (error_message != nullptr)
+                {
+                    *error_message = mux_finalize_error;
+                }
+            }
+            else if (!finalize_failed && !alpha_recorder::obs::gpu_texture_recording_output_finalize_mux(
+                                           gpu_texture_output_, &mux_finalize_error))
             {
                 finalize_failed = true;
                 if (error_message != nullptr)
@@ -1520,6 +1588,18 @@ namespace
                 {
                     completed_output_moved = true;
                 }
+                else if (injected_fault_applies &&
+                         alpha_recorder::obs::e2e_test_fault_enabled("publish-rename"))
+                {
+                    finalize_failed = true;
+                    publish_move_failed = true;
+                    finalize_failure_reason =
+                        "Alpha Recorder E2E injected finalized output rename failure.";
+                    if (error_message != nullptr)
+                    {
+                        *error_message = finalize_failure_reason;
+                    }
+                }
                 else if (move_completed_gpu_texture_output(
                              actual_writer_path, completed_output_path, error_message))
                 {
@@ -1528,6 +1608,7 @@ namespace
                 else
                 {
                     finalize_failed = true;
+                    publish_move_failed = true;
                     finalize_failure_reason =
                         error_message != nullptr && !error_message->empty()
                             ? *error_message
@@ -1552,10 +1633,10 @@ namespace
             }
             if (finalize_failed)
             {
-                if (sync_proof_failed && gpu_stats.finalized)
+                if ((sync_proof_failed || publish_move_failed) && gpu_stats.finalized)
                 {
                     blog(LOG_WARNING,
-                         "Alpha Recorder could not move sync-invalid GPU texture alpha evidence; preserving the finalized temporary movie: path=\"%s\" intended_evidence=\"%s\" reason=\"%s\"",
+                         "Alpha Recorder could not publish a finalized GPU texture alpha movie; preserving the finalized temporary movie: path=\"%s\" intended_output=\"%s\" reason=\"%s\"",
                          actual_writer_path.generic_u8string().c_str(),
                          completed_output_path.generic_u8string().c_str(),
                          finalize_failure_reason.c_str());
@@ -1625,7 +1706,7 @@ namespace
             char buffer[2048];
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder GPU texture telemetry: path=\"%s\" packets=%llu keyframes=%llu packet_bytes=%s muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%s finalized=%s first_pts=%lld last_pts=%lld visible_range={media_time=%lld duration=%lld} main_packets={count=%llu first_cts=%llu last_cts=%llu}",
+                "Alpha Recorder GPU texture telemetry: path=\"%s\" packets=%llu keyframes=%llu packet_bytes=%s muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%s finalized=%s first_pts=%lld last_pts=%lld lagged_frames=%llu visible_range={media_time=%lld duration=%lld} main_packets={count=%llu first_cts=%llu last_cts=%llu} replay={consumed=%llu catchup_slots=%llu skipped_stale=%llu underflows=%llu emitted=%llu repeated_slots=%llu generation_slots=%llu ambiguous_slots=%llu missing_textures=%llu}",
                 mask_path.generic_u8string().c_str(),
                 static_cast<unsigned long long>(gpu_stats.packet_count),
                 static_cast<unsigned long long>(gpu_stats.keyframe_count),
@@ -1636,11 +1717,22 @@ namespace
                 gpu_stats.finalized ? "true" : "false",
                 static_cast<long long>(gpu_stats.first_pts),
                 static_cast<long long>(gpu_stats.last_pts),
+                static_cast<unsigned long long>(
+                    gpu_stats.lagged_frames_during_capture),
                 static_cast<long long>(visible_range.media_time),
                 static_cast<long long>(visible_range.duration),
                 static_cast<unsigned long long>(gpu_main_packet_count_),
                 static_cast<unsigned long long>(gpu_main_first_packet_cts_),
-                static_cast<unsigned long long>(gpu_main_last_packet_cts_));
+                static_cast<unsigned long long>(gpu_main_last_packet_cts_),
+                static_cast<unsigned long long>(gpu_stats.replay_consumed_entries),
+                static_cast<unsigned long long>(gpu_stats.replay_catchup_slots),
+                static_cast<unsigned long long>(gpu_stats.replay_skipped_stale_entries),
+                static_cast<unsigned long long>(gpu_stats.replay_queue_underflows),
+                static_cast<unsigned long long>(gpu_stats.replay_emitted_frames),
+                static_cast<unsigned long long>(gpu_stats.replay_repeated_slots),
+                static_cast<unsigned long long>(gpu_stats.replay_generation_slots),
+                static_cast<unsigned long long>(gpu_stats.replay_ambiguous_slots),
+                static_cast<unsigned long long>(gpu_stats.replay_missing_textures));
             blog(LOG_INFO, "%s", buffer);
             if (settings_.diagnostic_logging)
             {
@@ -1878,6 +1970,8 @@ namespace
             gpu_texture_output_start_video_time_ = 0U;
             gpu_recording_started_video_time_ = 0U;
             gpu_texture_delayed_replay_started_ = false;
+            gpu_e2e_replay_gap_packets_.clear();
+            gpu_e2e_replay_gap_released_ = false;
         }
 
         void remember_gpu_texture_main_packet_locked(const encoder_packet &packet,
@@ -2310,10 +2404,13 @@ namespace
             std::int64_t cts_replay_main_pts = 0;
             std::uint64_t cts_replay_main_cts = 0U;
             bool cts_replay_main_texture_encoded = false;
+            std::vector<alpha_recorder::obs::GpuTexturePacketRecord>
+                cts_replay_batch{};
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (output != recording_output_ || packet == nullptr || packet->type != OBS_ENCODER_VIDEO ||
-                    !session_active_ || session_aborted_ || recording_paused_ || recording_output_ == nullptr ||
+                    !session_active_ || session_aborted_ ||
+                    (!gpu_texture_path_ && recording_paused_) || recording_output_ == nullptr ||
                     video_info_.output_width == 0U || video_info_.output_height == 0U)
                 {
                     return;
@@ -2339,10 +2436,47 @@ namespace
                     }
                     else if (gpu_texture_delayed_replay_started_ && gpu_texture_output_ != nullptr)
                     {
-                        cts_replay_output = obs_output_get_ref(gpu_texture_output_);
-                        cts_replay_main_pts = packet->pts;
-                        cts_replay_main_cts = packet_time->cts;
-                        cts_replay_main_texture_encoded = recording_texture_encoded_;
+                        const bool inject_replay_gap =
+                            !gpu_e2e_replay_gap_released_ &&
+                            alpha_recorder::obs::e2e_test_fault_enabled(
+                                "replay-evidence-gap") &&
+                            alpha_recorder::obs::e2e_test_fault_applies_to_segment(
+                                gpu_texture_segment_index_);
+                        const std::uint64_t replay_gap_packets =
+                            std::max<std::uint64_t>(
+                                1U,
+                                alpha_recorder::obs::e2e_test_environment_u64(
+                                    "ALPHA_RECORDER_E2E_REPLAY_GAP_PACKETS",
+                                    24U));
+                        if (inject_replay_gap &&
+                            gpu_e2e_replay_gap_packets_.size() <
+                                replay_gap_packets)
+                        {
+                            gpu_e2e_replay_gap_packets_.push_back(
+                                gpu_main_packets_.back());
+                        }
+                        else
+                        {
+                            cts_replay_output =
+                                obs_output_get_ref(gpu_texture_output_);
+                            cts_replay_main_texture_encoded =
+                                recording_texture_encoded_;
+                            if (inject_replay_gap)
+                            {
+                                gpu_e2e_replay_gap_packets_.push_back(
+                                    gpu_main_packets_.back());
+                                cts_replay_batch.swap(
+                                    gpu_e2e_replay_gap_packets_);
+                                gpu_e2e_replay_gap_released_ = true;
+                                cts_replay_main_cts =
+                                    cts_replay_batch.back().input_cts;
+                            }
+                            else
+                            {
+                                cts_replay_main_pts = packet->pts;
+                                cts_replay_main_cts = packet_time->cts;
+                            }
+                        }
                     }
                 }
                 else
@@ -2382,12 +2516,35 @@ namespace
             if (cts_replay_output != nullptr)
             {
                 std::string replay_error;
-                (void)alpha_recorder::obs::gpu_texture_recording_output_queue_main_packet_replay(
-                    cts_replay_output,
-                    cts_replay_main_pts,
-                    cts_replay_main_cts,
-                    cts_replay_main_texture_encoded,
-                    &replay_error);
+                if (cts_replay_batch.empty())
+                {
+                    (void)alpha_recorder::obs::gpu_texture_recording_output_queue_main_packet_replay(
+                        cts_replay_output,
+                        cts_replay_main_pts,
+                        cts_replay_main_cts,
+                        cts_replay_main_texture_encoded,
+                        &replay_error);
+                }
+                else
+                {
+                    for (const alpha_recorder::obs::GpuTexturePacketRecord &record :
+                         cts_replay_batch)
+                    {
+                        (void)alpha_recorder::obs::gpu_texture_recording_output_queue_main_packet_replay(
+                            cts_replay_output,
+                            record.pts,
+                            record.input_cts,
+                            cts_replay_main_texture_encoded,
+                            &replay_error);
+                        if (!replay_error.empty())
+                        {
+                            break;
+                        }
+                    }
+                    blog(LOG_INFO,
+                         "[alpha_recorder] E2E released delayed replay evidence packets=%zu",
+                         cts_replay_batch.size());
+                }
                 obs_output_release(cts_replay_output);
                 if (!replay_error.empty() && settings_.diagnostic_logging)
                 {
@@ -2409,6 +2566,7 @@ namespace
         bool recording_texture_encoded_ = false;
         bool gpu_texture_path_ = false;
         std::uint64_t next_sequence_ = 0;
+        std::uint64_t gpu_texture_segment_index_ = 0U;
         std::uint64_t gpu_main_packet_count_ = 0U;
         std::uint64_t gpu_main_first_packet_cts_ = 0U;
         std::uint64_t gpu_main_last_packet_cts_ = 0U;
@@ -2418,6 +2576,9 @@ namespace
         std::uint64_t gpu_texture_output_start_video_time_ = 0U;
         std::uint64_t gpu_recording_started_video_time_ = 0U;
         bool gpu_texture_delayed_replay_started_ = false;
+        std::vector<alpha_recorder::obs::GpuTexturePacketRecord>
+            gpu_e2e_replay_gap_packets_{};
+        bool gpu_e2e_replay_gap_released_ = false;
         AlphaAlignmentEngine alignment_engine_{};
         alpha_recorder::obs::RawVideoCadenceTracker raw_video_cadence_{};
         LivePipelineTelemetry live_telemetry_{};

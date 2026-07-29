@@ -765,7 +765,17 @@ namespace alpha_recorder::obs
                 find_render_at_or_before_cts(input.alpha_renders, packet.input_cts, input.cts_tolerance_ns);
             if (render == nullptr)
             {
-                return TimelineSolveError::AmbiguousMainGeneration;
+                const auto first_render = std::min_element(
+                    input.alpha_renders.begin(), input.alpha_renders.end(),
+                    [](const ProgramRenderRecord &left,
+                       const ProgramRenderRecord &right) {
+                        return left.render_time_ns < right.render_time_ns;
+                    });
+                return first_render != input.alpha_renders.end() &&
+                               packet.input_cts + input.cts_tolerance_ns <
+                                   first_render->render_time_ns
+                           ? TimelineSolveError::MissingPrefixContent
+                           : TimelineSolveError::AmbiguousMainGeneration;
             }
 
             bool valid = false;

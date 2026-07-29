@@ -6,6 +6,16 @@ import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, r
 import { basename, dirname, join, resolve } from "node:path";
 import { platform } from "node:process";
 
+type ExpectedResult =
+  | "normal"
+  | "sync-invalid"
+  | "normal-or-sync-invalid"
+  | "no-alpha"
+  | "temp-preserved"
+  | "split-published"
+  | "split-isolated";
+type ResolvedExpectedResult = Exclude<ExpectedResult, "normal-or-sync-invalid">;
+
 type Args = {
   repoRoot: string;
   stageDir: string;
@@ -18,7 +28,8 @@ type Args = {
   durabilityRecordSeconds: number;
   width: number;
   height: number;
-  fps: number;
+  fpsNum: number;
+  fpsDen: number;
   recordFormat: string;
   outputMode: string;
   recordAudioEncoder: string;
@@ -31,6 +42,25 @@ type Args = {
   hevcNvencTune: string;
   hevcGopSize: number;
   verifyNleTimeline: boolean;
+  strictAllFrames: boolean;
+  phaseSweepSteps: number;
+  requireMainPtsGap: boolean;
+  requirePacketReorder: boolean;
+  requireReplayUnderflow: boolean;
+  requireReplayCatchup: boolean;
+  requireOverload: boolean;
+  requireTailRepeat: boolean;
+  pauseAtMs: number;
+  pauseDurationMs: number;
+  splitAtMs: number;
+  overloadPulseAtMs: number;
+  overloadPulseDurationMs: number;
+  overloadPulseDelayMs: number;
+  failCloseOnSyncProofFailure: boolean;
+  testFault: string;
+  faultSegment: number;
+  replayGapPackets: number;
+  expectedResult: ExpectedResult;
   keepObsOpen: boolean;
   allowOverload: boolean;
 };
@@ -53,6 +83,7 @@ type AlphaRecorderFailureWatch = {
   checkpoint?: ObsLogCheckpoint;
   lastWindowScanMs?: number;
   lastWindowFailure?: string | null;
+  suppressFailure?: boolean;
 };
 
 const severeSkippedFramePercent = 5;
@@ -70,7 +101,8 @@ function parseArgs(argv: string[]): Args {
     durabilityRecordSeconds: 30,
     width: 1920,
     height: 1080,
-    fps: 60,
+    fpsNum: 60,
+    fpsDen: 1,
     recordFormat: "mkv",
     outputMode: "simple",
     recordAudioEncoder: "aac",
@@ -83,6 +115,25 @@ function parseArgs(argv: string[]): Args {
     hevcNvencTune: "hq",
     hevcGopSize: 0,
     verifyNleTimeline: false,
+    strictAllFrames: false,
+    phaseSweepSteps: 0,
+    requireMainPtsGap: false,
+    requirePacketReorder: false,
+    requireReplayUnderflow: false,
+    requireReplayCatchup: false,
+    requireOverload: false,
+    requireTailRepeat: false,
+    pauseAtMs: -1,
+    pauseDurationMs: 0,
+    splitAtMs: -1,
+    overloadPulseAtMs: -1,
+    overloadPulseDurationMs: 0,
+    overloadPulseDelayMs: 0,
+    failCloseOnSyncProofFailure: true,
+    testFault: "",
+    faultSegment: 0,
+    replayGapPackets: 24,
+    expectedResult: "normal",
     keepObsOpen: false,
     allowOverload: false,
   };
@@ -144,7 +195,16 @@ function parseArgs(argv: string[]): Args {
         ++index;
         break;
       case "--fps":
-        args.fps = Number(value);
+        args.fpsNum = Number(value);
+        args.fpsDen = 1;
+        ++index;
+        break;
+      case "--fps-num":
+        args.fpsNum = Number(value);
+        ++index;
+        break;
+      case "--fps-den":
+        args.fpsDen = Number(value);
         ++index;
         break;
       case "--record-format":
@@ -193,6 +253,85 @@ function parseArgs(argv: string[]): Args {
       case "--verify-nle-timeline":
         args.verifyNleTimeline = true;
         break;
+      case "--strict-all-frames":
+        args.strictAllFrames = true;
+        break;
+      case "--phase-sweep-steps":
+        args.phaseSweepSteps = Number(value);
+        ++index;
+        break;
+      case "--require-main-pts-gap":
+        args.requireMainPtsGap = true;
+        break;
+      case "--require-packet-reorder":
+        args.requirePacketReorder = true;
+        break;
+      case "--require-replay-underflow":
+        args.requireReplayUnderflow = true;
+        break;
+      case "--require-replay-catchup":
+        args.requireReplayCatchup = true;
+        break;
+      case "--require-overload":
+        args.requireOverload = true;
+        break;
+      case "--require-tail-repeat":
+        args.requireTailRepeat = true;
+        break;
+      case "--pause-at-ms":
+        args.pauseAtMs = Number(value);
+        ++index;
+        break;
+      case "--pause-duration-ms":
+        args.pauseDurationMs = Number(value);
+        ++index;
+        break;
+      case "--split-at-ms":
+        args.splitAtMs = Number(value);
+        ++index;
+        break;
+      case "--overload-pulse-at-ms":
+        args.overloadPulseAtMs = Number(value);
+        ++index;
+        break;
+      case "--overload-pulse-duration-ms":
+        args.overloadPulseDurationMs = Number(value);
+        ++index;
+        break;
+      case "--overload-pulse-delay-ms":
+        args.overloadPulseDelayMs = Number(value);
+        ++index;
+        break;
+      case "--best-effort-sync":
+        args.failCloseOnSyncProofFailure = false;
+        break;
+      case "--test-fault":
+        args.testFault = value;
+        ++index;
+        break;
+      case "--fault-segment":
+        args.faultSegment = Number(value);
+        ++index;
+        break;
+      case "--replay-gap-packets":
+        args.replayGapPackets = Number(value);
+        ++index;
+        break;
+      case "--expect-result":
+        if (
+          value !== "normal" &&
+          value !== "sync-invalid" &&
+          value !== "normal-or-sync-invalid" &&
+          value !== "no-alpha" &&
+          value !== "temp-preserved" &&
+          value !== "split-published" &&
+          value !== "split-isolated"
+        ) {
+          throw new Error(`Unsupported expected result: ${value}`);
+        }
+        args.expectedResult = value;
+        ++index;
+        break;
       case "--keep-obs-open":
         args.keepObsOpen = true;
         break;
@@ -207,9 +346,19 @@ function parseArgs(argv: string[]): Args {
   if (!args.repoRoot || !args.stageDir) {
     throw new Error("--repo-root and --stage-dir are required");
   }
-  args.syncRecordSeconds = Math.max(1, Math.floor(args.syncRecordSeconds));
+  args.syncRecordSeconds = Math.max(0.1, args.syncRecordSeconds);
   args.syncAttempts = Math.max(1, Math.floor(args.syncAttempts));
-  args.durabilityRecordSeconds = Math.max(1, Math.floor(args.durabilityRecordSeconds));
+  args.durabilityRecordSeconds = Math.max(0.1, args.durabilityRecordSeconds);
+  args.fpsNum = Math.max(1, Math.floor(args.fpsNum));
+  args.fpsDen = Math.max(1, Math.floor(args.fpsDen));
+  args.phaseSweepSteps = Math.max(0, Math.floor(args.phaseSweepSteps));
+  args.pauseAtMs = Math.floor(args.pauseAtMs);
+  args.pauseDurationMs = Math.max(0, Math.floor(args.pauseDurationMs));
+  args.splitAtMs = Math.floor(args.splitAtMs);
+  args.overloadPulseAtMs = Math.floor(args.overloadPulseAtMs);
+  args.overloadPulseDurationMs = Math.max(0, Math.floor(args.overloadPulseDurationMs));
+  args.overloadPulseDelayMs = Math.max(0, Math.floor(args.overloadPulseDelayMs));
+  args.faultSegment = Math.max(0, Math.floor(args.faultSegment));
   args.hevcQualityCq = Math.max(0, Math.min(51, Math.floor(args.hevcQualityCq)));
   args.hevcGopSize = Math.max(0, Math.min(1000, Math.floor(args.hevcGopSize)));
 
@@ -220,15 +369,101 @@ type VerificationAttempt = {
   kind: "sync" | "durability";
   attemptIndex: number;
   durationSeconds: number;
+  phaseIndex: number;
+  phasePercent: number;
+  stopPhasePercent: number;
 };
 
-function verificationAttempts(syncRecordSeconds: number, syncAttempts: number, durabilityRecordSeconds: number): VerificationAttempt[] {
+function verificationAttempts(
+  syncRecordSeconds: number,
+  syncAttempts: number,
+  durabilityRecordSeconds: number,
+  phaseSweepSteps: number,
+): VerificationAttempt[] {
   const attempts: VerificationAttempt[] = [];
   for (let attemptIndex = 1; attemptIndex <= syncAttempts; ++attemptIndex) {
-    attempts.push({ kind: "sync", attemptIndex, durationSeconds: syncRecordSeconds });
+    const phaseIndex = phaseSweepSteps > 0 ? (attemptIndex - 1) % phaseSweepSteps : 0;
+    attempts.push({
+      kind: "sync",
+      attemptIndex,
+      durationSeconds: syncRecordSeconds,
+      phaseIndex,
+      phasePercent: phaseSweepSteps > 0 ? (phaseIndex * 100) / phaseSweepSteps : 0,
+      stopPhasePercent:
+        phaseSweepSteps > 0 ? (((phaseIndex * 7) % phaseSweepSteps) * 100) / phaseSweepSteps : 0,
+    });
   }
-  attempts.push({ kind: "durability", attemptIndex: 1, durationSeconds: durabilityRecordSeconds });
+  attempts.push({
+    kind: "durability",
+    attemptIndex: 1,
+    durationSeconds: durabilityRecordSeconds,
+    phaseIndex: 0,
+    phasePercent: 0,
+    stopPhasePercent: 0,
+  });
   return attempts;
+}
+
+function fpsValue(args: Pick<Args, "fpsNum" | "fpsDen">): number {
+  return args.fpsNum / args.fpsDen;
+}
+
+async function runRecordingSchedule(
+  socket: ObsWebSocket,
+  durationMs: number,
+  args: Args,
+  overload: OverloadMonitor,
+  failureWatch: AlphaRecorderFailureWatch,
+): Promise<void> {
+  const delayMonitor = args.allowOverload ? { seen: false, firstLine: "" } : overload;
+  const events: Array<{ atMs: number; kind: "pause" | "split" | "overload-start" | "overload-stop" }> = [];
+  if (args.pauseAtMs >= 0 && args.pauseAtMs < durationMs) {
+    events.push({ atMs: args.pauseAtMs, kind: "pause" });
+  }
+  if (args.splitAtMs >= 0 && args.splitAtMs < durationMs) {
+    events.push({ atMs: args.splitAtMs, kind: "split" });
+  }
+  if (
+    args.overloadPulseAtMs >= 0 &&
+    args.overloadPulseAtMs < durationMs &&
+    args.overloadPulseDelayMs > 0 &&
+    args.overloadPulseDurationMs > 0
+  ) {
+    events.push({ atMs: args.overloadPulseAtMs, kind: "overload-start" });
+    events.push({
+      atMs: Math.min(durationMs, args.overloadPulseAtMs + args.overloadPulseDurationMs),
+      kind: "overload-stop",
+    });
+  }
+  events.sort((left, right) => left.atMs - right.atMs);
+
+  let elapsedActiveMs = 0;
+  for (const event of events) {
+    await delayUnlessOverloaded(event.atMs - elapsedActiveMs, delayMonitor, failureWatch);
+    elapsedActiveMs = event.atMs;
+    if (!args.allowOverload && overload.seen) {
+      return;
+    }
+    if (event.kind === "pause") {
+      await socket.request("PauseRecord");
+      await waitForRecordPaused(socket, true, 10, failureWatch);
+      await delayUnlessOverloaded(args.pauseDurationMs, delayMonitor, failureWatch);
+      await socket.request("ResumeRecord");
+      await waitForRecordPaused(socket, false, 10, failureWatch);
+    } else if (event.kind === "split") {
+      await socket.request("SplitRecordFile");
+    } else {
+      await socket.request("SetInputSettings", {
+        inputName: "AlphaRecorderMovingAlpha",
+        inputSettings: {
+          render_delay_ms: event.kind === "overload-start" ? args.overloadPulseDelayMs : 0,
+        },
+        overlay: true,
+      });
+    }
+  }
+
+  await delayUnlessOverloaded(durationMs - elapsedActiveMs, delayMonitor, failureWatch);
 }
 
 function simpleRgbEncoder(encoder: string): string {
@@ -596,6 +831,9 @@ function findAlphaRecorderFailure(watch?: AlphaRecorderFailureWatch): string | n
   if (watch == null) {
     return null;
   }
+  if (watch.suppressFailure) {
+    return null;
+  }
 
   const logError = findAlphaRecorderLogError(watch.portableConfig, watch.checkpoint);
   if (logError != null) {
@@ -633,6 +871,21 @@ type AlphaRecorderTelemetryLine = {
   maskPath: string;
 };
 
+type GpuReplayTelemetry = {
+  logFile: string;
+  line: string;
+  maskPath: string;
+  consumed: number;
+  catchupSlots: number;
+  skippedStale: number;
+  underflows: number;
+  emitted: number;
+  repeatedSlots: number;
+  generationSlots: number;
+  ambiguousSlots: number;
+  missingTextures: number;
+};
+
 function obsLogFiles(portableConfig: string): string[] {
   const logsDir = join(portableConfig, "logs");
   if (!existsSync(logsDir)) {
@@ -658,6 +911,39 @@ function collectAlphaRecorderPerformanceTelemetry(portableConfig: string): Alpha
         logFile,
         line: line.trim(),
         maskPath: line.match(/path="([^"]+)"/)?.[1] ?? "",
+      });
+    }
+  }
+  return telemetry;
+}
+
+function collectGpuReplayTelemetry(portableConfig: string): GpuReplayTelemetry[] {
+  const telemetry: GpuReplayTelemetry[] = [];
+  for (const logFile of obsLogFiles(portableConfig)) {
+    const text = readFileSync(logFile, "utf8");
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.includes("Alpha Recorder GPU texture telemetry:")) {
+        continue;
+      }
+      const replay = line.match(
+        /replay=\{consumed=(\d+) catchup_slots=(\d+) skipped_stale=(\d+) underflows=(\d+) emitted=(\d+) repeated_slots=(\d+) generation_slots=(\d+) ambiguous_slots=(\d+)(?: missing_textures=(\d+))?\}/,
+      );
+      if (replay == null) {
+        continue;
+      }
+      telemetry.push({
+        logFile,
+        line: line.trim(),
+        maskPath: line.match(/path="([^"]+)"/)?.[1] ?? "",
+        consumed: Number(replay[1]),
+        catchupSlots: Number(replay[2]),
+        skippedStale: Number(replay[3]),
+        underflows: Number(replay[4]),
+        emitted: Number(replay[5]),
+        repeatedSlots: Number(replay[6]),
+        generationSlots: Number(replay[7]),
+        ambiguousSlots: Number(replay[8]),
+        missingTextures: Number(replay[9] ?? 0),
       });
     }
   }
@@ -1041,6 +1327,26 @@ async function waitForRecordState(
   throw new Error(`Timed out waiting for recording active=${active}; last status=${JSON.stringify(lastStatus)}`);
 }
 
+async function waitForRecordPaused(
+  socket: ObsWebSocket,
+  paused: boolean,
+  timeoutSeconds = 30,
+  failureWatch?: AlphaRecorderFailureWatch,
+): Promise<void> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let lastStatus: unknown = undefined;
+  while (Date.now() < deadline) {
+    throwIfAlphaRecorderFailureDetected(failureWatch);
+    const status = await socket.request("GetRecordStatus", {}, 5000);
+    lastStatus = status;
+    if (Boolean(status.outputActive) && Boolean(status.outputPaused) === paused) {
+      return;
+    }
+    await delay(100);
+  }
+  throw new Error(`Timed out waiting for recording paused=${paused}; last status=${JSON.stringify(lastStatus)}`);
+}
+
 async function startRecordingWithRetry(
   socket: ObsWebSocket,
   failureWatch?: AlphaRecorderFailureWatch,
@@ -1124,9 +1430,15 @@ async function waitForPath(path: string, timeoutSeconds: number): Promise<void> 
   throw new Error(`Timed out waiting for file: ${path}`);
 }
 
-function assertNoInvalidAlphaArtifacts(artifactRoot: string): void {
+function assertNoInvalidAlphaArtifacts(
+  artifactRoot: string,
+  allowRetainedSyncInvalid = false,
+): void {
   const invalidArtifacts = readdirSync(artifactRoot).filter(
-    (entry) => entry.includes(".alpha.tmp.") || entry.includes(".sync-invalid") || entry.endsWith(".spool"),
+    (entry) =>
+      entry.includes(".alpha.tmp.") ||
+      (!allowRetainedSyncInvalid && entry.includes(".sync-invalid")) ||
+      entry.endsWith(".spool"),
   );
   if (invalidArtifacts.length > 0) {
     throw new Error(`Invalid alpha artifacts were left in the recording directory: ${invalidArtifacts.join(", ")}`);
@@ -1145,9 +1457,163 @@ function alphaPathForRgb(rgbPath: string, expectedFinalizationFormat: string): s
   return `${basePath}.alpha${alphaExtension}`;
 }
 
-function invalidAlphaArtifacts(artifactRoot: string): string[] {
+function invalidAlphaArtifacts(
+  artifactRoot: string,
+  allowRetainedSyncInvalid = false,
+): string[] {
   return readdirSync(artifactRoot).filter(
-    (entry) => entry.includes(".alpha.tmp.") || entry.includes(".sync-invalid") || entry.endsWith(".spool"),
+    (entry) =>
+      entry.includes(".alpha.tmp.") ||
+      (!allowRetainedSyncInvalid && entry.includes(".sync-invalid")) ||
+      entry.endsWith(".spool"),
+  );
+}
+
+function syncInvalidPathForAlpha(alphaPath: string): string {
+  const extension = alphaPath.match(/(\.[^.\\/]+)$/)?.[1] ?? "";
+  return `${alphaPath.slice(0, alphaPath.length - extension.length)}.sync-invalid${extension}`;
+}
+
+function artifactSnapshot(artifactRoot: string): Set<string> {
+  return new Set(existsSync(artifactRoot) ? readdirSync(artifactRoot) : []);
+}
+
+function isNonEmptyFile(path: string): boolean {
+  return existsSync(path) && statSync(path).isFile() && statSync(path).size > 0;
+}
+
+function newArtifactPaths(artifactRoot: string, before: Set<string>): string[] {
+  return readdirSync(artifactRoot)
+    .filter((entry) => !before.has(entry))
+    .map((entry) => join(artifactRoot, entry));
+}
+
+function newRgbRecordingPaths(artifactRoot: string, before: Set<string>): string[] {
+  return newArtifactPaths(artifactRoot, before)
+    .filter((path) => {
+      const name = basename(path).toLowerCase();
+      return /\.(mkv|mov|mp4)$/.test(name) &&
+        !name.includes(".alpha") &&
+        !name.includes(".sync-invalid") &&
+        !name.includes(".tmp.");
+    })
+    .sort((left, right) => statSync(left).mtimeMs - statSync(right).mtimeMs);
+}
+
+async function waitForExpectedAlphaResult(
+  artifactRoot: string,
+  alphaPath: string,
+  expectedResult: Args["expectedResult"],
+  before: Set<string>,
+  timeoutSeconds: number,
+  failureWatch?: AlphaRecorderFailureWatch,
+): Promise<string> {
+  if (expectedResult === "normal") {
+    await waitForAlphaOutputSettled(artifactRoot, alphaPath, timeoutSeconds, failureWatch);
+    return alphaPath;
+  }
+
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  const syncInvalidPath = syncInvalidPathForAlpha(alphaPath);
+  let cleanSince: number | null = null;
+  let stableTempPath = "";
+  let stableTempSize = -1;
+  let stableTempSince = 0;
+  let stableSplitSignature = "";
+  let stableSplitSince = 0;
+  while (Date.now() < deadline) {
+    const newPaths = newArtifactPaths(artifactRoot, before);
+    const newTemps = newPaths.filter((path) => basename(path).includes(".alpha.tmp."));
+    if (expectedResult === "normal-or-sync-invalid") {
+      if (
+        isNonEmptyFile(alphaPath) &&
+        !existsSync(syncInvalidPath) &&
+        newTemps.length === 0
+      ) {
+        return alphaPath;
+      }
+      if (
+        isNonEmptyFile(syncInvalidPath) &&
+        !existsSync(alphaPath) &&
+        newTemps.length === 0
+      ) {
+        return syncInvalidPath;
+      }
+    } else if (expectedResult === "sync-invalid") {
+      if (
+        existsSync(syncInvalidPath) &&
+        statSync(syncInvalidPath).size > 0 &&
+        newTemps.length === 0 &&
+        !existsSync(alphaPath)
+      ) {
+        return syncInvalidPath;
+      }
+    } else if (expectedResult === "no-alpha") {
+      if (!existsSync(alphaPath) && !existsSync(syncInvalidPath) && newTemps.length === 0) {
+        cleanSince ??= Date.now();
+        if (Date.now() - cleanSince >= 2000) {
+          return "";
+        }
+      } else {
+        cleanSince = null;
+      }
+    } else if (expectedResult === "temp-preserved") {
+      const candidate = newTemps.find((path) => existsSync(path) && statSync(path).size > 0);
+      if (candidate != null) {
+        const size = statSync(candidate).size;
+        if (candidate !== stableTempPath || size !== stableTempSize) {
+          stableTempPath = candidate;
+          stableTempSize = size;
+          stableTempSince = Date.now();
+        } else if (Date.now() - stableTempSince >= 1500 && !existsSync(alphaPath)) {
+          return candidate;
+        }
+      }
+    } else {
+      const rgbArtifacts = newRgbRecordingPaths(artifactRoot, before);
+      const publishedAlphaCount = rgbArtifacts.filter((path) =>
+        isNonEmptyFile(alphaPathForRgb(path, "mask_hevc_nvenc")),
+      ).length;
+      if (expectedResult === "split-published" &&
+          rgbArtifacts.length >= 2 &&
+          publishedAlphaCount === rgbArtifacts.length &&
+          newTemps.length === 0) {
+        return "";
+      }
+      if (expectedResult === "split-isolated" &&
+        rgbArtifacts.length >= 2 &&
+        publishedAlphaCount >= 1 &&
+        publishedAlphaCount < rgbArtifacts.length &&
+        newTemps.length === 0
+      ) {
+        return "";
+      }
+      if (rgbArtifacts.length >= 2 && newTemps.length === 0) {
+        const signature = rgbArtifacts
+          .map((path) => {
+            const candidate = alphaPathForRgb(path, "mask_hevc_nvenc");
+            return `${basename(candidate)}:${existsSync(candidate) ? statSync(candidate).size : -1}`;
+          })
+          .join("|");
+        if (signature !== stableSplitSignature) {
+          stableSplitSignature = signature;
+          stableSplitSince = Date.now();
+        } else if (Date.now() - stableSplitSince >= 5000) {
+          throw new Error(
+            `Split alpha artifacts settled without satisfying expected result=${expectedResult}: ` +
+              `rgb=${rgbArtifacts.length} publishedAlpha=${publishedAlphaCount} files=${signature}`,
+          );
+        }
+      } else {
+        stableSplitSignature = "";
+        stableSplitSince = 0;
+      }
+    }
+    await delay(250);
+  }
+  throw new Error(
+    `Timed out waiting for expected alpha result=${expectedResult}: alpha=${alphaPath}; ` +
+      `newArtifacts=${newArtifactPaths(artifactRoot, before).map((path) => basename(path)).join(",") || "<none>"}`,
   );
 }
 
@@ -1156,13 +1622,18 @@ async function waitForAlphaOutputSettled(
   alphaPath: string,
   timeoutSeconds: number,
   failureWatch?: AlphaRecorderFailureWatch,
+  allowRetainedSyncInvalid = false,
 ): Promise<void> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let lastInvalidArtifacts: string[] = [];
   let cleanMissingSince: number | null = null;
+  let emptyOutputSince: number | null = null;
   while (Date.now() < deadline) {
     throwIfAlphaRecorderFailureDetected(failureWatch);
-    lastInvalidArtifacts = invalidAlphaArtifacts(artifactRoot);
+    lastInvalidArtifacts = invalidAlphaArtifacts(
+      artifactRoot,
+      allowRetainedSyncInvalid,
+    );
     if (existsSync(alphaPath) && statSync(alphaPath).size > 0 && lastInvalidArtifacts.length === 0) {
       return;
     }
@@ -1176,6 +1647,14 @@ async function waitForAlphaOutputSettled(
       }
     } else {
       cleanMissingSince = null;
+    }
+    if (existsSync(alphaPath) && statSync(alphaPath).size === 0 && lastInvalidArtifacts.length === 0) {
+      emptyOutputSince ??= Date.now();
+      if (Date.now() - emptyOutputSince >= 3000) {
+        throw new Error(`Alpha Recorder left an empty published output: alpha=${alphaPath}`);
+      }
+    } else {
+      emptyOutputSince = null;
     }
     await delay(500);
   }
@@ -1573,12 +2052,22 @@ type SyncVerification = {
   expectedFrameCodeOffset: number;
   mainReorderDepth: number;
   alphaConstantPacketDuration?: number;
+  mainPacketTiming: PacketTimingSummary;
+  alphaPacketTiming: PacketTimingSummary;
   bestFrameCodeOffset: OffsetSummary;
   bestContentOffset: OffsetSummary;
+  overloadPrefixFrameCodeOffset?: OffsetSummary;
+  overloadPrefixContentOffset?: OffsetSummary;
   overloadTerminalFrameCodeOffset?: OffsetSummary;
   overloadTerminalContentOffset?: OffsetSummary;
   frameCodeMismatches: number;
   maskBoundsMismatches: number;
+  first60FrameCodeMismatches: number;
+  last60FrameCodeMismatches: number;
+  frameCodeMismatchChangePoints: number[];
+  rgbConsecutiveDuplicateCodes: number;
+  alphaConsecutiveDuplicateCodes: number;
+  terminalRepeatOnly: boolean;
 };
 
 type PacketTimingSummary = {
@@ -1587,7 +2076,24 @@ type PacketTimingSummary = {
   firstDuration: number;
   monotonicPts: boolean;
   firstPacketKeyframe: boolean;
+  firstPts: number;
+  lastPts: number;
+  ptsStep: number;
+  duplicatePts: number;
+  gapCount: number;
+  gridViolations: number;
 };
+
+function integerGcd(left: number, right: number): number {
+  let a = Math.abs(Math.trunc(left));
+  let b = Math.abs(Math.trunc(right));
+  while (b !== 0) {
+    const remainder = a % b;
+    a = b;
+    b = remainder;
+  }
+  return a;
+}
 
 function packetTimingSummary(ffprobe: string, path: string): PacketTimingSummary {
   const probe = checkedJson(
@@ -1613,14 +2119,47 @@ function packetTimingSummary(ffprobe: string, path: string): PacketTimingSummary
       duration: Number(packet.duration),
       flags: packet.flags ?? "",
     }))
-    .filter((packet) => Number.isFinite(packet.pts) && Number.isFinite(packet.duration));
+    .filter((packet) => Number.isFinite(packet.pts));
 
-  const durations = new Set(packets.map((packet) => packet.duration));
+  const durations = new Set(packets.map((packet) => packet.duration).filter((duration) => Number.isFinite(duration)));
   let monotonicPts = true;
   for (let index = 1; index < packets.length; ++index) {
     if (packets[index].pts <= packets[index - 1].pts) {
       monotonicPts = false;
       break;
+    }
+  }
+  const sortedPts = packets.map((packet) => packet.pts).sort((left, right) => left - right);
+  let duplicatePts = 0;
+  let gcdStep = 0;
+  let minimumPositiveDelta = 0;
+  let maximumPositiveDelta = 0;
+  for (let index = 1; index < sortedPts.length; ++index) {
+    const delta = sortedPts[index] - sortedPts[index - 1];
+    if (delta === 0) {
+      ++duplicatePts;
+    } else if (delta > 0) {
+      gcdStep = gcdStep === 0 ? delta : integerGcd(gcdStep, delta);
+      minimumPositiveDelta = minimumPositiveDelta === 0 ? delta : Math.min(minimumPositiveDelta, delta);
+      maximumPositiveDelta = Math.max(maximumPositiveDelta, delta);
+    }
+  }
+  const roundedCadence =
+    minimumPositiveDelta > 0 &&
+    maximumPositiveDelta - minimumPositiveDelta <= 1;
+  const ptsStep = roundedCadence ? minimumPositiveDelta : gcdStep;
+  let gapCount = 0;
+  let gridViolations = 0;
+  if (ptsStep > 0 && sortedPts.length > 0) {
+    for (let index = 1; index < sortedPts.length; ++index) {
+      const delta = sortedPts[index] - sortedPts[index - 1];
+      const maximumCadenceDelta = roundedCadence ? ptsStep + 1 : ptsStep;
+      if (delta > maximumCadenceDelta) {
+        ++gapCount;
+      }
+      if (!roundedCadence && (sortedPts[index] - sortedPts[0]) % ptsStep !== 0) {
+        ++gridViolations;
+      }
     }
   }
 
@@ -1630,7 +2169,23 @@ function packetTimingSummary(ffprobe: string, path: string): PacketTimingSummary
     firstDuration: packets[0]?.duration ?? 0,
     monotonicPts,
     firstPacketKeyframe: packets[0]?.flags.includes("K") ?? false,
+    firstPts: sortedPts[0] ?? 0,
+    lastPts: sortedPts.at(-1) ?? 0,
+    ptsStep,
+    duplicatePts,
+    gapCount,
+    gridViolations,
   };
+}
+
+function consecutiveDuplicateCount(values: number[]): number {
+  let duplicates = 0;
+  for (let index = 1; index < values.length; ++index) {
+    if (values[index] === values[index - 1]) {
+      ++duplicates;
+    }
+  }
+  return duplicates;
 }
 
 function bestFrameCodeOffsetInRange(
@@ -1708,7 +2263,9 @@ function verifyRgbAlphaFrameSync(
   height: number,
   fps: number,
   overloadObserved: boolean,
+  lifecycleBoundaryObserved: boolean,
   verifyNleTimeline: boolean,
+  strictAllFrames: boolean,
 ): SyncVerification {
   const toleratedTerminalFrames = 3;
   const toleratedPerFrameMismatches = 3;
@@ -1741,9 +2298,10 @@ function verifyRgbAlphaFrameSync(
   const rgbCodes = decodeFrameCodes(ffmpeg, rgbPath, "rgb24");
   const alphaCodes = decodeFrameCodes(ffmpeg, alphaPath, "gray");
   const bestCodeOffset = bestFrameCodeOffset(rgbCodes, alphaCodes);
-  const mainReorderDepth = verifyNleTimeline ? packetPresentationReorderDepth(ffprobe, rgbPath) : 0;
+  const mainReorderDepth = packetPresentationReorderDepth(ffprobe, rgbPath);
   const expectedFrameCodeOffset = 0;
-  const alphaTiming = verifyNleTimeline ? packetTimingSummary(ffprobe, alphaPath) : undefined;
+  const mainTiming = packetTimingSummary(ffprobe, rgbPath);
+  const alphaTiming = packetTimingSummary(ffprobe, alphaPath);
 
   const rgbBounds = Array.from({ length: rgbFrames }, (_, frame) =>
     rgbFrameBounds(rgbBytes.subarray(frame * rgbFrameSize, (frame + 1) * rgbFrameSize), verifyWidth, verifyHeight),
@@ -1762,7 +2320,11 @@ function verifyRgbAlphaFrameSync(
   // OBS output muxers can differ by one admitted terminal frame even when all
   // shared presentation slots are content-identical. Keep offset/content checks
   // strict and reserve the wider allowance for an observed overload only.
-  const toleratedFrameCountDelta = overloadObserved ? toleratedTerminalFrames : 1;
+  const toleratedFrameCountDelta = strictAllFrames && !overloadObserved
+    ? 0
+    : overloadObserved
+      ? toleratedTerminalFrames
+      : 1;
   if (Math.abs(frameCountDelta - expectedAlphaFrameDelta) > toleratedFrameCountDelta) {
     throw new Error(
       `Decoded RGB/alpha frame counts do not match expectation: rgb=${rgbFrames} alpha=${alphaFrames}; ` +
@@ -1773,7 +2335,7 @@ function verifyRgbAlphaFrameSync(
     );
   }
 
-  if (bestCodeOffset.offset !== expectedFrameCodeOffset) {
+  if (!overloadObserved && bestCodeOffset.offset !== expectedFrameCodeOffset) {
     throw new Error(
         `RGB/alpha frame-code offset does not match the expected value: ` +
         `offset=${bestCodeOffset.offset} expected=${expectedFrameCodeOffset} ` +
@@ -1785,7 +2347,6 @@ function verifyRgbAlphaFrameSync(
 
   if (verifyNleTimeline) {
     if (
-      alphaTiming == null ||
       alphaTiming.packetCount !== alphaFrames ||
       alphaTiming.uniqueDurations !== 1 ||
       !alphaTiming.monotonicPts ||
@@ -1793,11 +2354,13 @@ function verifyRgbAlphaFrameSync(
     ) {
       throw new Error(
         `Alpha NLE timeline is not exact CFR: ` +
-          `packets=${alphaTiming?.packetCount ?? 0}/${alphaFrames} ` +
-          `uniqueDurations=${alphaTiming?.uniqueDurations ?? 0} ` +
-          `firstDuration=${alphaTiming?.firstDuration ?? 0} ` +
-          `monotonicPts=${alphaTiming?.monotonicPts ?? false} ` +
-          `firstPacketKeyframe=${alphaTiming?.firstPacketKeyframe ?? false}`,
+          `packets=${alphaTiming.packetCount}/${alphaFrames} ` +
+          `uniqueDurations=${alphaTiming.uniqueDurations} ` +
+          `firstDuration=${alphaTiming.firstDuration} ` +
+          `monotonicPts=${alphaTiming.monotonicPts} ` +
+          `firstPacketKeyframe=${alphaTiming.firstPacketKeyframe} ` +
+          `ptsStep=${alphaTiming.ptsStep} gaps=${alphaTiming.gapCount} ` +
+          `duplicates=${alphaTiming.duplicatePts} gridViolations=${alphaTiming.gridViolations}`,
       );
     }
   }
@@ -1818,6 +2381,22 @@ function verifyRgbAlphaFrameSync(
   }
 
   const comparedFrames = Math.min(rgbFrames, alphaFrames);
+  const overloadPrefixWindow = Math.min(
+    comparedFrames,
+    Math.max(toleratedBoundaryFrames * 2, Math.ceil(fps * 0.5)),
+  );
+  const overloadPrefixFrameCodeOffset = bestFrameCodeOffsetInRange(
+    rgbCodes,
+    alphaCodes,
+    0,
+    overloadPrefixWindow,
+  );
+  const overloadPrefixContentOffset = bestBoundsOffsetInRange(
+    rgbBounds,
+    alphaBounds,
+    0,
+    overloadPrefixWindow,
+  );
   const overloadTerminalWindow = Math.min(
     comparedFrames,
     Math.max(toleratedBoundaryFrames * 2, Math.ceil(fps * 0.5)),
@@ -1835,9 +2414,23 @@ function verifyRgbAlphaFrameSync(
     overloadTerminalStart,
     comparedFrames,
   );
+  const hasConfidentZeroOffset = (result: OffsetSummary): boolean =>
+    result.offset === 0 &&
+    result.total > 0 &&
+    result.matches >= Math.max(1, result.total - toleratedBoundaryFrames);
   const overloadOffsetStable =
     overloadObserved &&
+    hasConfidentZeroOffset(overloadPrefixFrameCodeOffset) &&
+    hasConfidentZeroOffset(overloadPrefixContentOffset) &&
+    hasConfidentZeroOffset(overloadTerminalFrameCodeOffset) &&
+    hasConfidentZeroOffset(overloadTerminalContentOffset);
+  const lifecycleMismatchBudget = Math.max(6, Math.ceil(fps * 0.15));
+  const lifecycleTerminalWindow = Math.min(comparedFrames, Math.max(60, Math.ceil(fps)));
+  const lifecycleTerminalStart = Math.max(0, comparedFrames - lifecycleTerminalWindow);
+  const lifecycleOffsetStable =
+    lifecycleBoundaryObserved &&
     bestCodeOffset.offset === 0 &&
+    bestOffset.offset === 0 &&
     overloadTerminalFrameCodeOffset.offset === 0 &&
     overloadTerminalContentOffset.offset === 0 &&
     overloadTerminalFrameCodeOffset.total > 0 &&
@@ -1845,14 +2438,18 @@ function verifyRgbAlphaFrameSync(
 
   if (overloadObserved && !overloadOffsetStable) {
     throw new Error(
-      `RGB/alpha offset drifted after overload: ` +
+      `RGB/alpha offset did not recover after the declared recovery window: ` +
         `globalFrameCode=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
         `globalContent=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
+        `prefixFrameCode=${overloadPrefixFrameCodeOffset.offset} ` +
+        `matched=${overloadPrefixFrameCodeOffset.matches}/${overloadPrefixFrameCodeOffset.total}; ` +
+        `prefixContent=${overloadPrefixContentOffset.offset} ` +
+        `matched=${overloadPrefixContentOffset.matches}/${overloadPrefixContentOffset.total}; ` +
         `terminalFrameCode=${overloadTerminalFrameCodeOffset.offset} ` +
         `matched=${overloadTerminalFrameCodeOffset.matches}/${overloadTerminalFrameCodeOffset.total}; ` +
         `terminalContent=${overloadTerminalContentOffset.offset} ` +
         `matched=${overloadTerminalContentOffset.matches}/${overloadTerminalContentOffset.total}; ` +
-        `terminalWindow=${overloadTerminalWindow}`,
+        `prefixWindow=${overloadPrefixWindow} terminalWindow=${overloadTerminalWindow}`,
     );
   }
   if (
@@ -1861,11 +2458,13 @@ function verifyRgbAlphaFrameSync(
     bestOffset.offset !== 0
   ) {
     console.warn(
-      `RGB/alpha mask bounds preferred a non-zero offset under overload, but frame-code offset remains zero: ` +
+      `RGB/alpha global best offset was non-zero inside the declared recovery window, but clean prefix and suffix remained at zero: ` +
         `globalContent=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
+        `globalFrameCode=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `prefixFrameCode=${overloadPrefixFrameCodeOffset.offset} ` +
+        `matched=${overloadPrefixFrameCodeOffset.matches}/${overloadPrefixFrameCodeOffset.total}; ` +
         `terminalContent=${overloadTerminalContentOffset.offset} ` +
         `matched=${overloadTerminalContentOffset.matches}/${overloadTerminalContentOffset.total}; ` +
-        `globalFrameCode=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
         `terminalFrameCode=${overloadTerminalFrameCodeOffset.offset} ` +
         `matched=${overloadTerminalFrameCodeOffset.matches}/${overloadTerminalFrameCodeOffset.total}`,
     );
@@ -1881,12 +2480,14 @@ function verifyRgbAlphaFrameSync(
   let interiorMaskBoundsMismatches = 0;
   const firstFrameCodeMismatches: string[] = [];
   const firstMaskBoundsMismatches: string[] = [];
+  const frameCodeMismatchFlags: boolean[] = [];
 
   for (let frame = 0; frame < comparedFrames; ++frame) {
     const alphaFrame = frame;
     const alphaFrameCode = alphaFrame >= 0 && alphaFrame < alphaCodes.length ? alphaCodes[alphaFrame] : undefined;
     const alphaBound = alphaFrame >= 0 && alphaFrame < alphaBounds.length ? alphaBounds[alphaFrame] : undefined;
     if (rgbCodes[frame] !== alphaFrameCode) {
+      frameCodeMismatchFlags.push(true);
       ++frameCodeMismatches;
       if (frame < toleratedBoundaryFrames) {
         ++startFrameCodeMismatches;
@@ -1898,6 +2499,8 @@ function verifyRgbAlphaFrameSync(
       if (firstFrameCodeMismatches.length < toleratedPerFrameMismatches + 1) {
         firstFrameCodeMismatches.push(`${frame}:${rgbCodes[frame]}/${alphaFrameCode ?? "missing"}@${alphaFrame}`);
       }
+    } else {
+      frameCodeMismatchFlags.push(false);
     }
 
     if (alphaBound == null || !boundsAreSimilar(rgbBounds[frame], alphaBound)) {
@@ -1925,9 +2528,17 @@ function verifyRgbAlphaFrameSync(
     startFrameCodeMismatches > toleratedBoundaryFrames ||
     terminalFrameCodeMismatches > toleratedBoundaryFrames
   ) {
-    if (overloadOffsetStable) {
+    if (lifecycleOffsetStable &&
+        frameCodeMismatches <= lifecycleMismatchBudget &&
+        frameCodeMismatchFlags.slice(lifecycleTerminalStart).every((mismatch) => !mismatch)) {
       console.warn(
-        `RGB/alpha frame-code mismatches exceed strict tolerance under overload, but offset remains zero: ` +
+        `RGB/alpha frame-code mismatches were confined to a pause/resume boundary and recovered to offset zero: ` +
+          `mismatches=${frameCodeMismatches}/${comparedFrames}; budget=${lifecycleMismatchBudget}; ` +
+          `examples=${firstFrameCodeMismatches.join("; ")}; terminalWindow=${lifecycleTerminalWindow}`,
+      );
+    } else if (overloadOffsetStable) {
+      console.warn(
+        `RGB/alpha frame-code mismatches exceed strict tolerance inside the declared recovery window, but clean prefix and suffix offsets remain zero: ` +
           `mismatches=${frameCodeMismatches}/${comparedFrames}; ` +
           `start=${startFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
           `terminal=${terminalFrameCodeMismatches}/${toleratedBoundaryFrames} ` +
@@ -1955,9 +2566,15 @@ function verifyRgbAlphaFrameSync(
     startMaskBoundsMismatches > toleratedBoundaryFrames ||
     terminalMaskBoundsMismatches > toleratedBoundaryFrames
   ) {
-    if (overloadOffsetStable) {
+    if (lifecycleOffsetStable && maskBoundsMismatches <= lifecycleMismatchBudget) {
       console.warn(
-        `RGB/alpha mask bounds mismatches exceed strict tolerance under overload, but offset remains zero: ` +
+        `RGB/alpha mask mismatches were confined to a pause/resume boundary and recovered to offset zero: ` +
+          `mismatches=${maskBoundsMismatches}/${comparedFrames}; budget=${lifecycleMismatchBudget}; ` +
+          `examples=${firstMaskBoundsMismatches.join("; ")}; terminalWindow=${lifecycleTerminalWindow}`,
+      );
+    } else if (overloadOffsetStable) {
+      console.warn(
+        `RGB/alpha mask bounds mismatches exceed strict tolerance inside the declared recovery window, but clean prefix and suffix offsets remain zero: ` +
           `mismatches=${maskBoundsMismatches}/${comparedFrames}; ` +
           `start=${startMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
           `terminal=${terminalMaskBoundsMismatches}/${toleratedBoundaryFrames} ` +
@@ -1980,18 +2597,77 @@ function verifyRgbAlphaFrameSync(
     }
   }
 
+  const first60FrameCodeMismatches = frameCodeMismatchFlags
+    .slice(0, Math.min(60, frameCodeMismatchFlags.length))
+    .filter(Boolean).length;
+  const last60FrameCodeMismatches = frameCodeMismatchFlags
+    .slice(Math.max(0, frameCodeMismatchFlags.length - 60))
+    .filter(Boolean).length;
+  const frameCodeMismatchChangePoints: number[] = [];
+  for (let index = 1; index < frameCodeMismatchFlags.length; ++index) {
+    if (frameCodeMismatchFlags[index] !== frameCodeMismatchFlags[index - 1]) {
+      frameCodeMismatchChangePoints.push(index);
+    }
+  }
+  const terminalRepeatOnly =
+    frameCodeMismatches === 1 &&
+    maskBoundsMismatches === 1 &&
+    comparedFrames >= 2 &&
+    frameCodeMismatchFlags[comparedFrames - 1] &&
+    frameCodeMismatchFlags.slice(0, comparedFrames - 1).every((mismatch) => !mismatch) &&
+    alphaCodes[comparedFrames - 1] === alphaCodes[comparedFrames - 2] &&
+    rgbCodes[comparedFrames - 1] !== rgbCodes[comparedFrames - 2];
+
+  if (
+    strictAllFrames &&
+    !overloadObserved &&
+    !lifecycleBoundaryObserved &&
+    (frameCodeMismatches !== 0 || maskBoundsMismatches !== 0) &&
+    !terminalRepeatOnly
+  ) {
+    throw new Error(
+      `Strict full-frame sync failed: frameCodeMismatches=${frameCodeMismatches}/${comparedFrames} ` +
+        `maskBoundsMismatches=${maskBoundsMismatches}/${comparedFrames} ` +
+        `first60=${first60FrameCodeMismatches} last60=${last60FrameCodeMismatches} ` +
+        `changePoints=${frameCodeMismatchChangePoints.slice(0, 20).join(",") || "<none>"} ` +
+        `examples=${firstFrameCodeMismatches.join("; ") || "<none>"}`,
+    );
+  }
+  if (mainTiming.duplicatePts !== 0 || mainTiming.gridViolations !== 0) {
+    throw new Error(
+      `Main packet PTS grid is invalid: duplicates=${mainTiming.duplicatePts} ` +
+        `gridViolations=${mainTiming.gridViolations} ptsStep=${mainTiming.ptsStep}`,
+    );
+  }
+  if (alphaTiming.duplicatePts !== 0 || alphaTiming.gridViolations !== 0) {
+    throw new Error(
+      `Alpha packet PTS grid is invalid: duplicates=${alphaTiming.duplicatePts} ` +
+        `gridViolations=${alphaTiming.gridViolations} ptsStep=${alphaTiming.ptsStep}`,
+    );
+  }
+
   return {
     rgbFrames,
     alphaFrames,
     expectedFrameCodeOffset,
     mainReorderDepth,
-    alphaConstantPacketDuration: alphaTiming?.firstDuration,
+    alphaConstantPacketDuration: alphaTiming.firstDuration,
+    mainPacketTiming: mainTiming,
+    alphaPacketTiming: alphaTiming,
     bestFrameCodeOffset: bestCodeOffset,
     bestContentOffset: bestOffset,
+    overloadPrefixFrameCodeOffset: overloadObserved ? overloadPrefixFrameCodeOffset : undefined,
+    overloadPrefixContentOffset: overloadObserved ? overloadPrefixContentOffset : undefined,
     overloadTerminalFrameCodeOffset: overloadObserved ? overloadTerminalFrameCodeOffset : undefined,
     overloadTerminalContentOffset: overloadObserved ? overloadTerminalContentOffset : undefined,
     frameCodeMismatches,
     maskBoundsMismatches,
+    first60FrameCodeMismatches,
+    last60FrameCodeMismatches,
+    frameCodeMismatchChangePoints,
+    rgbConsecutiveDuplicateCodes: consecutiveDuplicateCount(rgbCodes),
+    alphaConsecutiveDuplicateCodes: consecutiveDuplicateCount(alphaCodes),
+    terminalRepeatOnly,
   };
 }
 
@@ -2007,7 +2683,10 @@ async function verifyRecordingOutputs(
   height: number,
   fps: number,
   overloadObserved: boolean,
+  lifecycleBoundaryObserved: boolean,
   verifyNleTimeline: boolean,
+  strictAllFrames: boolean,
+  allowRetainedSyncInvalid = false,
 ): Promise<{ rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any; syncVerification: SyncVerification }> {
   if (!rgbPath) {
     const mkvs = readdirSync(artifactRoot)
@@ -2027,7 +2706,7 @@ async function verifyRecordingOutputs(
     throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot);
     throw new Error(`Alpha Recorder did not publish an alpha output: alpha=${alphaPath}; Artifacts: ${artifactRoot}`);
   }
-  assertNoInvalidAlphaArtifacts(artifactRoot);
+  assertNoInvalidAlphaArtifacts(artifactRoot, allowRetainedSyncInvalid);
 
   const ffprobe = findTool(stageBin, repoRoot, "ffprobe");
   const ffmpeg = findTool(stageBin, repoRoot, "ffmpeg");
@@ -2095,9 +2774,79 @@ async function verifyRecordingOutputs(
     height,
     fps,
     overloadObserved,
+    lifecycleBoundaryObserved,
     verifyNleTimeline,
+    strictAllFrames,
   );
   return { rgbPath, alphaPath, rgbProbe, alphaProbe, syncVerification };
+}
+
+async function verifyExpectedNonNormalOutput(
+  stageBin: string,
+  repoRoot: string,
+  rgbPath: string,
+  alphaArtifactPath: string,
+  width: number,
+  height: number,
+  fps: number,
+): Promise<SyncVerification | undefined> {
+  await waitForPath(rgbPath, 30);
+  const ffprobe = findTool(stageBin, repoRoot, "ffprobe");
+  const ffmpeg = findTool(stageBin, repoRoot, "ffmpeg");
+  await checkedProcessWithRetry(ffmpeg, ["-v", "error", "-i", rgbPath, "-frames:v", "1", "-f", "null", "-"], 30);
+  if (!alphaArtifactPath) {
+    return undefined;
+  }
+
+  await checkedProcessWithRetry(
+    ffmpeg,
+    ["-v", "error", "-i", alphaArtifactPath, "-frames:v", "1", "-f", "null", "-"],
+    180,
+  );
+  try {
+    return verifyRgbAlphaFrameSync(
+      ffmpeg,
+      ffprobe,
+      rgbPath,
+      alphaArtifactPath,
+      width,
+      height,
+      fps,
+      false,
+      false,
+      false,
+      false,
+    );
+  } catch (error) {
+    const diagnostic =
+      error instanceof Error ? error.message : String(error);
+    console.log(
+      `Retained diagnostic alpha is decodable but not sync-certified, as expected: ${diagnostic}`,
+    );
+    return undefined;
+  }
+}
+
+async function verifyArtifactDecodes(
+  stageBin: string,
+  repoRoot: string,
+  rgbPath: string,
+  alphaArtifactPath: string,
+): Promise<void> {
+  await waitForPath(rgbPath, 30);
+  const ffmpeg = findTool(stageBin, repoRoot, "ffmpeg");
+  await checkedProcessWithRetry(
+    ffmpeg,
+    ["-v", "error", "-i", rgbPath, "-frames:v", "1", "-f", "null", "-"],
+    30,
+  );
+  if (alphaArtifactPath) {
+    await checkedProcessWithRetry(
+      ffmpeg,
+      ["-v", "error", "-i", alphaArtifactPath, "-frames:v", "1", "-f", "null", "-"],
+      180,
+    );
+  }
 }
 
 async function main(): Promise<void> {
@@ -2178,6 +2927,7 @@ TrackIndex=1
 RecSplitFileType=Time
 AudioEncoder=ffmpeg_aac
 RecAudioEncoder=${recordAudioEncoder}
+RecSplitFile=${args.splitAtMs >= 0}
 
 [SimpleOutput]
 FilePath=${artifactRoot.replaceAll("\\", "/")}
@@ -2200,11 +2950,11 @@ BaseCX=${args.width}
 BaseCY=${args.height}
 OutputCX=${args.width}
 OutputCY=${args.height}
-FPSType=0
-FPSCommon=${args.fps}
-FPSInt=${args.fps}
-FPSNum=${args.fps}
-FPSDen=1
+FPSType=${args.fpsDen === 1 ? 1 : 2}
+FPSCommon=${fpsValue(args)}
+FPSInt=${Math.round(fpsValue(args))}
+FPSNum=${args.fpsNum}
+FPSDen=${args.fpsDen}
 ScaleType=bicubic
 ColorFormat=NV12
 ColorSpace=709
@@ -2218,6 +2968,20 @@ ChannelSetup=Stereo
 enabled=false
 finalization_format=${args.finalizationFormat}
 `);
+  writeText(
+    join(portableConfig, "basic", "profiles", profile, "recordEncoder.json"),
+    JSON.stringify(
+      {
+        keyint_sec: 1,
+        preset: "ultrafast",
+        profile: "high",
+        tune: "zerolatency",
+        x264opts: "bframes=0 sync-lookahead=0 rc-lookahead=0",
+      },
+      null,
+      2,
+    ),
+  );
 
   writeText(
     join(portableConfig, "basic", "scenes", `${collection}.json`),
@@ -2288,6 +3052,12 @@ finalization_format=${args.finalizationFormat}
         ? `${linuxLibraryPathEntries(contentRoot, stageBin).join(":")}:${process.env.LD_LIBRARY_PATH ?? ""}`
         : process.env.LD_LIBRARY_PATH,
     ...(platform === "linux" && process.env.QT_QPA_PLATFORM == null && isWslRuntime() ? { QT_QPA_PLATFORM: "xcb" } : {}),
+    ALPHA_RECORDER_E2E_TEST: "1",
+    ...(args.testFault ? { ALPHA_RECORDER_E2E_FAULT: args.testFault } : {}),
+    ...(args.faultSegment > 0 ? { ALPHA_RECORDER_E2E_FAULT_SEGMENT: String(args.faultSegment) } : {}),
+    ...(args.testFault === "replay-evidence-gap"
+      ? { ALPHA_RECORDER_E2E_REPLAY_GAP_PACKETS: String(args.replayGapPackets) }
+      : {}),
   };
 
   const obsCommand = [
@@ -2362,7 +3132,7 @@ finalization_format=${args.finalizationFormat}
         hevc_nvenc_tune: args.hevcNvencTune,
         hevc_gop_size: args.hevcGopSize,
         diagnostic_logging: args.allowOverload,
-        fail_close_on_sync_proof_failure: !args.allowOverload,
+        fail_close_on_sync_proof_failure: args.failCloseOnSyncProofFailure,
       },
     });
     if (setSettings.responseData?.ok === false) {
@@ -2421,55 +3191,135 @@ finalization_format=${args.finalizationFormat}
 
     await socket.request("SetRecordDirectory", { recordDirectory: artifactRoot });
 
-    const recordedAttempts: Array<VerificationAttempt & { rgbPath: string; overloaded: boolean }> = [];
+    const recordedAttempts: Array<VerificationAttempt & {
+      rgbPath: string;
+      alphaArtifactPath: string;
+      overloaded: boolean;
+      actualResult: ResolvedExpectedResult;
+    }> = [];
     const attempts: Array<{
       kind: "sync" | "durability";
       attemptIndex: number;
       durationSeconds: number;
+      phaseIndex: number;
+      phasePercent: number;
+      stopPhasePercent: number;
       overloaded: boolean;
       rgbPath: string;
       alphaPath: string;
       rgbProbe: any;
       alphaProbe: any;
-      syncVerification: SyncVerification;
+      syncVerification?: SyncVerification;
+      observedMainReorderDepth: number;
+      observedMainPacketTiming: PacketTimingSummary;
     }> = [];
-    for (const attempt of verificationAttempts(args.syncRecordSeconds, args.syncAttempts, args.durabilityRecordSeconds)) {
+    for (const attempt of verificationAttempts(
+      args.syncRecordSeconds,
+      args.syncAttempts,
+      args.durabilityRecordSeconds,
+      args.phaseSweepSteps,
+    )) {
       const durationSeconds = attempt.durationSeconds;
       const label = attempt.kind === "sync" ? `sync ${attempt.attemptIndex}/${args.syncAttempts}` : "durability";
-      console.log(`Running OBS app E2E ${label} recording for ${durationSeconds}s...`);
+      const frameIntervalMs = 1000 / fpsValue(args);
+      const startPhaseDelayMs = (attempt.phasePercent / 100) * frameIntervalMs;
+      const stopPhaseDelayMs = (attempt.stopPhasePercent / 100) * frameIntervalMs;
+      console.log(
+        `Running OBS app E2E ${label} recording for ${durationSeconds}s ` +
+          `(startPhase=${attempt.phasePercent.toFixed(1)}% stopPhase=${attempt.stopPhasePercent.toFixed(1)}%)...`,
+      );
       const attemptLogCheckpoint = createObsLogCheckpoint(portableConfig);
+      const attemptArtifactSnapshot = artifactSnapshot(artifactRoot);
       const attemptFailureWatch: AlphaRecorderFailureWatch = {
         portableConfig,
         artifactRoot,
         obsPid: obs.pid,
         checkpoint: attemptLogCheckpoint,
+        suppressFailure: args.expectedResult !== "normal",
       };
       resetOverloadMonitor(overload);
+      if (startPhaseDelayMs > 0) {
+        await delay(startPhaseDelayMs);
+      }
       await startRecordingWithRetry(socket, attemptFailureWatch);
-      if (args.allowOverload) {
-        await delayUnlessOverloaded(durationSeconds * 1000, { seen: false, firstLine: "" }, attemptFailureWatch);
-      } else {
-        await delayUnlessOverloaded(durationSeconds * 1000, overload, attemptFailureWatch);
+      await runRecordingSchedule(
+        socket,
+        durationSeconds * 1000 + stopPhaseDelayMs,
+        args,
+        overload,
+        attemptFailureWatch,
+      );
+      if (args.overloadPulseDelayMs > 0) {
+        await socket.request("SetInputSettings", {
+          inputName: "AlphaRecorderMovingAlpha",
+          inputSettings: { render_delay_ms: 0 },
+          overlay: true,
+        });
+      }
+      if (!args.allowOverload) {
         await stopRecordingAfterOverload(socket, overload);
-        throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps, false);
+        throwIfOverloaded(overload, artifactRoot, args.width, args.height, fpsValue(args), false);
       }
       throwIfAlphaRecorderFailureDetected(attemptFailureWatch);
       const stopResponse = await socket.request("StopRecord");
       await waitForRecordState(socket, false, stopWaitTimeoutSeconds(durationSeconds), attemptFailureWatch);
       const rgbPath = String(stopResponse?.outputPath ?? "");
+      let alphaArtifactPath = "";
+      const normalAlphaPath = rgbPath
+        ? alphaPathForRgb(rgbPath, expectedFinalizationFormat)
+        : "";
       if (rgbPath) {
-        await waitForAlphaOutputSettled(
+        alphaArtifactPath = await waitForExpectedAlphaResult(
           artifactRoot,
-          alphaPathForRgb(rgbPath, expectedFinalizationFormat),
+          normalAlphaPath,
+          args.expectedResult,
+          attemptArtifactSnapshot,
           stopWaitTimeoutSeconds(durationSeconds),
           attemptFailureWatch,
         );
       }
+      const actualResult: ResolvedExpectedResult =
+        args.expectedResult === "normal-or-sync-invalid"
+          ? alphaArtifactPath === normalAlphaPath
+            ? "normal"
+            : "sync-invalid"
+          : args.expectedResult;
       scanObsLogsForOverload(portableConfig, overload, attemptLogCheckpoint);
       const attemptOverloaded = overload.seen;
-      throwIfOverloaded(overload, artifactRoot, args.width, args.height, args.fps, args.allowOverload);
-      throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot, attemptLogCheckpoint);
-      recordedAttempts.push({ ...attempt, rgbPath, overloaded: attemptOverloaded });
+      throwIfOverloaded(overload, artifactRoot, args.width, args.height, fpsValue(args), args.allowOverload);
+      if (actualResult === "normal") {
+        throwIfAlphaRecorderLoggedError(portableConfig, artifactRoot, attemptLogCheckpoint);
+      }
+      const splitRgbPaths = args.splitAtMs >= 0
+        ? newRgbRecordingPaths(artifactRoot, attemptArtifactSnapshot)
+        : [];
+      const attemptRgbPaths = splitRgbPaths.length > 0 ? splitRgbPaths : [rgbPath];
+      for (const attemptRgbPath of attemptRgbPaths) {
+        const attemptAlphaPath =
+          actualResult === "normal" ||
+          actualResult === "split-published" ||
+          actualResult === "split-isolated"
+            ? alphaPathForRgb(attemptRgbPath, expectedFinalizationFormat)
+            : attemptRgbPath === rgbPath
+              ? alphaArtifactPath
+              : "";
+        if (actualResult === "normal") {
+          await waitForAlphaOutputSettled(
+            artifactRoot,
+            attemptAlphaPath,
+            stopWaitTimeoutSeconds(durationSeconds),
+            attemptFailureWatch,
+            args.expectedResult === "normal-or-sync-invalid",
+          );
+        }
+        recordedAttempts.push({
+          ...attempt,
+          rgbPath: attemptRgbPath,
+          alphaArtifactPath: isNonEmptyFile(attemptAlphaPath) ? attemptAlphaPath : "",
+          overloaded: attemptOverloaded,
+          actualResult,
+        });
+      }
     }
 
     await cleanupObs();
@@ -2477,6 +3327,49 @@ finalization_format=${args.finalizationFormat}
     for (const attempt of recordedAttempts) {
       const durationSeconds = attempt.durationSeconds;
       const label = attempt.kind === "sync" ? `sync ${attempt.attemptIndex}/${args.syncAttempts}` : "durability";
+      const ffprobe = findTool(stageBin, args.repoRoot, "ffprobe");
+      const observedMainReorderDepth = packetPresentationReorderDepth(ffprobe, attempt.rgbPath);
+      const observedMainPacketTiming = packetTimingSummary(ffprobe, attempt.rgbPath);
+      if (attempt.actualResult !== "normal") {
+        const splitLifecycleResult =
+          attempt.actualResult === "split-published" ||
+          attempt.actualResult === "split-isolated";
+        const syncVerification = splitLifecycleResult
+          ? undefined
+          : await verifyExpectedNonNormalOutput(
+              stageBin,
+              args.repoRoot,
+              attempt.rgbPath,
+              attempt.alphaArtifactPath,
+              args.width,
+              args.height,
+              fpsValue(args),
+            );
+        if (splitLifecycleResult) {
+          await verifyArtifactDecodes(
+            stageBin,
+            args.repoRoot,
+            attempt.rgbPath,
+            attempt.alphaArtifactPath,
+          );
+        }
+        attempts.push({
+          ...attempt,
+          alphaPath: attempt.alphaArtifactPath,
+          rgbProbe: undefined,
+          alphaProbe: undefined,
+          syncVerification,
+          observedMainReorderDepth,
+          observedMainPacketTiming,
+        });
+        console.log(
+          `  ok expected ${attempt.actualResult} ${label}: rgb=${basename(attempt.rgbPath)} ` +
+            `alphaArtifact=${attempt.alphaArtifactPath ? basename(attempt.alphaArtifactPath) : "<none>"} ` +
+            `contentOffset=${syncVerification?.bestContentOffset.offset ?? "n/a"} ` +
+            `mainReorderDepth=${observedMainReorderDepth}`,
+        );
+        continue;
+      }
       const outputs = await verifyRecordingOutputs(
         stageBin,
         args.repoRoot,
@@ -2487,25 +3380,66 @@ finalization_format=${args.finalizationFormat}
         args.rgbEncoder,
         args.width,
         args.height,
-        args.fps,
-        args.allowOverload && attempt.overloaded,
+        fpsValue(args),
+        (args.allowOverload && attempt.overloaded) ||
+          args.testFault === "replay-evidence-gap",
+        args.pauseAtMs >= 0,
         args.verifyNleTimeline,
+        args.strictAllFrames,
+        args.expectedResult === "normal-or-sync-invalid",
       );
-      attempts.push({ ...attempt, ...outputs });
+      attempts.push({
+        ...attempt,
+        ...outputs,
+        observedMainReorderDepth,
+        observedMainPacketTiming,
+      });
       console.log(
         `  ok ${label} ${durationSeconds}s: rgb=${outputs.syncVerification.rgbFrames} alpha=${outputs.syncVerification.alphaFrames} ` +
           `overloaded=${attempt.overloaded} ` +
           `frameCodeOffset=${outputs.syncVerification.bestFrameCodeOffset.offset} ` +
           `expectedFrameCodeOffset=${outputs.syncVerification.expectedFrameCodeOffset} ` +
           `mainReorderDepth=${outputs.syncVerification.mainReorderDepth} ` +
+          `mainPtsGaps=${outputs.syncVerification.mainPacketTiming.gapCount} ` +
           `alphaConstantPacketDuration=${outputs.syncVerification.alphaConstantPacketDuration ?? "n/a"} ` +
           `contentOffset=${outputs.syncVerification.bestContentOffset.offset} ` +
-          `mismatches=${outputs.syncVerification.frameCodeMismatches}/${outputs.syncVerification.maskBoundsMismatches}`,
+          `mismatches=${outputs.syncVerification.frameCodeMismatches}/${outputs.syncVerification.maskBoundsMismatches} ` +
+          `duplicates=${outputs.syncVerification.rgbConsecutiveDuplicateCodes}/${outputs.syncVerification.alphaConsecutiveDuplicateCodes}`,
       );
     }
 
     const lastAttempt = attempts[attempts.length - 1];
     const performanceTelemetry = collectAlphaRecorderPerformanceTelemetry(portableConfig);
+    const gpuReplayTelemetry = collectGpuReplayTelemetry(portableConfig);
+    const observedConditions = {
+      mainPtsGap: attempts.some((attempt) => attempt.observedMainPacketTiming.gapCount > 0),
+      packetReorder: attempts.some((attempt) => attempt.observedMainReorderDepth > 0),
+      replayUnderflow: gpuReplayTelemetry.some((entry) => entry.underflows > 0),
+      replayCatchup: gpuReplayTelemetry.some(
+        (entry) => entry.catchupSlots > 0 && entry.skippedStale > 0,
+      ),
+      overload: attempts.some((attempt) => attempt.overloaded),
+      tailRepeat: gpuReplayTelemetry.some((entry) => entry.repeatedSlots > 0),
+    };
+    const missingRequiredConditions: string[] = [];
+    if (args.requireMainPtsGap && !observedConditions.mainPtsGap) {
+      missingRequiredConditions.push("main PTS gap");
+    }
+    if (args.requirePacketReorder && !observedConditions.packetReorder) {
+      missingRequiredConditions.push("packet reorder");
+    }
+    if (args.requireReplayUnderflow && !observedConditions.replayUnderflow) {
+      missingRequiredConditions.push("replay underflow");
+    }
+    if (args.requireReplayCatchup && !observedConditions.replayCatchup) {
+      missingRequiredConditions.push("replay backlog catch-up");
+    }
+    if (args.requireOverload && !observedConditions.overload) {
+      missingRequiredConditions.push("OBS overload");
+    }
+    if (args.requireTailRepeat && !observedConditions.tailRepeat) {
+      missingRequiredConditions.push("tail repeat");
+    }
     const diagnosticLogs = copyAlphaRecorderDiagnosticLogs(portableConfig, artifactRoot);
     const performanceTelemetryPath = join(artifactRoot, "alpha-recorder-performance.json");
     const summaryPath = join(artifactRoot, "obs-app-summary.json");
@@ -2528,11 +3462,15 @@ finalization_format=${args.finalizationFormat}
           },
           width: args.width,
           height: args.height,
-          fps: args.fps,
+          fps: { num: args.fpsNum, den: args.fpsDen, value: fpsValue(args) },
           syncRecordSeconds: args.syncRecordSeconds,
           syncAttempts: args.syncAttempts,
           durabilityRecordSeconds: args.durabilityRecordSeconds,
           allowOverload: args.allowOverload,
+          strictAllFrames: args.strictAllFrames,
+          phaseSweepSteps: args.phaseSweepSteps,
+          observedConditions,
+          missingRequiredConditions,
           diagnosticLogs,
           attempts: attempts.map((attempt) => ({
             kind: attempt.kind,
@@ -2544,6 +3482,7 @@ finalization_format=${args.finalizationFormat}
             syncVerification: attempt.syncVerification,
           })),
           telemetry: performanceTelemetry,
+          gpuReplayTelemetry,
         },
         null,
         2,
@@ -2562,7 +3501,12 @@ finalization_format=${args.finalizationFormat}
           syncAttempts: args.syncAttempts,
           durabilityRecordSeconds: args.durabilityRecordSeconds,
           allowOverload: args.allowOverload,
+          strictAllFrames: args.strictAllFrames,
+          phaseSweepSteps: args.phaseSweepSteps,
+          observedConditions,
+          missingRequiredConditions,
           diagnosticLogs,
+          gpuReplayTelemetry,
           attempts,
           rgbPath: lastAttempt?.rgbPath,
           alphaPath: lastAttempt?.alphaPath,
@@ -2574,6 +3518,13 @@ finalization_format=${args.finalizationFormat}
         2,
       ),
     );
+
+    if (missingRequiredConditions.length > 0) {
+      throw new Error(
+        `OBS app E2E did not exercise required runtime conditions: ${missingRequiredConditions.join(", ")}. ` +
+          `Observed=${JSON.stringify(observedConditions)}. Artifacts: ${artifactRoot}`,
+      );
+    }
 
     console.log("OBS app E2E passed.");
     console.log(`  summary: ${summaryPath}`);

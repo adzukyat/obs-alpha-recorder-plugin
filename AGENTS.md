@@ -110,6 +110,18 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```
 
+Run synchronization regression tiers on Windows:
+
+```powershell
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_pr
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_nightly
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_release
+```
+
+The staged E2E harness may set `ALPHA_RECORDER_E2E_TEST=1` together with a
+specific fault name. Never make a fault respond to its fault variable without
+that gate, and do not expose test faults as user settings.
+
 Package the built user plugin for release:
 
 ```sh

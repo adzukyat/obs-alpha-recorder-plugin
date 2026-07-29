@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 
 #include <obs-module.h>
 
@@ -24,6 +27,7 @@ namespace
         std::uint32_t box_size = 96U;
         std::uint32_t step = 17U;
         std::uint64_t start_time = 0U;
+        std::atomic<std::uint32_t> render_delay_ms{0U};
         vec4 color{};
     };
 
@@ -34,6 +38,10 @@ namespace
         source->height = static_cast<std::uint32_t>(obs_data_get_int(settings, "height"));
         source->box_size = static_cast<std::uint32_t>(obs_data_get_int(settings, "box_size"));
         source->step = static_cast<std::uint32_t>(obs_data_get_int(settings, "step"));
+        source->render_delay_ms.store(
+            static_cast<std::uint32_t>(
+                std::max<std::int64_t>(0, obs_data_get_int(settings, "render_delay_ms"))),
+            std::memory_order_relaxed);
 
         if (source->width == 0U)
         {
@@ -75,6 +83,7 @@ namespace
         obs_data_set_default_int(settings, "box_size", 96);
         obs_data_set_default_int(settings, "step", 17);
         obs_data_set_default_int(settings, "color", 0xFF00FFFF);
+        obs_data_set_default_int(settings, "render_delay_ms", 0);
     }
 
     std::uint32_t moving_alpha_width(void *data)
@@ -90,6 +99,12 @@ namespace
     void moving_alpha_render(void *data, gs_effect_t *)
     {
         auto *source = static_cast<MovingAlphaSource *>(data);
+        const std::uint32_t render_delay_ms =
+            source->render_delay_ms.load(std::memory_order_relaxed);
+        if (render_delay_ms > 0U)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(render_delay_ms));
+        }
         const std::uint32_t box_size = std::min(source->box_size, std::min(source->width, source->height));
         if (box_size == 0U)
         {

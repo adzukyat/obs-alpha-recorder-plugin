@@ -506,6 +506,42 @@ int main()
         }
     }
 
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase = alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.main_packets = {
+            main_packet(0, 1000),
+            main_packet(1001, 2000),
+            main_packet(2002, 5000),
+            main_packet(3003, 6000),
+        };
+        input.alpha_packets = {
+            alpha_packet(0, 1000, 0),
+            alpha_packet(1001, 2000, 1),
+            alpha_packet(2002, 5000, 4),
+            alpha_packet(3003, 6000, 5),
+        };
+        input.alpha_renders = {
+            render(0, 1000, 0),
+            render(1, 2000, 1),
+            render(2, 3000, 0, false),
+            render(3, 4000, 0, false),
+            render(4, 5000, 4),
+            render(5, 6000, 5),
+        };
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult result =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (result.error != alpha_recorder::obs::TimelineSolveError::None ||
+            result.solution.range.media_time != 0 ||
+            result.solution.range.duration != 4004)
+        {
+            std::cerr << "paused render generations were not skipped without creating a PTS hole\n";
+            return 19;
+        }
+    }
+
     std::cout << "gpu texture timeline ledger test passed\n";
     return 0;
 }
