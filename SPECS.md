@@ -309,7 +309,11 @@ and the platform's OBS runtime/plugin/data layout.
 The OBS source checkout is tracked as a git submodule at
 `deps/obs/obs-studio`. When bootstrapped from source, the staged developer tree
 lives under `deps/obs/obs-build/rundir/RelWithDebInfo` alongside the pinned
-source and build trees.
+source and build trees. Release 0.1.3 pins OBS Studio 32.2.1 and its FFmpeg
+8.1.2 ABI. Because the plugin calls libavcodec, libavformat, and libavutil
+directly, release artifacts must be rebuilt whenever OBS changes the bundled
+FFmpeg ABI; an OBS 32.1.x build imports FFmpeg 7 DLL/SONAME versions and is not
+a valid OBS 32.2.x artifact.
 
 Preferred bootstrap:
 
@@ -403,7 +407,9 @@ settings dialog. The release workflow also rejects a signed release tag when its
 
 The release artifacts contain the user plugin package layout plus `README.md`,
 `LICENSE`, and `VERSION`; they do not include the staged OBS runtime or the
-test-only `alpha_recorder_obs_app_e2e_source` module.
+test-only `alpha_recorder_obs_app_e2e_source` module. Each artifact is compatible
+with the pinned OBS release family used by that release build; it does not
+bundle a private FFmpeg runtime.
 
 - Windows: `alpha-recorder-vX.X.X-windows-x64.zip`.
 - macOS: `alpha-recorder-vX.X.X-macos-arm64.zip`.

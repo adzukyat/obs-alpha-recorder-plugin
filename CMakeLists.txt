@@ -16,11 +16,28 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/cmake/finders")
 
 if(WIN32 OR APPLE)
-    file(GLOB _alpha_recorder_obs_deps_roots LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/.deps/obs-deps-*")
-    list(SORT _alpha_recorder_obs_deps_roots)
+    set(_alpha_recorder_obs_build_cache "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-build/CMakeCache.txt")
+    set(_alpha_recorder_obs_deps_roots)
+    if(EXISTS "${_alpha_recorder_obs_build_cache}")
+        file(STRINGS "${_alpha_recorder_obs_build_cache}" _alpha_recorder_obs_prefix_line
+            REGEX "^CMAKE_PREFIX_PATH:PATH=" LIMIT_COUNT 1)
+        string(REGEX REPLACE "^CMAKE_PREFIX_PATH:PATH=" "" _alpha_recorder_obs_prefixes
+            "${_alpha_recorder_obs_prefix_line}")
+        foreach(_alpha_recorder_obs_prefix IN LISTS _alpha_recorder_obs_prefixes)
+            if(IS_DIRECTORY "${_alpha_recorder_obs_prefix}")
+                list(APPEND _alpha_recorder_obs_deps_roots "${_alpha_recorder_obs_prefix}")
+            endif()
+        endforeach()
+    endif()
+
+    if(NOT _alpha_recorder_obs_deps_roots)
+        file(GLOB _alpha_recorder_obs_deps_roots LIST_DIRECTORIES true
+            "${CMAKE_CURRENT_SOURCE_DIR}/deps/obs/obs-studio/.deps/obs-deps-[0-9]*")
+        list(SORT _alpha_recorder_obs_deps_roots COMPARE NATURAL ORDER DESCENDING)
+    endif()
+
     if(_alpha_recorder_obs_deps_roots)
-        list(POP_FRONT _alpha_recorder_obs_deps_roots _alpha_recorder_obs_deps_root)
-        list(APPEND CMAKE_PREFIX_PATH "${_alpha_recorder_obs_deps_root}")
+        list(APPEND CMAKE_PREFIX_PATH ${_alpha_recorder_obs_deps_roots})
     endif()
 endif()
 

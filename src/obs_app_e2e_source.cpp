@@ -7,7 +7,6 @@
 #include <graphics/vec4.h>
 
 OBS_DECLARE_MODULE()
-OBS_MODULE_USE_DEFAULT_LOCALE("alpha_recorder", "en-US")
 
 namespace
 {

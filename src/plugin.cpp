@@ -5,7 +5,6 @@
 #include "gpu_texture_recording_output.hpp"
 
 OBS_DECLARE_MODULE()
-OBS_MODULE_USE_DEFAULT_LOCALE("alpha_recorder", "en-US")
 
 namespace alpha_recorder::obs
 {

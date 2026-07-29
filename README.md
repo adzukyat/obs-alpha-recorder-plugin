@@ -33,6 +33,10 @@ Use OBS the way you already do:
 
 ## :rocket: Quick Start
 
+Release packages are built and verified for OBS Studio 32.2.x. Alpha Recorder
+links to OBS's bundled FFmpeg libraries, so use a package built for the OBS
+release you run; packages built for OBS 32.1.x do not load on OBS 32.2.x.
+
 1. Download the package for your platform from
    [Releases](https://github.com/adzukyat/obs-alpha-recorder-plugin/releases).
 2. Extract the package.
@@ -70,12 +74,14 @@ current machine.
 | HEVC option is missing          | The matching OBS texture HEVC encoder is not available on this machine       |
 | No alpha file appears           | "Enabled" is turned off in Alpha Recorder settings                           |
 | Alpha becomes black with Spout2 | Change "Composite Mode" from Opaque to Default in the Spout2 source settings |
+| Plugin fails to load after OBS update | Install the Alpha Recorder package built for that OBS release           |
 
 ## :hammer_and_wrench: Build
 
 Alpha Recorder is a C++ OBS plugin and includes OBS as a submodule. Building
 requires CMake and an OBS build environment. The OBS app E2E target also
-requires the Bun runtime.
+requires the Bun runtime. The pinned source and dependency runtime are OBS
+32.2.1, including its FFmpeg 8.1.2 ABI.
 
 ### 1. Initialize OBS
 

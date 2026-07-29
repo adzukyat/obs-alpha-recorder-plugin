@@ -31,6 +31,11 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 
 ## クイックスタート
 
+リリースパッケージは OBS Studio 32.2.x 向けにビルド・検証しています。Alpha
+Recorder は OBS 同梱の FFmpeg ライブラリにリンクするため、使用中の OBS
+リリース向けにビルドされたパッケージを使用してください。OBS 32.1.x
+向けのパッケージは OBS 32.2.x では読み込めません。
+
 1. [Releases](https://github.com/adzukyat/obs-alpha-recorder-plugin/releases)
    から最新版をダウンロードして解凍します。
 2. OBSが起動している場合はいったん終了してください。
@@ -63,11 +68,13 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 | HEVCオプションが表示されない       | 対応するOBSテクスチャHEVCエンコーダーが利用できない                 |
 | マスクが出力されない               | Alpha Recorderの設定の「Enabled」がオフになっている                 |
 | Spout2でアルファが黒くなってしまう | Spout2のソース設定で「Composite Mode」をOpaqueからDefaultに変更する |
+| OBS更新後にプラグインを読み込めない | そのOBSリリース向けのAlpha Recorderパッケージをインストールする     |
 
 ## ビルド
 
 Alpha
-RecorderはC++で書かれたOBSプラグインで、サブモジュールにOBSを含みます。ビルドにはCMakeとOBSのビルド環境が必要です。また、アプリケーションE2Eテストを実行するにはBunランタイムが必要になります。
+RecorderはC++で書かれたOBSプラグインで、サブモジュールにOBSを含みます。ビルドにはCMakeとOBSのビルド環境が必要です。また、アプリケーションE2Eテストを実行するにはBunランタイムが必要になります。固定しているソースと依存ランタイムはOBS
+32.2.1で、FFmpeg 8.1.2 ABIを含みます。
 
 ### 1. サブモジュールの初期化
 

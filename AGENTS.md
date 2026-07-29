@@ -28,6 +28,10 @@ Production implementation files live directly under `src/`; do not recreate a
 module is test-only and contains only the moving-alpha OBS source used by the
 real app E2E harness.
 
+The pinned release/developer runtime is OBS Studio 32.2.1 with its FFmpeg 8.1.2
+ABI. Alpha Recorder links libavcodec, libavformat, and libavutil directly, so an
+OBS update that changes their ABI requires rebuilding the release artifacts.
+
 ## User-Facing Contract
 
 - Users start and stop recording with OBS's normal controls.
@@ -53,6 +57,8 @@ real app E2E harness.
 - Preserve the explicit NVENC and AMF split in settings, target names, and docs.
 - An explicit `OBS_ROOT` must override the generated local OBS root. Never add
   Windows/macOS OBS `.deps` directories to Linux/WSL dependency discovery.
+- On Windows and macOS, resolve OBS dependencies from the prefix paths recorded
+  by the pinned OBS build. Do not select an older retained `obs-deps-*` tree.
 - For sync changes, preserve the alignment contract in `SPECS.md`: raw-video
   cadence is authoritative for the CPU path; Program generation plus packet
   timing is authoritative for the GPU texture path; and the app E2E verifier
