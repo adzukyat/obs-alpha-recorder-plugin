@@ -67,7 +67,31 @@ namespace
     using alpha_recorder::obs::timestamp_span_ms;
 
     constexpr std::uint32_t kGpuTextureDeactivateTimeoutMs = 10000U;
-    constexpr std::uint32_t kGpuTextureTailCoverageTimeoutMs = 1000U;
+    constexpr std::size_t kMainPacketAdmissionHold = 16U;
+    constexpr std::size_t kGpuTextureTailEncoderDrainFrames = 16U;
+
+    std::uint32_t gpu_texture_tail_coverage_timeout_ms(
+        std::uint32_t fps_num,
+        std::uint32_t fps_den) noexcept
+    {
+        if (fps_num == 0U || fps_den == 0U)
+        {
+            return 3000U;
+        }
+
+        const std::uint64_t frame_budget =
+            kMainPacketAdmissionHold * 2U +
+            kGpuTextureTailEncoderDrainFrames;
+        const std::uint64_t numerator =
+            frame_budget * 1000U * fps_den;
+        const std::uint64_t cadence_budget_ms =
+            (numerator + fps_num - 1U) / fps_num;
+        return static_cast<std::uint32_t>(
+            std::clamp<std::uint64_t>(
+                cadence_budget_ms + 500U,
+                1500U,
+                5000U));
+    }
 
     std::filesystem::path path_from_utf8(const char *text)
     {
@@ -486,7 +510,8 @@ namespace
     obs_data_t *make_gpu_texture_output_settings(const std::filesystem::path &mask_path,
                                                  const obs_video_info &video_info,
                                                  const alpha_recorder::obs::Settings &settings,
-                                                 bool main_texture_encoded)
+                                                 bool main_texture_encoded,
+                                                 bool repeat_missing_prefix)
     {
         obs_data_t *data = obs_data_create();
         const std::string mask_path_utf8 = path_to_utf8(mask_path);
@@ -523,6 +548,7 @@ namespace
         obs_data_set_int(data, alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key().data(),
                          settings.hevc_encoder.nvenc_gpu_index);
         obs_data_set_bool(data, "main_texture_encoded", main_texture_encoded);
+        obs_data_set_bool(data, "repeat_missing_prefix", repeat_missing_prefix);
         return data;
     }
 
@@ -701,6 +727,7 @@ namespace
         void set_recording_paused(bool paused)
         {
             obs_output_t *gpu_texture_output = nullptr;
+            std::uint64_t main_pause_offset_ns = 0U;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!session_active_)
@@ -713,6 +740,13 @@ namespace
                 if (gpu_texture_path_ && gpu_texture_output_ != nullptr)
                 {
                     gpu_texture_output = obs_output_get_ref(gpu_texture_output_);
+                    obs_encoder_t *main_encoder =
+                        recording_output_ == nullptr
+                            ? nullptr
+                            : obs_output_get_video_encoder(
+                                  recording_output_);
+                    main_pause_offset_ns =
+                        obs_encoder_get_pause_offset(main_encoder);
                 }
             }
 
@@ -721,7 +755,10 @@ namespace
                 std::string pause_error;
                 const bool changed =
                     alpha_recorder::obs::gpu_texture_recording_output_set_paused(
-                        gpu_texture_output, paused, &pause_error);
+                        gpu_texture_output,
+                        paused,
+                        main_pause_offset_ns,
+                        &pause_error);
                 obs_output_release(gpu_texture_output);
                 if (!changed)
                 {
@@ -779,7 +816,12 @@ namespace
             recording_path_.clear();
             next_sequence_ = 0;
             gpu_texture_segment_index_ = 0U;
+            gpu_split_boundary_packets_.clear();
+            split_gpu_segment_finalization_in_progress_ = false;
+            main_video_packet_count_known_ = false;
+            main_video_packet_count_ = 0U;
             reset_gpu_texture_timing_locked();
+            cpu_main_packet_admission_.reset();
             alignment_engine_.reset_all();
             raw_video_cadence_.reset();
             live_telemetry_.reset();
@@ -1045,7 +1087,11 @@ namespace
             }
 
             obs_data_t *output_settings = make_gpu_texture_output_settings(
-                mask_path, video_info, settings_, recording_texture_encoded_);
+                mask_path,
+                video_info,
+                settings_,
+                recording_texture_encoded_,
+                gpu_texture_segment_index_ > 0U);
             gpu_texture_output_ = obs_output_create(alpha_recorder::obs::gpu_texture_recording_output_id(),
                                                     "Alpha Recorder GPU Texture Recording",
                                                     output_settings,
@@ -1118,6 +1164,257 @@ namespace
             return true;
         }
 
+        void refresh_gpu_main_packet_summary_locked() noexcept
+        {
+            gpu_main_packet_count_ =
+                static_cast<std::uint64_t>(gpu_main_packets_.size());
+            if (gpu_main_packets_.empty())
+            {
+                gpu_main_first_packet_cts_ = 0U;
+                gpu_main_last_packet_cts_ = 0U;
+                gpu_main_first_packet_pts_ = 0;
+                gpu_main_last_packet_pts_ = 0;
+                return;
+            }
+
+            gpu_main_first_packet_cts_ =
+                gpu_main_packets_.front().input_cts;
+            gpu_main_last_packet_cts_ =
+                gpu_main_packets_.back().input_cts;
+            gpu_main_first_packet_pts_ = gpu_main_packets_.front().pts;
+            gpu_main_last_packet_pts_ = gpu_main_packets_.back().pts;
+        }
+
+        VideoPacketCountProbe current_main_video_packet_count_locked(
+            std::chrono::milliseconds retry_timeout =
+                std::chrono::milliseconds{0})
+        {
+            if (main_video_packet_count_known_)
+            {
+                VideoPacketCountProbe result{};
+                result.ok = true;
+                result.packet_count = main_video_packet_count_;
+                return result;
+            }
+
+            const auto deadline =
+                std::chrono::steady_clock::now() + retry_timeout;
+            std::uint32_t attempts = 0U;
+            VideoPacketCountProbe result{};
+            do
+            {
+                ++attempts;
+                result = probe_video_packet_count(recording_path_);
+                if (result.ok ||
+                    std::chrono::steady_clock::now() >= deadline)
+                {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            } while (true);
+            if (result.ok)
+            {
+                main_video_packet_count_ = result.packet_count;
+                main_video_packet_count_known_ = true;
+                if (attempts > 1U)
+                {
+                    blog(LOG_INFO,
+                         "[alpha_recorder] written main recording became readable after split finalization wait: path=\"%s\" attempts=%u packets=%llu",
+                         recording_path_.generic_u8string().c_str(),
+                         attempts,
+                         static_cast<unsigned long long>(
+                             result.packet_count));
+                }
+            }
+            return result;
+        }
+
+        bool reconcile_gpu_main_packet_ledger_to_recording_file_locked(
+            std::string &sync_error)
+        {
+            if (recording_path_.empty() || gpu_main_packets_.empty())
+            {
+                return true;
+            }
+
+            const VideoPacketCountProbe probe =
+                current_main_video_packet_count_locked();
+            if (!probe.ok)
+            {
+                sync_error =
+                    "Alpha Recorder GPU texture timeline could not be proven: "
+                    "MissingMainPacketTiming (could not inspect the written "
+                    "main video: " +
+                    probe.error + ")";
+                blog(LOG_WARNING,
+                     "[alpha_recorder] could not probe the written main recording before GPU timeline solve: path=\"%s\" reason=\"%s\"",
+                     recording_path_.generic_u8string().c_str(),
+                     probe.error.c_str());
+                return false;
+            }
+
+            const alpha_recorder::obs::MainPacketLedgerReconcileResult result =
+                alpha_recorder::obs::
+                    reconcile_main_packet_ledger_to_written_count(
+                        gpu_main_packets_, probe.packet_count);
+            if (!result.ok)
+            {
+                sync_error =
+                    "Alpha Recorder GPU texture timeline could not be proven: "
+                    "MissingMainPacketTiming (written main video packets=" +
+                    std::to_string(result.written_packet_count) +
+                    ", callback timing packets=" +
+                    std::to_string(result.callback_packet_count) + ")";
+                blog(LOG_WARNING,
+                     "[alpha_recorder] written main recording has video packets without callback timing evidence: path=\"%s\" main_video_packets=%llu main_callback_packets=%llu",
+                     recording_path_.generic_u8string().c_str(),
+                     static_cast<unsigned long long>(
+                         result.written_packet_count),
+                     static_cast<unsigned long long>(
+                         result.callback_packet_count));
+                return false;
+            }
+
+            std::vector<std::int64_t> reconciled_pts{};
+            reconciled_pts.reserve(gpu_main_packets_.size());
+            for (const alpha_recorder::obs::GpuTexturePacketRecord &packet :
+                 gpu_main_packets_)
+            {
+                reconciled_pts.push_back(packet.pts);
+            }
+            std::sort(reconciled_pts.begin(), reconciled_pts.end());
+            const std::size_t unique_pts =
+                static_cast<std::size_t>(
+                    std::distance(
+                        reconciled_pts.begin(),
+                        std::unique(reconciled_pts.begin(),
+                                    reconciled_pts.end())));
+            const std::size_t duplicate_pts =
+                reconciled_pts.size() - unique_pts;
+            refresh_gpu_main_packet_summary_locked();
+            if (split_gpu_segment_finalization_in_progress_ &&
+                !result.removed_unwritten_suffix.empty())
+            {
+                gpu_split_boundary_packets_ =
+                    result.removed_unwritten_suffix;
+                blog(LOG_INFO,
+                     "[alpha_recorder] retained split-boundary main packet timing for the next segment: packets=%zu first_pts=%lld last_pts=%lld",
+                     gpu_split_boundary_packets_.size(),
+                     static_cast<long long>(
+                         gpu_split_boundary_packets_.front().pts),
+                     static_cast<long long>(
+                         gpu_split_boundary_packets_.back().pts));
+            }
+            if (result.removed_unwritten_suffix_packets == 0U)
+            {
+                return true;
+            }
+
+            blog(LOG_INFO,
+                 "[alpha_recorder] reconciled GPU main packet timing to the written recording: path=\"%s\" main_video_packets=%llu main_callback_packets=%llu removed_unwritten_suffix=%llu main_unique_pts=%zu main_duplicate_pts=%zu",
+                 recording_path_.generic_u8string().c_str(),
+                 static_cast<unsigned long long>(result.written_packet_count),
+                 static_cast<unsigned long long>(result.callback_packet_count),
+                 static_cast<unsigned long long>(
+                     result.removed_unwritten_suffix_packets),
+                 unique_pts,
+                 duplicate_pts);
+            if (settings_.diagnostic_logging)
+            {
+                alpha_recorder::obs::append_diagnostic_log_line(
+                    "Alpha Recorder reconciled GPU main packet timing to the written recording: path=\"" +
+                    recording_path_.generic_u8string() +
+                    "\" main_video_packets=\"" +
+                    std::to_string(result.written_packet_count) +
+                    "\" main_callback_packets=\"" +
+                    std::to_string(result.callback_packet_count) +
+                    "\" removed_unwritten_suffix=\"" +
+                    std::to_string(
+                        result.removed_unwritten_suffix_packets) +
+                    "\"");
+            }
+            return true;
+        }
+
+        bool commit_reconciled_gpu_main_replay_tail_locked(
+            std::string &sync_error)
+        {
+            if (gpu_texture_output_ == nullptr || gpu_main_packets_.empty())
+            {
+                return true;
+            }
+
+            if (gpu_main_replay_queued_callback_count_ >
+                gpu_main_packets_.size())
+            {
+                sync_error =
+                    "Alpha Recorder observed more uncommitted main callbacks than the replay admission window can reconcile.";
+                return false;
+            }
+
+            while (gpu_main_replay_queued_callback_count_ <
+                   gpu_main_packets_.size())
+            {
+                const bool packet_completes_input =
+                    gpu_main_replay_queued_callback_count_ + 1U ==
+                    gpu_main_packets_.size();
+                const alpha_recorder::obs::GpuTexturePacketRecord &packet =
+                    gpu_main_packets_[
+                        gpu_main_replay_queued_callback_count_];
+
+                bool replay_ready = false;
+                bool packet_queued = false;
+                if (gpu_texture_delayed_replay_started_)
+                {
+                    replay_ready = alpha_recorder::obs::
+                        gpu_texture_recording_output_queue_main_packet_replay(
+                            gpu_texture_output_,
+                            packet.pts,
+                            packet.input_cts,
+                            std::numeric_limits<std::int64_t>::max(),
+                            true,
+                            packet_completes_input,
+                            recording_texture_encoded_,
+                            &sync_error);
+                    packet_queued = replay_ready;
+                }
+                else
+                {
+                    replay_ready = alpha_recorder::obs::
+                    gpu_texture_recording_output_begin_delayed_replay(
+                        gpu_texture_output_,
+                        packet.pts,
+                        packet.input_cts,
+                        std::numeric_limits<std::int64_t>::max(),
+                        true,
+                        packet_completes_input,
+                        recording_texture_encoded_,
+                        &sync_error,
+                        &packet_queued);
+                    if (replay_ready)
+                    {
+                        gpu_texture_delayed_replay_started_ = true;
+                    }
+                }
+
+                if (!packet_queued)
+                {
+                    return false;
+                }
+                ++gpu_main_replay_queued_callback_count_;
+                if (!replay_ready && packet_completes_input)
+                {
+                    return false;
+                }
+                if (!replay_ready)
+                {
+                    sync_error.clear();
+                }
+            }
+
+            return true;
+        }
+
         void clamp_gpu_texture_visible_range_to_recording_file_locked(
             alpha_recorder::obs::AlphaVisiblePacketRange &visible_range)
         {
@@ -1163,7 +1460,8 @@ namespace
                 return;
             }
 
-            const VideoPacketCountProbe probe = probe_video_packet_count(recording_path_);
+            const VideoPacketCountProbe probe =
+                current_main_video_packet_count_locked();
             if (!probe.ok)
             {
                 blog(LOG_WARNING,
@@ -1296,26 +1594,88 @@ namespace
             const bool injected_fault_applies =
                 alpha_recorder::obs::e2e_test_fault_applies_to_segment(
                     gpu_texture_segment_index_);
+            if (injected_fault_applies &&
+                alpha_recorder::obs::e2e_test_fault_enabled(
+                    "unwritten-main-tail") &&
+                !gpu_main_packets_.empty())
+            {
+                gpu_main_packets_.push_back(gpu_main_packets_.back());
+                refresh_gpu_main_packet_summary_locked();
+                blog(LOG_INFO,
+                     "[alpha_recorder] E2E injected an unwritten main packet callback at the stop boundary");
+            }
+            std::string main_packet_ledger_error;
+            bool main_packet_ledger_reconciled =
+                reconcile_gpu_main_packet_ledger_to_recording_file_locked(
+                    main_packet_ledger_error);
+            if (main_packet_ledger_reconciled &&
+                !commit_reconciled_gpu_main_replay_tail_locked(
+                    main_packet_ledger_error))
+            {
+                main_packet_ledger_reconciled = false;
+            }
 
             // Encoder drain cannot create replay frames that have not reached the
             // auxiliary video mix yet. Keep the alpha output live briefly so its
             // queued main-packet generations can catch the main recording tail.
-            const auto tail_coverage_deadline =
-                std::chrono::steady_clock::now() + std::chrono::milliseconds(kGpuTextureTailCoverageTimeoutMs);
-            do
+            if (main_packet_ledger_reconciled)
             {
-                range_error.clear();
-                if (alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
-                        gpu_texture_output_,
-                        gpu_main_packets_,
-                        recording_texture_encoded_,
-                        visible_range,
-                        &range_error))
+                const auto tail_coverage_deadline =
+                    std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(
+                        gpu_texture_tail_coverage_timeout_ms(
+                            video_info_.fps_num,
+                            video_info_.fps_den));
+                do
                 {
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(25));
-            } while (std::chrono::steady_clock::now() < tail_coverage_deadline);
+                    range_error.clear();
+                    if (alpha_recorder::obs::
+                            gpu_texture_recording_output_compute_visible_range(
+                                gpu_texture_output_,
+                                gpu_main_packets_,
+                                recording_texture_encoded_,
+                                visible_range,
+                                &range_error))
+                    {
+                        break;
+                    }
+                    const alpha_recorder::obs::
+                        GpuTextureRecordingOutputStats replay_stats =
+                            alpha_recorder::obs::
+                                gpu_texture_recording_output_stats(
+                                    gpu_texture_output_);
+                    const std::uint64_t expected_replay_entries =
+                        static_cast<std::uint64_t>(
+                            gpu_main_packets_.size());
+                    if (range_error.find("MissingPrefixContent") !=
+                            std::string::npos &&
+                        replay_stats.replay_prefix_repeated_packets > 0U &&
+                        replay_stats.replay_queue_pending == 0U &&
+                        replay_stats.replay_consumed_entries >=
+                            expected_replay_entries &&
+                        replay_stats.packet_count >=
+                            static_cast<std::uint64_t>(
+                                gpu_main_packets_.size()))
+                    {
+                        blog(LOG_INFO,
+                             "[alpha_recorder] split prefix is unrecoverable but all replay entries reached the alpha encoder; ending tail wait: main_packets=%zu replay_consumed=%llu prefix_repeated=%llu",
+                             gpu_main_packets_.size(),
+                             static_cast<unsigned long long>(
+                                 replay_stats.replay_consumed_entries),
+                             static_cast<unsigned long long>(
+                                 replay_stats
+                                     .replay_prefix_repeated_packets));
+                        break;
+                    }
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(25));
+                } while (std::chrono::steady_clock::now() <
+                         tail_coverage_deadline);
+            }
+            else
+            {
+                range_error = main_packet_ledger_error;
+            }
 
             alpha_recorder::obs::gpu_texture_recording_output_request_stop(gpu_texture_output_);
             if (!alpha_recorder::obs::gpu_texture_recording_output_wait_stop_boundary(
@@ -1347,21 +1707,68 @@ namespace
             bool visible_range_certified = false;
             if (!finalize_failed)
             {
-                range_error.clear();
-                if (alpha_recorder::obs::gpu_texture_recording_output_compute_visible_range(
-                        gpu_texture_output_,
-                        gpu_main_packets_,
-                        recording_texture_encoded_,
-                        visible_range,
-                        &range_error))
+                if (main_packet_ledger_reconciled)
                 {
-                    visible_range_certified = true;
+                    range_error.clear();
+                    if (alpha_recorder::obs::
+                            gpu_texture_recording_output_compute_visible_range(
+                                gpu_texture_output_,
+                                gpu_main_packets_,
+                                recording_texture_encoded_,
+                                visible_range,
+                                &range_error))
+                    {
+                        visible_range_certified = true;
+                    }
+                }
+                else
+                {
+                    range_error = main_packet_ledger_error;
                 }
             }
             const alpha_recorder::obs::GpuTextureRecordingOutputStats
                 proof_stats =
                     alpha_recorder::obs::gpu_texture_recording_output_stats(
                         gpu_texture_output_);
+            if (!finalize_failed && !visible_range_certified &&
+                proof_stats.replay_prefix_repeated_packets > 0U &&
+                !gpu_main_packets_.empty())
+            {
+                const std::int64_t alpha_pts_step =
+                    static_cast<std::int64_t>(
+                        std::max<std::uint32_t>(
+                            1U, video_info_.fps_den));
+                const std::uint64_t available_frames =
+                    proof_stats.packet_count;
+                const std::uint64_t requested_frames =
+                    static_cast<std::uint64_t>(
+                        gpu_main_packets_.size());
+                const std::uint64_t best_effort_frames =
+                    std::min(available_frames, requested_frames);
+                if (best_effort_frames > 0U &&
+                    best_effort_frames <=
+                        static_cast<std::uint64_t>(
+                            std::numeric_limits<std::int64_t>::max() /
+                            alpha_pts_step))
+                {
+                    visible_range.media_time = 0;
+                    visible_range.duration =
+                        static_cast<std::int64_t>(
+                            best_effort_frames) *
+                        alpha_pts_step;
+                    blog(LOG_INFO,
+                         "[alpha_recorder] constructed split-prefix best-effort GPU texture range from the written main frame count: media_time=0 duration=%lld main_frames=%llu available_alpha_frames=%llu prefix_repeated=%llu",
+                         static_cast<long long>(
+                             visible_range.duration),
+                         static_cast<unsigned long long>(
+                             requested_frames),
+                         static_cast<unsigned long long>(
+                             available_frames),
+                         static_cast<unsigned long long>(
+                             proof_stats
+                                 .replay_prefix_repeated_packets));
+                }
+            }
             if (!finalize_failed &&
                 visible_range_certified &&
                 proof_stats.lagged_frames_during_capture > 0U)
@@ -1706,7 +2113,7 @@ namespace
             char buffer[2048];
             (void)std::snprintf(
                 buffer, sizeof(buffer),
-                "Alpha Recorder GPU texture telemetry: path=\"%s\" packets=%llu keyframes=%llu packet_bytes=%s muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%s finalized=%s first_pts=%lld last_pts=%lld lagged_frames=%llu visible_range={media_time=%lld duration=%lld} main_packets={count=%llu first_cts=%llu last_cts=%llu} replay={consumed=%llu catchup_slots=%llu skipped_stale=%llu underflows=%llu emitted=%llu repeated_slots=%llu generation_slots=%llu ambiguous_slots=%llu missing_textures=%llu}",
+                "Alpha Recorder GPU texture telemetry: path=\"%s\" packets=%llu keyframes=%llu packet_bytes=%s muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%s finalized=%s first_pts=%lld last_pts=%lld lagged_frames=%llu visible_range={media_time=%lld duration=%lld} main_packets={count=%llu first_cts=%llu last_cts=%llu} replay={queued=%llu consumed=%llu catchup_slots=%llu compressed_gap_slots=%llu skipped_stale=%llu underflows=%llu emitted=%llu repeated_slots=%llu prefix_repeated=%llu queue_pending=%llu generation_slots=%llu ambiguous_slots=%llu missing_textures=%llu}",
                 mask_path.generic_u8string().c_str(),
                 static_cast<unsigned long long>(gpu_stats.packet_count),
                 static_cast<unsigned long long>(gpu_stats.keyframe_count),
@@ -1724,12 +2131,17 @@ namespace
                 static_cast<unsigned long long>(gpu_main_packet_count_),
                 static_cast<unsigned long long>(gpu_main_first_packet_cts_),
                 static_cast<unsigned long long>(gpu_main_last_packet_cts_),
+                static_cast<unsigned long long>(gpu_stats.replay_queued_entries),
                 static_cast<unsigned long long>(gpu_stats.replay_consumed_entries),
                 static_cast<unsigned long long>(gpu_stats.replay_catchup_slots),
+                static_cast<unsigned long long>(gpu_stats.replay_compressed_gap_slots),
                 static_cast<unsigned long long>(gpu_stats.replay_skipped_stale_entries),
                 static_cast<unsigned long long>(gpu_stats.replay_queue_underflows),
                 static_cast<unsigned long long>(gpu_stats.replay_emitted_frames),
                 static_cast<unsigned long long>(gpu_stats.replay_repeated_slots),
+                static_cast<unsigned long long>(
+                    gpu_stats.replay_prefix_repeated_packets),
+                static_cast<unsigned long long>(gpu_stats.replay_queue_pending),
                 static_cast<unsigned long long>(gpu_stats.replay_generation_slots),
                 static_cast<unsigned long long>(gpu_stats.replay_ambiguous_slots),
                 static_cast<unsigned long long>(gpu_stats.replay_missing_textures));
@@ -1967,6 +2379,7 @@ namespace
             gpu_main_first_packet_pts_ = 0;
             gpu_main_last_packet_pts_ = 0;
             gpu_main_packets_.clear();
+            gpu_main_replay_queued_callback_count_ = 0U;
             gpu_texture_output_start_video_time_ = 0U;
             gpu_recording_started_video_time_ = 0U;
             gpu_texture_delayed_replay_started_ = false;
@@ -2056,6 +2469,123 @@ namespace
         {
             alignment_engine_.queue_packet(pts, cts, fer, ferc, texture_encoded, live_telemetry_);
             notify_alignment_worker_locked();
+        }
+
+        void queue_cpu_main_packet_timing_locked(
+            const alpha_recorder::obs::MainPacketTiming &packet)
+        {
+            queue_alpha_for_packet_locked(packet.pts,
+                                          packet.cts,
+                                          packet.fer,
+                                          packet.ferc,
+                                          packet.texture_encoded);
+        }
+
+        bool reconcile_cpu_main_packet_admission_locked()
+        {
+            if (gpu_texture_path_ || !alpha_sink_.is_open() ||
+                cpu_main_packet_admission_.callback_packet_count() == 0U)
+            {
+                return true;
+            }
+
+            const VideoPacketCountProbe probe =
+                current_main_video_packet_count_locked();
+            if (!probe.ok)
+            {
+                const std::vector<alpha_recorder::obs::MainPacketTiming>
+                    pending = cpu_main_packet_admission_.take_pending();
+                for (const alpha_recorder::obs::MainPacketTiming &packet :
+                     pending)
+                {
+                    queue_cpu_main_packet_timing_locked(packet);
+                }
+                blog(LOG_WARNING,
+                     "[alpha_recorder] could not reconcile CPU main packet admission to the written recording; admitting all held callbacks: path=\"%s\" callback_packets=%llu admitted_packets=%llu held_packets=%zu reason=\"%s\"",
+                     recording_path_.generic_u8string().c_str(),
+                     static_cast<unsigned long long>(
+                         cpu_main_packet_admission_.callback_packet_count()),
+                     static_cast<unsigned long long>(
+                         cpu_main_packet_admission_.admitted_packet_count()),
+                     pending.size(),
+                     probe.error.c_str());
+                return false;
+            }
+
+            std::vector<alpha_recorder::obs::MainPacketTiming>
+                admitted_tail{};
+            const alpha_recorder::obs::MainPacketAdmissionReconcileResult
+                result = cpu_main_packet_admission_.reconcile(
+                    probe.packet_count, admitted_tail);
+            if (!result.ok)
+            {
+                const std::uint64_t held_packets =
+                    static_cast<std::uint64_t>(
+                        cpu_main_packet_admission_.pending_packet_count());
+                if (probe.packet_count >=
+                    cpu_main_packet_admission_.callback_packet_count())
+                {
+                    const std::vector<alpha_recorder::obs::MainPacketTiming>
+                        pending = cpu_main_packet_admission_.take_pending();
+                    for (const alpha_recorder::obs::MainPacketTiming &packet :
+                         pending)
+                    {
+                        queue_cpu_main_packet_timing_locked(packet);
+                    }
+                }
+                else
+                {
+                    (void)cpu_main_packet_admission_.discard_pending();
+                }
+                blog(LOG_WARNING,
+                     "[alpha_recorder] CPU main packet admission could not be reconciled: path=\"%s\" main_video_packets=%llu callback_packets=%llu already_admitted=%llu held_packets=%llu",
+                     recording_path_.generic_u8string().c_str(),
+                     static_cast<unsigned long long>(probe.packet_count),
+                     static_cast<unsigned long long>(
+                         result.callback_packet_count),
+                     static_cast<unsigned long long>(
+                         result.already_admitted_packet_count),
+                     static_cast<unsigned long long>(held_packets));
+                return false;
+            }
+
+            for (const alpha_recorder::obs::MainPacketTiming &packet :
+                 admitted_tail)
+            {
+                queue_cpu_main_packet_timing_locked(packet);
+            }
+
+            blog(LOG_INFO,
+                 "[alpha_recorder] reconciled CPU main packet admission to the written recording: path=\"%s\" main_video_packets=%llu callback_packets=%llu already_admitted=%llu admitted_tail=%llu removed_unwritten_suffix=%llu",
+                 recording_path_.generic_u8string().c_str(),
+                 static_cast<unsigned long long>(result.written_packet_count),
+                 static_cast<unsigned long long>(result.callback_packet_count),
+                 static_cast<unsigned long long>(
+                     result.already_admitted_packet_count),
+                 static_cast<unsigned long long>(
+                     result.admitted_tail_packet_count),
+                 static_cast<unsigned long long>(
+                     result.removed_unwritten_suffix_packets));
+            if (settings_.diagnostic_logging)
+            {
+                alpha_recorder::obs::append_diagnostic_log_line(
+                    "Alpha Recorder reconciled CPU main packet admission to the written recording: path=\"" +
+                    recording_path_.generic_u8string() +
+                    "\" main_video_packets=\"" +
+                    std::to_string(result.written_packet_count) +
+                    "\" callback_packets=\"" +
+                    std::to_string(result.callback_packet_count) +
+                    "\" already_admitted=\"" +
+                    std::to_string(
+                        result.already_admitted_packet_count) +
+                    "\" admitted_tail=\"" +
+                    std::to_string(result.admitted_tail_packet_count) +
+                    "\" removed_unwritten_suffix=\"" +
+                    std::to_string(
+                        result.removed_unwritten_suffix_packets) +
+                    "\"");
+            }
+            return true;
         }
 
         bool remember_output_frame_locked(alpha_recorder::obs::OutputFrameCadence frame, std::string &error_message)
@@ -2158,6 +2688,13 @@ namespace
             {
                 obs_output_remove_packet_callback(recording_output, &RecordingSessionController::on_video_packet, this);
             }
+            {
+                // Removing the callback prevents new dispatches, while this
+                // barrier lets a callback that already selected a replay
+                // packet finish queueing it before stop reconciliation.
+                std::lock_guard<std::mutex> packet_callback_lock(
+                    main_packet_callback_mutex_);
+            }
 
             if (recording_output != nullptr)
             {
@@ -2180,6 +2717,7 @@ namespace
                 if (!gpu_texture_path_)
                 {
                     capture_final_alpha_frame_locked();
+                    (void)reconcile_cpu_main_packet_admission_locked();
                 }
                 reconcile_output_frame_count_locked(finalize_error);
                 if (!finalize_error.empty())
@@ -2193,6 +2731,7 @@ namespace
 
                 alignment_engine_.reset_all();
                 raw_video_cadence_.reset();
+                cpu_main_packet_admission_.reset();
                 reset_gpu_texture_timing_locked();
                 recording_texture_encoded_ = false;
                 if (!gpu_texture_path_)
@@ -2232,6 +2771,8 @@ namespace
                 return;
             }
 
+            std::lock_guard<std::mutex> packet_callback_lock(
+                main_packet_callback_mutex_);
             std::string error_message;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -2246,9 +2787,25 @@ namespace
                     return;
                 }
 
+                main_video_packet_count_known_ = false;
+                main_video_packet_count_ = 0U;
+                if (!recording_path_.empty())
+                {
+                    const VideoPacketCountProbe split_probe =
+                        current_main_video_packet_count_locked(
+                            std::chrono::seconds(2));
+                    if (!split_probe.ok)
+                    {
+                        blog(LOG_WARNING,
+                             "[alpha_recorder] split main recording did not become readable before alpha segment finalization: path=\"%s\" reason=\"%s\"",
+                             recording_path_.generic_u8string().c_str(),
+                             split_probe.error.c_str());
+                    }
+                }
                 if (gpu_texture_path_ && gpu_texture_output_ != nullptr &&
                     !(gpu_texture_output_is_temporary_ && gpu_texture_final_output_path_.empty()))
                 {
+                    split_gpu_segment_finalization_in_progress_ = true;
                     if (!finalize_current_segment_locked(&error_message))
                     {
                         if (error_message.empty())
@@ -2256,9 +2813,11 @@ namespace
                             error_message = "Alpha Recorder failed to finalize the current split GPU texture alpha movie.";
                         }
                     }
+                    split_gpu_segment_finalization_in_progress_ = false;
                 }
                 else if (alpha_sink_.is_open())
                 {
+                    (void)reconcile_cpu_main_packet_admission_locked();
                     reconcile_output_frame_count_locked(error_message);
                     if (!finalize_current_segment_locked(&error_message))
                     {
@@ -2273,14 +2832,34 @@ namespace
                 {
                     alignment_engine_.reset_all();
                     raw_video_cadence_.reset();
+                    cpu_main_packet_admission_.reset();
+                    main_video_packet_count_known_ = false;
+                    main_video_packet_count_ = 0U;
 
                     if (!open_segment_locked(next_recording_path, video_info_, false))
                     {
                         session_aborted_ = true;
                     }
+                    else if (gpu_texture_path_ &&
+                             !gpu_split_boundary_packets_.empty())
+                    {
+                        gpu_main_packets_ =
+                            std::move(gpu_split_boundary_packets_);
+                        gpu_main_replay_queued_callback_count_ = 0U;
+                        refresh_gpu_main_packet_summary_locked();
+                        blog(LOG_INFO,
+                             "[alpha_recorder] restored split-boundary main packet timing into the next segment: packets=%zu first_pts=%lld last_pts=%lld",
+                             gpu_main_packets_.size(),
+                             static_cast<long long>(
+                                 gpu_main_packets_.front().pts),
+                             static_cast<long long>(
+                                 gpu_main_packets_.back().pts));
+                    }
                 }
 
                 recording_path_ = next_recording_path;
+                gpu_split_boundary_packets_.clear();
+                split_gpu_segment_finalization_in_progress_ = false;
             }
 
             if (!error_message.empty())
@@ -2395,17 +2974,27 @@ namespace
 
         void on_video_packet(obs_output_t *output, encoder_packet *packet, encoder_packet_time *packet_time)
         {
+            std::lock_guard<std::mutex> packet_callback_lock(
+                main_packet_callback_mutex_);
             std::string error_message;
             obs_output_t *delayed_replay_output = nullptr;
             std::int64_t delayed_replay_main_pts = 0;
             std::uint64_t delayed_replay_main_cts = 0U;
+            std::int64_t delayed_replay_safe_main_pts_watermark = 0;
+            bool delayed_replay_has_safe_main_pts_watermark = false;
             bool delayed_replay_main_texture_encoded = false;
             obs_output_t *cts_replay_output = nullptr;
             std::int64_t cts_replay_main_pts = 0;
             std::uint64_t cts_replay_main_cts = 0U;
+            std::int64_t cts_replay_safe_main_pts_watermark = 0;
+            bool cts_replay_has_safe_main_pts_watermark = false;
             bool cts_replay_main_texture_encoded = false;
             std::vector<alpha_recorder::obs::GpuTexturePacketRecord>
                 cts_replay_batch{};
+            alpha_recorder::obs::GpuTexturePacketRecord replay_candidate{};
+            bool has_replay_candidate = false;
+            std::size_t replay_candidate_index = 0U;
+            bool replay_candidate_staged_by_fault = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (output != recording_output_ || packet == nullptr || packet->type != OBS_ENCODER_VIDEO ||
@@ -2426,15 +3015,39 @@ namespace
                 else if (gpu_texture_path_)
                 {
                     remember_gpu_texture_main_packet_locked(*packet, *packet_time);
-                    if (!gpu_texture_delayed_replay_started_ && gpu_texture_output_ != nullptr &&
-                        gpu_main_first_packet_cts_ != 0U)
+                    const std::size_t admissible_packet_count =
+                        gpu_main_packets_.size() >
+                                kMainPacketAdmissionHold
+                            ? gpu_main_packets_.size() -
+                                  kMainPacketAdmissionHold
+                            : 0U;
+                    if (gpu_main_replay_queued_callback_count_ <
+                        admissible_packet_count)
                     {
-                        delayed_replay_output = obs_output_get_ref(gpu_texture_output_);
-                        delayed_replay_main_pts = packet->pts;
-                        delayed_replay_main_cts = packet_time->cts;
-                        delayed_replay_main_texture_encoded = recording_texture_encoded_;
+                        replay_candidate_index =
+                            gpu_main_replay_queued_callback_count_;
+                        replay_candidate =
+                            gpu_main_packets_[
+                                replay_candidate_index];
+                        has_replay_candidate = true;
                     }
-                    else if (gpu_texture_delayed_replay_started_ && gpu_texture_output_ != nullptr)
+                    if (has_replay_candidate &&
+                        !gpu_texture_delayed_replay_started_ &&
+                        gpu_texture_output_ != nullptr)
+                    {
+                        delayed_replay_output =
+                            obs_output_get_ref(gpu_texture_output_);
+                        delayed_replay_main_pts = replay_candidate.pts;
+                        delayed_replay_main_cts = replay_candidate.input_cts;
+                        delayed_replay_safe_main_pts_watermark =
+                            replay_candidate.pts;
+                        delayed_replay_has_safe_main_pts_watermark = true;
+                        delayed_replay_main_texture_encoded =
+                            recording_texture_encoded_;
+                    }
+                    else if (has_replay_candidate &&
+                             gpu_texture_delayed_replay_started_ &&
+                             gpu_texture_output_ != nullptr)
                     {
                         const bool inject_replay_gap =
                             !gpu_e2e_replay_gap_released_ &&
@@ -2453,7 +3066,9 @@ namespace
                                 replay_gap_packets)
                         {
                             gpu_e2e_replay_gap_packets_.push_back(
-                                gpu_main_packets_.back());
+                                replay_candidate);
+                            ++gpu_main_replay_queued_callback_count_;
+                            replay_candidate_staged_by_fault = true;
                         }
                         else
                         {
@@ -2461,10 +3076,15 @@ namespace
                                 obs_output_get_ref(gpu_texture_output_);
                             cts_replay_main_texture_encoded =
                                 recording_texture_encoded_;
+                            cts_replay_safe_main_pts_watermark =
+                                replay_candidate.pts;
+                            cts_replay_has_safe_main_pts_watermark = true;
                             if (inject_replay_gap)
                             {
                                 gpu_e2e_replay_gap_packets_.push_back(
-                                    gpu_main_packets_.back());
+                                    replay_candidate);
+                                ++gpu_main_replay_queued_callback_count_;
+                                replay_candidate_staged_by_fault = true;
                                 cts_replay_batch.swap(
                                     gpu_e2e_replay_gap_packets_);
                                 gpu_e2e_replay_gap_released_ = true;
@@ -2473,16 +3093,29 @@ namespace
                             }
                             else
                             {
-                                cts_replay_main_pts = packet->pts;
-                                cts_replay_main_cts = packet_time->cts;
+                                cts_replay_main_pts =
+                                    replay_candidate.pts;
+                                cts_replay_main_cts =
+                                    replay_candidate.input_cts;
                             }
                         }
                     }
                 }
                 else
                 {
-                    queue_alpha_for_packet_locked(packet->pts, packet_time->cts, packet_time->fer,
-                                                  packet_time->ferc, recording_texture_encoded_);
+                    const std::optional<alpha_recorder::obs::MainPacketTiming>
+                        admitted = cpu_main_packet_admission_.remember(
+                            alpha_recorder::obs::MainPacketTiming{
+                                packet->pts,
+                                packet_time->cts,
+                                packet_time->fer,
+                                packet_time->ferc,
+                                recording_texture_encoded_},
+                            kMainPacketAdmissionHold);
+                    if (admitted)
+                    {
+                        queue_cpu_main_packet_timing_locked(*admitted);
+                    }
                 }
             }
 
@@ -2493,18 +3126,31 @@ namespace
             if (delayed_replay_output != nullptr)
             {
                 std::string replay_error;
+                bool replay_packet_queued = false;
                 const bool replay_started =
                     alpha_recorder::obs::gpu_texture_recording_output_begin_delayed_replay(
                         delayed_replay_output,
                         delayed_replay_main_pts,
                         delayed_replay_main_cts,
+                        delayed_replay_safe_main_pts_watermark,
+                        delayed_replay_has_safe_main_pts_watermark,
+                        false,
                         delayed_replay_main_texture_encoded,
-                        &replay_error);
+                        &replay_error,
+                        &replay_packet_queued);
                 obs_output_release(delayed_replay_output);
-                if (replay_started)
+                if (replay_started || replay_packet_queued)
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    gpu_texture_delayed_replay_started_ = true;
+                    if (gpu_main_replay_queued_callback_count_ ==
+                        replay_candidate_index)
+                    {
+                        ++gpu_main_replay_queued_callback_count_;
+                    }
+                    if (replay_started)
+                    {
+                        gpu_texture_delayed_replay_started_ = true;
+                    }
                 }
                 else if (!replay_error.empty() && settings_.diagnostic_logging)
                 {
@@ -2516,12 +3162,17 @@ namespace
             if (cts_replay_output != nullptr)
             {
                 std::string replay_error;
+                bool replay_packet_queued = false;
                 if (cts_replay_batch.empty())
                 {
-                    (void)alpha_recorder::obs::gpu_texture_recording_output_queue_main_packet_replay(
+                    replay_packet_queued =
+                        alpha_recorder::obs::gpu_texture_recording_output_queue_main_packet_replay(
                         cts_replay_output,
                         cts_replay_main_pts,
                         cts_replay_main_cts,
+                        cts_replay_safe_main_pts_watermark,
+                        cts_replay_has_safe_main_pts_watermark,
+                        false,
                         cts_replay_main_texture_encoded,
                         &replay_error);
                 }
@@ -2534,6 +3185,9 @@ namespace
                             cts_replay_output,
                             record.pts,
                             record.input_cts,
+                            cts_replay_safe_main_pts_watermark,
+                            cts_replay_has_safe_main_pts_watermark,
+                            false,
                             cts_replay_main_texture_encoded,
                             &replay_error);
                         if (!replay_error.empty())
@@ -2546,6 +3200,16 @@ namespace
                          cts_replay_batch.size());
                 }
                 obs_output_release(cts_replay_output);
+                if (replay_packet_queued &&
+                    !replay_candidate_staged_by_fault)
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (gpu_main_replay_queued_callback_count_ ==
+                        replay_candidate_index)
+                    {
+                        ++gpu_main_replay_queued_callback_count_;
+                    }
+                }
                 if (!replay_error.empty() && settings_.diagnostic_logging)
                 {
                     alpha_recorder::obs::append_diagnostic_log_line(
@@ -2573,6 +3237,9 @@ namespace
         std::int64_t gpu_main_first_packet_pts_ = 0;
         std::int64_t gpu_main_last_packet_pts_ = 0;
         std::vector<alpha_recorder::obs::GpuTexturePacketRecord> gpu_main_packets_{};
+        std::vector<alpha_recorder::obs::GpuTexturePacketRecord>
+            gpu_split_boundary_packets_{};
+        std::size_t gpu_main_replay_queued_callback_count_ = 0U;
         std::uint64_t gpu_texture_output_start_video_time_ = 0U;
         std::uint64_t gpu_recording_started_video_time_ = 0U;
         bool gpu_texture_delayed_replay_started_ = false;
@@ -2580,11 +3247,15 @@ namespace
             gpu_e2e_replay_gap_packets_{};
         bool gpu_e2e_replay_gap_released_ = false;
         AlphaAlignmentEngine alignment_engine_{};
+        alpha_recorder::obs::MainPacketAdmissionLedger
+            cpu_main_packet_admission_{};
         alpha_recorder::obs::RawVideoCadenceTracker raw_video_cadence_{};
         LivePipelineTelemetry live_telemetry_{};
         std::filesystem::path recording_path_{};
         std::filesystem::path gpu_texture_output_path_{};
         std::filesystem::path gpu_texture_final_output_path_{};
+        bool main_video_packet_count_known_ = false;
+        std::uint64_t main_video_packet_count_ = 0U;
         obs_video_info video_info_{};
         AlphaPlaneExtractor alpha_extractor_{};
         alpha_recorder::obs::CpuAlphaOutputSink alpha_sink_{};
@@ -2600,6 +3271,8 @@ namespace
         std::thread alignment_worker_{};
         bool alignment_worker_stop_ = false;
         bool gpu_texture_output_is_temporary_ = false;
+        bool split_gpu_segment_finalization_in_progress_ = false;
+        std::mutex main_packet_callback_mutex_{};
         std::mutex mutex_{};
     };
 

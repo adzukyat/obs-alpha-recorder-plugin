@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -39,6 +40,7 @@ namespace
     constexpr std::size_t kDefaultReplayTextureCount = 64U;
     constexpr std::size_t kMaxReplayTextureCount = 128U;
     constexpr std::size_t kDefaultCtsReplayPrebuffer = 16U;
+    constexpr std::uint64_t kReplayAttemptMatchToleranceNs = 10000U;
 
     enum class TextureHevcBackend
     {
@@ -132,8 +134,17 @@ technique DrawRed
         gs_texture_t *last_emitted_texture = nullptr;
         std::uint64_t last_emitted_generation = 0U;
         bool last_emitted_valid = false;
+        bool was_paused_at_last_render = false;
         std::uint32_t write_texture_index = 0U;
         std::uint64_t next_generation = 0U;
+    };
+
+    struct ReplayInputAttempt
+    {
+        std::int64_t provisional_pts = 0;
+        std::uint64_t render_time_ns = 0U;
+        std::uint64_t emitted_generation = 0U;
+        bool ambiguous = false;
     };
 
     struct GpuTextureRecordingOutputContext
@@ -176,6 +187,9 @@ technique DrawRed
         bool has_stop_ts = false;
         bool delayed_replay_enabled = false;
         bool replay_cts_driven_enabled = false;
+        bool repeat_missing_prefix = false;
+        bool replay_has_exact_generation_evidence = false;
+        std::uint64_t replay_prefix_repeated_packets = 0U;
         std::size_t replay_texture_count = kPhaseTextureCount;
         bool data_capture_started = false;
         bool replay_configured = false;
@@ -185,16 +199,38 @@ technique DrawRed
         std::uint64_t replay_consume_start_render_time = 0U;
         std::uint64_t replay_emitted_frames = 0U;
         std::vector<alpha_recorder::obs::ReplayGenerationQueueEntry> replay_generation_queue{};
+        std::vector<std::uint64_t> replay_retained_texture_generations{};
         alpha_recorder::obs::ReplayGenerationLedger replay_packet_generations{};
         std::int64_t replay_main_pts_origin = 0;
+        std::int64_t replay_safe_main_pts_watermark = 0;
+        bool replay_has_safe_main_pts_watermark = false;
+        bool replay_main_packet_input_complete = false;
         std::uint64_t replay_consumed_entries = 0U;
+        std::uint64_t replay_queued_entries = 0U;
         std::uint64_t replay_catchup_slots = 0U;
+        std::uint64_t replay_compressed_gap_slots = 0U;
         std::uint64_t replay_skipped_stale_entries = 0U;
         std::uint64_t replay_last_emitted_generation = 0U;
         bool replay_has_last_emitted_generation = false;
         std::uint64_t replay_queue_underflows = 0U;
         std::uint64_t replay_repeated_slots = 0U;
         std::uint64_t replay_missing_textures = 0U;
+        std::uint64_t replay_protected_write_skips = 0U;
+        bool replay_pause_requested = false;
+        bool replay_resume_reconcile_pending = false;
+        std::int64_t replay_resume_min_packet_pts = 0;
+        std::vector<ReplayInputAttempt> replay_resume_attempts{};
+        std::vector<alpha_recorder::obs::ReplayPacketPtsEpoch>
+            replay_packet_pts_epochs{};
+        std::int64_t replay_dropped_input_pts = 0;
+        std::int64_t replay_main_minus_alpha_pause_ns = 0;
+        std::int64_t replay_pause_offset_difference_ns = 0;
+        std::int64_t replay_pause_target_adjustment_pts = 0;
+        std::uint64_t replay_pause_reconciliations = 0U;
+        std::uint64_t replay_pause_dropped_inputs = 0U;
+        std::uint64_t replay_pause_reconcile_misses = 0U;
+        std::uint64_t replay_ring_generation_misses = 0U;
+        bool replay_pause_seen = false;
     };
 
     std::mutex g_contexts_mutex;
@@ -523,6 +559,15 @@ technique DrawRed
         return left + right;
     }
 
+    std::int64_t replay_target_alpha_pts(
+        const GpuTextureRecordingOutputContext &context) noexcept
+    {
+        return context.replay_packet_generations.next_pts();
+    }
+
+    std::uint64_t rebase_pending_replay_generations_after_pause(
+        GpuTextureRecordingOutputContext &context) noexcept;
+
     std::uint32_t configured_keyint_seconds(const GpuTextureRecordingOutputContext &context) noexcept
     {
         const std::uint32_t fps_num = context.fps_num == 0U ? 30U : context.fps_num;
@@ -814,6 +859,7 @@ technique DrawRed
         source.paused_latest_valid = false;
         source.last_emitted_generation = 0U;
         source.last_emitted_valid = false;
+        source.was_paused_at_last_render = false;
         source.write_texture_index = 0U;
         source.alpha_texture_generations.assign(source.alpha_texture_generations.size(), 0U);
         source.alpha_texture_valid.assign(source.alpha_texture_valid.size(), false);
@@ -885,6 +931,43 @@ technique DrawRed
         return nullptr;
     }
 
+    void publish_retained_texture_generations(
+        ProgramAlphaSource &source) noexcept
+    {
+        if (source.context == nullptr)
+        {
+            return;
+        }
+
+        std::vector<std::uint64_t> generations{};
+        generations.reserve(source.alpha_texture_generations.size() + 2U);
+        for (std::size_t index = 0U;
+             index < source.alpha_texture_generations.size(); ++index)
+        {
+            if (source.alpha_texture_valid[index])
+            {
+                generations.push_back(
+                    source.alpha_texture_generations[index]);
+            }
+        }
+        if (source.paused_latest_valid)
+        {
+            generations.push_back(source.paused_latest_generation);
+        }
+        if (source.last_emitted_valid)
+        {
+            generations.push_back(source.last_emitted_generation);
+        }
+        std::sort(generations.begin(), generations.end());
+        generations.erase(
+            std::unique(generations.begin(), generations.end()),
+            generations.end());
+
+        std::lock_guard<std::mutex> lock(source.context->mutex);
+        source.context->replay_retained_texture_generations =
+            std::move(generations);
+    }
+
     alpha_recorder::obs::GpuTexturePacketRecord *find_packet_record_by_pts(
         std::vector<alpha_recorder::obs::GpuTexturePacketRecord> &records,
         std::int64_t pts) noexcept
@@ -902,15 +985,22 @@ technique DrawRed
     {
         context.replay_packet_generations.record(pts, generation);
 
-        alpha_recorder::obs::GpuTexturePacketRecord *packet =
-            find_packet_record_by_pts(context.alpha_packet_records, pts);
-        if (packet == nullptr)
+        const auto packet = std::find_if(
+            context.alpha_packet_records.begin(),
+            context.alpha_packet_records.end(),
+            [&context, pts](
+                const alpha_recorder::obs::GpuTexturePacketRecord &record) {
+                return alpha_recorder::obs::replay_input_pts_for_packet(
+                           record.pts,
+                           context.replay_packet_pts_epochs) == pts;
+            });
+        if (packet == context.alpha_packet_records.end())
         {
             return;
         }
 
         alpha_recorder::obs::merge_replay_generation(
-            context.replay_packet_generations, *packet);
+            context.replay_packet_generations, pts, *packet);
     }
 
     void merge_replay_packet_generation(GpuTextureRecordingOutputContext &context,
@@ -920,8 +1010,11 @@ technique DrawRed
         {
             return;
         }
+        const std::int64_t input_pts =
+            alpha_recorder::obs::replay_input_pts_for_packet(
+                record.pts, context.replay_packet_pts_epochs);
         alpha_recorder::obs::merge_replay_generation(
-            context.replay_packet_generations, record);
+            context.replay_packet_generations, input_pts, record);
     }
 
     void merge_packet_fields(alpha_recorder::obs::GpuTexturePacketRecord &record,
@@ -933,6 +1026,150 @@ technique DrawRed
         record.timebase_den = packet.timebase_den;
         record.keyframe = packet.keyframe;
         record.sys_dts_usec = packet.sys_dts_usec;
+    }
+
+    void reconcile_replay_after_pause(
+        GpuTextureRecordingOutputContext &context,
+        const encoder_packet &packet) noexcept
+    {
+        if (!context.replay_resume_reconcile_pending ||
+            packet.sys_dts_usec <= 0 ||
+            context.replay_resume_attempts.empty())
+        {
+            return;
+        }
+        const std::int64_t previous_input_pts =
+            saturating_pts_add(
+                packet.pts, context.replay_dropped_input_pts);
+        if (previous_input_pts < context.replay_resume_min_packet_pts)
+        {
+            return;
+        }
+
+        const std::uint64_t packet_sys_dts_ns =
+            static_cast<std::uint64_t>(packet.sys_dts_usec) * 1000U;
+        const std::uint64_t frame_interval_ns =
+            configured_frame_interval_ns(context);
+        const std::uint64_t expected_render_time =
+            packet_sys_dts_ns >
+                    std::numeric_limits<std::uint64_t>::max() -
+                        frame_interval_ns
+                ? std::numeric_limits<std::uint64_t>::max()
+                : packet_sys_dts_ns + frame_interval_ns;
+
+        auto matched = context.replay_resume_attempts.end();
+        std::uint64_t best_delta =
+            std::numeric_limits<std::uint64_t>::max();
+        bool ambiguous_match = false;
+        for (auto attempt = context.replay_resume_attempts.begin();
+             attempt != context.replay_resume_attempts.end(); ++attempt)
+        {
+            const std::uint64_t delta =
+                attempt->render_time_ns >= expected_render_time
+                    ? attempt->render_time_ns - expected_render_time
+                    : expected_render_time - attempt->render_time_ns;
+            if (delta > kReplayAttemptMatchToleranceNs ||
+                delta > best_delta)
+            {
+                continue;
+            }
+            if (delta == best_delta && matched != context.replay_resume_attempts.end())
+            {
+                ambiguous_match = true;
+                continue;
+            }
+            matched = attempt;
+            best_delta = delta;
+            ambiguous_match = false;
+        }
+
+        if (matched == context.replay_resume_attempts.end() ||
+            ambiguous_match)
+        {
+            ++context.replay_pause_reconcile_misses;
+            return;
+        }
+
+        const std::int64_t pts_step =
+            context.replay_packet_generations.pts_step();
+        if (matched->provisional_pts < packet.pts)
+        {
+            ++context.replay_pause_reconcile_misses;
+            return;
+        }
+        const std::int64_t correction =
+            matched->provisional_pts - packet.pts;
+        if (correction < context.replay_dropped_input_pts ||
+            (pts_step > 0 && (correction % pts_step) != 0))
+        {
+            ++context.replay_pause_reconcile_misses;
+            return;
+        }
+
+        const std::uint64_t discarded_attempts =
+            static_cast<std::uint64_t>(
+                std::distance(context.replay_resume_attempts.begin(),
+                              matched));
+        const std::int64_t matched_provisional_pts =
+            matched->provisional_pts;
+        const std::uint64_t matched_render_time =
+            matched->render_time_ns;
+        const std::uint64_t matched_generation =
+            matched->emitted_generation;
+        const std::int64_t correction_delta =
+            correction - context.replay_dropped_input_pts;
+        const std::uint64_t correction_frames =
+            correction_delta > 0
+                ? static_cast<std::uint64_t>(
+                      correction_delta / pts_step)
+                : 0U;
+        context.replay_dropped_input_pts = correction;
+        const std::int64_t pause_target_adjustment_delta =
+            alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                correction_delta,
+                pts_step);
+        context.replay_pause_target_adjustment_pts =
+            saturating_pts_add(
+                context.replay_pause_target_adjustment_pts,
+                pause_target_adjustment_delta);
+        const std::int64_t generation_pts_offset =
+            context.replay_pause_target_adjustment_pts ==
+                    std::numeric_limits<std::int64_t>::min()
+                ? std::numeric_limits<std::int64_t>::max()
+                : -context.replay_pause_target_adjustment_pts;
+        context.replay_packet_pts_epochs.push_back(
+            alpha_recorder::obs::ReplayPacketPtsEpoch{
+                packet.pts,
+                generation_pts_offset});
+        const std::uint64_t rebased_pending_generations =
+            rebase_pending_replay_generations_after_pause(context);
+        context.replay_resume_attempts.erase(
+            context.replay_resume_attempts.begin(),
+            context.replay_resume_attempts.end());
+        context.replay_resume_reconcile_pending = false;
+        ++context.replay_pause_reconciliations;
+        context.replay_pause_dropped_inputs += correction_frames;
+
+        blog(LOG_INFO,
+             "[alpha_recorder_gpu_texture] replay pause boundary reconciled packet_pts=%lld provisional_pts=%lld correction_pts=%lld correction_delta_pts=%lld dropped_inputs=%llu discarded_attempts=%llu expected_render_time=%llu matched_render_time=%llu generation=%llu main_minus_alpha_pause_ns=%lld pause_target_adjustment_delta_pts=%lld pause_target_adjustment_pts=%lld generation_pts_offset=%lld rebased_pending_generations=%llu",
+             static_cast<long long>(packet.pts),
+             static_cast<long long>(matched_provisional_pts),
+             static_cast<long long>(correction),
+             static_cast<long long>(correction_delta),
+             static_cast<unsigned long long>(correction_frames),
+             static_cast<unsigned long long>(discarded_attempts),
+             static_cast<unsigned long long>(expected_render_time),
+             static_cast<unsigned long long>(matched_render_time),
+             static_cast<unsigned long long>(matched_generation),
+             static_cast<long long>(
+                 context.replay_main_minus_alpha_pause_ns),
+             static_cast<long long>(
+                 pause_target_adjustment_delta),
+             static_cast<long long>(
+                 context.replay_pause_target_adjustment_pts),
+             static_cast<long long>(generation_pts_offset),
+             static_cast<unsigned long long>(
+                 rebased_pending_generations));
     }
 
     const alpha_recorder::obs::ProgramRenderRecord *find_render_record_by_cts(
@@ -1018,29 +1255,142 @@ technique DrawRed
         context.main_phase = phase;
 
         const alpha_recorder::obs::ProgramRenderRecord *render =
-            find_render_record_at_or_before_cts(context.alpha_render_records, main_packet_cts, 10000U);
+            find_render_record_at_or_before_cts(
+                context.alpha_render_records, main_packet_cts, 10000U);
+        bool used_prefix_fallback = false;
         if (render == nullptr)
         {
-            assign_error(error_message,
-                         "Alpha Recorder GPU delayed replay is waiting for a render generation for the main packet");
-            return false;
+            used_prefix_fallback =
+                alpha_recorder::obs::
+                    choose_replay_prefix_fallback_generation(
+                        context.replay_retained_texture_generations,
+                        context.repeat_missing_prefix,
+                        context.replay_has_exact_generation_evidence,
+                        target_generation);
+            if (!used_prefix_fallback)
+            {
+                assign_error(error_message,
+                             "Alpha Recorder GPU delayed replay is waiting for a render generation for the main packet");
+                return false;
+            }
         }
-        if (!main_generation_for_render(*render, phase, target_generation))
+        else if (!main_generation_for_render(*render, phase, target_generation))
         {
-            assign_error(error_message,
-                         "Alpha Recorder GPU delayed replay cannot represent the main packet generation");
-            return false;
+            used_prefix_fallback =
+                alpha_recorder::obs::
+                    choose_replay_prefix_fallback_generation(
+                        context.replay_retained_texture_generations,
+                        context.repeat_missing_prefix,
+                        context.replay_has_exact_generation_evidence,
+                        target_generation);
+            if (!used_prefix_fallback)
+            {
+                assign_error(error_message,
+                             "Alpha Recorder GPU delayed replay cannot represent the main packet generation");
+                return false;
+            }
         }
 
         latest_generation = context.alpha_render_records.empty()
-                                ? render->generation
+                                ? target_generation
                                 : context.alpha_render_records.back().generation;
-        if (latest_generation >= target_generation &&
-            latest_generation - target_generation + 1U >= context.replay_texture_count)
+        if (!used_prefix_fallback &&
+            !context.replay_retained_texture_generations.empty() &&
+            !std::binary_search(
+                context.replay_retained_texture_generations.begin(),
+                context.replay_retained_texture_generations.end(),
+                target_generation))
         {
-            assign_error(error_message,
-                         "Alpha Recorder GPU delayed replay ring no longer contains a main packet generation");
-            return false;
+            used_prefix_fallback =
+                alpha_recorder::obs::
+                    choose_replay_prefix_fallback_generation(
+                        context.replay_retained_texture_generations,
+                        context.repeat_missing_prefix,
+                        context.replay_has_exact_generation_evidence,
+                        target_generation);
+            if (!used_prefix_fallback)
+            {
+                const auto next_retained =
+                    std::lower_bound(
+                        context.replay_retained_texture_generations.begin(),
+                        context.replay_retained_texture_generations.end(),
+                        target_generation);
+                const std::uint64_t retained_before_target =
+                    next_retained ==
+                            context.replay_retained_texture_generations.begin()
+                        ? 0U
+                        : *std::prev(next_retained);
+                const std::uint64_t retained_after_target =
+                    next_retained ==
+                            context.replay_retained_texture_generations.end()
+                        ? 0U
+                        : *next_retained;
+                const std::uint64_t oldest_retained_generation =
+                    context.replay_retained_texture_generations.empty()
+                        ? 0U
+                        : context.replay_retained_texture_generations.front();
+                const std::uint64_t newest_retained_generation =
+                    context.replay_retained_texture_generations.empty()
+                        ? 0U
+                        : context.replay_retained_texture_generations.back();
+                const std::uint64_t ring_misses =
+                    ++context.replay_ring_generation_misses;
+                if (ring_misses <= 8U || (ring_misses % 300U) == 0U)
+                {
+                    blog(LOG_WARNING,
+                         "[alpha_recorder_gpu_texture] replay generation missing from retained ring main_pts=%lld main_cts=%llu target_generation=%llu latest_generation=%llu retained_generation_before_target=%llu retained_generation_after_target=%llu retained_generation_min=%llu retained_generation_max=%llu retained_generation_count=%zu replay_queue_pending=%zu replay_next_alpha_pts=%lld ring_misses=%llu",
+                         static_cast<long long>(main_packet_pts),
+                         static_cast<unsigned long long>(main_packet_cts),
+                         static_cast<unsigned long long>(target_generation),
+                         static_cast<unsigned long long>(latest_generation),
+                         static_cast<unsigned long long>(
+                             retained_before_target),
+                         static_cast<unsigned long long>(
+                             retained_after_target),
+                         static_cast<unsigned long long>(
+                             oldest_retained_generation),
+                         static_cast<unsigned long long>(
+                             newest_retained_generation),
+                         context.replay_retained_texture_generations.size(),
+                         context.replay_generation_queue.size(),
+                         static_cast<long long>(
+                             replay_target_alpha_pts(context)),
+                         static_cast<unsigned long long>(ring_misses));
+                }
+                assign_error(error_message,
+                             "Alpha Recorder GPU delayed replay ring no longer contains a main packet generation");
+                return false;
+            }
+        }
+
+        if (used_prefix_fallback)
+        {
+            ++context.replay_prefix_repeated_packets;
+            if (context.replay_prefix_repeated_packets <= 8U)
+            {
+                blog(LOG_WARNING,
+                     "[alpha_recorder_gpu_texture] split prefix generation unavailable; repeating oldest retained generation main_pts=%lld main_cts=%llu fallback_generation=%llu repeated_packets=%llu",
+                     static_cast<long long>(main_packet_pts),
+                     static_cast<unsigned long long>(main_packet_cts),
+                     static_cast<unsigned long long>(target_generation),
+                     static_cast<unsigned long long>(
+                         context.replay_prefix_repeated_packets));
+            }
+        }
+        else
+        {
+            if (!context.replay_has_exact_generation_evidence &&
+                context.replay_prefix_repeated_packets > 0U)
+            {
+                blog(LOG_INFO,
+                     "[alpha_recorder_gpu_texture] split prefix recovered exact generation evidence main_pts=%lld main_cts=%llu generation=%llu repeated_packets=%llu",
+                     static_cast<long long>(main_packet_pts),
+                     static_cast<unsigned long long>(main_packet_cts),
+                     static_cast<unsigned long long>(target_generation),
+                     static_cast<unsigned long long>(
+                         context.replay_prefix_repeated_packets));
+            }
+            context.replay_has_exact_generation_evidence = true;
         }
 
         const auto duplicate = std::find_if(context.replay_generation_queue.begin(),
@@ -1053,16 +1403,52 @@ technique DrawRed
             context.replay_generation_queue.push_back(
                 alpha_recorder::obs::ReplayGenerationQueueEntry{
                     main_packet_pts,
-                    target_generation});
+                    target_generation,
+                    main_packet_cts});
+            ++context.replay_queued_entries;
         }
         else if (duplicate->generation != target_generation)
         {
             context.replay_generation_queue.push_back(
                 alpha_recorder::obs::ReplayGenerationQueueEntry{
                     main_packet_pts,
-                    target_generation});
+                    target_generation,
+                    main_packet_cts});
+            ++context.replay_queued_entries;
         }
         return true;
+    }
+
+    std::uint64_t rebase_pending_replay_generations_after_pause(
+        GpuTextureRecordingOutputContext &context) noexcept
+    {
+        std::uint64_t rebased = 0U;
+        for (alpha_recorder::obs::ReplayGenerationQueueEntry &entry :
+             context.replay_generation_queue)
+        {
+            if (entry.pts < context.replay_resume_min_packet_pts ||
+                entry.input_cts == 0U)
+            {
+                continue;
+            }
+
+            const alpha_recorder::obs::ProgramRenderRecord *render =
+                find_render_record_at_or_before_cts(
+                    context.alpha_render_records,
+                    entry.input_cts,
+                    10000U);
+            std::uint64_t generation = 0U;
+            if (render == nullptr ||
+                !main_generation_for_render(
+                    *render, context.main_phase, generation))
+            {
+                continue;
+            }
+
+            entry.generation = generation;
+            ++rebased;
+        }
+        return rebased;
     }
 
     void *program_alpha_create(obs_data_t *settings, obs_source_t *)
@@ -1108,6 +1494,12 @@ technique DrawRed
         }
 
         bool paused_at_render_start = false;
+        bool pause_boundary_render = false;
+        bool retain_pause_boundary_generation = false;
+        bool retain_current_generation = true;
+        std::uint64_t protected_write_skip_count = 0U;
+        std::size_t write_index =
+            source->write_texture_index % source->alpha_textures.size();
         if (source->context != nullptr)
         {
             std::lock_guard<std::mutex> lock(source->context->mutex);
@@ -1115,6 +1507,49 @@ technique DrawRed
                 obs_encoder_paused(source->context->encoder))
             {
                 paused_at_render_start = true;
+                pause_boundary_render = !source->was_paused_at_last_render;
+                if (pause_boundary_render &&
+                    source->context->replay_cts_driven_enabled &&
+                    source->context->replay_configured)
+                {
+                    const auto safe_write_index =
+                        alpha_recorder::obs::choose_replay_safe_texture_slot(
+                            source->alpha_texture_generations,
+                            source->alpha_texture_valid,
+                            source->write_texture_index,
+                            source->context->replay_generation_queue);
+                    if (safe_write_index.has_value())
+                    {
+                        write_index = *safe_write_index;
+                        retain_pause_boundary_generation = true;
+                    }
+                    else
+                    {
+                        protected_write_skip_count =
+                            ++source->context->replay_protected_write_skips;
+                    }
+                }
+            }
+            else if (source->context->replay_cts_driven_enabled &&
+                     source->context->replay_configured &&
+                     !source->context->replay_generation_queue.empty())
+            {
+                const auto safe_write_index =
+                    alpha_recorder::obs::choose_replay_safe_texture_slot(
+                        source->alpha_texture_generations,
+                        source->alpha_texture_valid,
+                        source->write_texture_index,
+                        source->context->replay_generation_queue);
+                if (safe_write_index.has_value())
+                {
+                    write_index = *safe_write_index;
+                }
+                else
+                {
+                    retain_current_generation = false;
+                    protected_write_skip_count =
+                        ++source->context->replay_protected_write_skips;
+                }
             }
         }
 
@@ -1126,14 +1561,44 @@ technique DrawRed
 
         const std::uint64_t render_time = obs_get_video_frame_time();
         const std::uint64_t generation = source->next_generation++;
-        const std::uint32_t write_index = source->write_texture_index % source->alpha_textures.size();
         gs_texture_t *write_texture =
             paused_at_render_start
                 ? source->paused_latest_texture
-                : source->alpha_textures[write_index];
-        if (!render_program_alpha_to_texture(*source, program_texture, write_texture))
+                : (retain_current_generation
+                       ? source->alpha_textures[write_index]
+                       : nullptr);
+        if (write_texture != nullptr &&
+            !render_program_alpha_to_texture(*source, program_texture, write_texture))
         {
             return;
+        }
+        if (retain_pause_boundary_generation)
+        {
+            gs_copy_texture(source->alpha_textures[write_index], write_texture);
+            blog(LOG_INFO,
+                 "[alpha_recorder_gpu_texture] retained pause boundary generation=%llu ring_slot=%zu",
+                 static_cast<unsigned long long>(generation),
+                 write_index);
+        }
+        else if (pause_boundary_render && protected_write_skip_count > 0U &&
+                 (protected_write_skip_count <= 8U ||
+                  (protected_write_skip_count % 300U) == 0U))
+        {
+            blog(LOG_WARNING,
+                 "[alpha_recorder_gpu_texture] replay ring fully protected; could not retain pause boundary generation=%llu protected_write_skips=%llu",
+                 static_cast<unsigned long long>(generation),
+                 static_cast<unsigned long long>(
+                     protected_write_skip_count));
+        }
+        if (!retain_current_generation &&
+            (protected_write_skip_count <= 8U ||
+             (protected_write_skip_count % 300U) == 0U))
+        {
+            blog(LOG_WARNING,
+                 "[alpha_recorder_gpu_texture] replay ring fully protected; skipped retaining current generation=%llu protected_write_skips=%llu",
+                 static_cast<unsigned long long>(generation),
+                 static_cast<unsigned long long>(
+                     protected_write_skip_count));
         }
 
         bool previous_phase = true;
@@ -1186,32 +1651,87 @@ technique DrawRed
                 }
                 else
                 {
+                    const bool speculative_resume =
+                        source->context->replay_resume_reconcile_pending;
                     const std::int64_t alpha_pts =
-                        source->context->replay_packet_generations.next_pts();
+                        speculative_resume
+                            ? source->context->replay_resume_min_packet_pts
+                            : replay_target_alpha_pts(*source->context);
                     const std::int64_t target_main_pts =
                         saturating_pts_add(
-                            source->context->replay_main_pts_origin,
-                            alpha_pts);
+                            saturating_pts_add(
+                                source->context->replay_main_pts_origin,
+                                alpha_pts),
+                            source->context
+                                ->replay_pause_target_adjustment_pts);
+                    std::vector<alpha_recorder::obs::ReplayGenerationQueueEntry>
+                        speculative_queue{};
+                    std::vector<alpha_recorder::obs::ReplayGenerationQueueEntry>
+                        *selection_queue =
+                            &source->context->replay_generation_queue;
+                    if (speculative_resume)
+                    {
+                        speculative_queue = *selection_queue;
+                        selection_queue = &speculative_queue;
+                    }
                     const alpha_recorder::obs::ReplayGenerationSelection selection =
                         alpha_recorder::obs::consume_latest_replay_generation(
-                            source->context->replay_generation_queue,
+                            *selection_queue,
                             target_main_pts,
                             source->context->replay_has_last_emitted_generation,
-                            source->context->replay_last_emitted_generation);
-                    source->context->replay_consumed_entries += selection.removed_entries;
-                    source->context->replay_skipped_stale_entries += selection.skipped_entries;
+                            source->context->replay_last_emitted_generation,
+                            source->context->replay_has_safe_main_pts_watermark ||
+                                source->context->replay_main_packet_input_complete,
+                            source->context->replay_main_packet_input_complete
+                                ? std::numeric_limits<std::int64_t>::max()
+                                : source->context->replay_safe_main_pts_watermark);
+                    if (!speculative_resume)
+                    {
+                        source->context->replay_consumed_entries +=
+                            selection.removed_entries;
+                        source->context->replay_skipped_stale_entries +=
+                            selection.skipped_entries;
+                    }
                     if (selection.status ==
                             alpha_recorder::obs::ReplayGenerationSelectionStatus::Exact ||
                         selection.status ==
-                            alpha_recorder::obs::ReplayGenerationSelectionStatus::LatestConfirmed)
+                            alpha_recorder::obs::ReplayGenerationSelectionStatus::LatestConfirmed ||
+                        selection.status ==
+                            alpha_recorder::obs::ReplayGenerationSelectionStatus::NextConfirmed)
                     {
                         replay_next_generation = selection.generation;
                         replay_used_queued_generation = true;
-                        if (selection.status ==
-                                alpha_recorder::obs::ReplayGenerationSelectionStatus::LatestConfirmed ||
-                            selection.skipped_entries > 0U)
+                        if (!speculative_resume &&
+                            (selection.status ==
+                                 alpha_recorder::obs::ReplayGenerationSelectionStatus::LatestConfirmed ||
+                             selection.skipped_entries > 0U))
                         {
                             ++source->context->replay_catchup_slots;
+                        }
+                        if (!speculative_resume &&
+                            selection.status ==
+                            alpha_recorder::obs::ReplayGenerationSelectionStatus::NextConfirmed)
+                        {
+                            ++source->context->replay_compressed_gap_slots;
+                            if (source->context->replay_compressed_gap_slots <=
+                                8U)
+                            {
+                                blog(LOG_INFO,
+                                     "[alpha_recorder_gpu_texture] replay compressed confirmed gap target_main_pts=%lld selected_main_pts=%lld selected_generation=%llu alpha_input_next_pts=%lld dropped_input_pts=%lld queue_pending=%zu",
+                                     static_cast<long long>(target_main_pts),
+                                     static_cast<long long>(selection.pts),
+                                     static_cast<unsigned long long>(
+                                         selection.generation),
+                                     static_cast<long long>(
+                                         source->context
+                                             ->replay_packet_generations
+                                             .next_pts()),
+                                     static_cast<long long>(
+                                         source->context
+                                             ->replay_dropped_input_pts),
+                                     source->context
+                                         ->replay_generation_queue.size());
+                            }
                         }
                     }
                     else if (source->context->replay_has_last_emitted_generation)
@@ -1253,6 +1773,10 @@ technique DrawRed
                            ? find_generation_texture(
                                  *source, paused_frozen_generation)
                            : nullptr);
+            emitted_generation =
+                source->last_emitted_valid
+                    ? source->last_emitted_generation
+                    : paused_frozen_generation;
             draw_output = output_texture != nullptr;
         }
         else if (delayed_replay && replay_configured)
@@ -1316,7 +1840,8 @@ technique DrawRed
             draw_alpha_texture(*source, output_texture);
         }
         std::uint64_t replay_missing_texture_count = 0U;
-        if (!recording_paused && replay_emitted && data_capture_started && source->context != nullptr)
+        if (!recording_paused && replay_emitted && data_capture_started &&
+            source->context != nullptr)
         {
             std::lock_guard<std::mutex> lock(source->context->mutex);
             if (source->context->replay_configured && source->context->replay_cts_driven_enabled)
@@ -1326,6 +1851,15 @@ technique DrawRed
                     const std::int64_t alpha_input_pts =
                         source->context->replay_packet_generations.record_next(
                             emitted_generation);
+                    if (source->context->replay_resume_reconcile_pending)
+                    {
+                        source->context->replay_resume_attempts.push_back(
+                            ReplayInputAttempt{
+                                alpha_input_pts,
+                                render_time,
+                                emitted_generation,
+                                replay_generation_ambiguous});
+                    }
                     if (replay_generation_ambiguous)
                     {
                         source->context->replay_packet_generations.mark_ambiguous(
@@ -1367,20 +1901,35 @@ technique DrawRed
         }
         remember_alpha_render_record(
             source->context,
-            alpha_recorder::obs::ProgramRenderRecord{generation, render_time, emitted_generation, emitted});
+            alpha_recorder::obs::ProgramRenderRecord{
+                generation,
+                render_time,
+                emitted_generation,
+                draw_output && output_texture != nullptr});
 
         if (paused_at_render_start)
         {
             source->paused_latest_generation = generation;
             source->paused_latest_valid = true;
+            if (retain_pause_boundary_generation)
+            {
+                source->alpha_texture_generations[write_index] = generation;
+                source->alpha_texture_valid[write_index] = true;
+                source->write_texture_index =
+                    static_cast<std::uint32_t>(
+                        (write_index + 1U) % source->alpha_textures.size());
+            }
         }
-        else
+        else if (retain_current_generation)
         {
             source->alpha_texture_generations[write_index] = generation;
             source->alpha_texture_valid[write_index] = true;
             source->write_texture_index =
-                (write_index + 1U) % source->alpha_textures.size();
+                static_cast<std::uint32_t>(
+                    (write_index + 1U) % source->alpha_textures.size());
         }
+        source->was_paused_at_last_render = paused_at_render_start;
+        publish_retained_texture_generations(*source);
     }
 
     const char *program_alpha_name(void *)
@@ -1501,6 +2050,8 @@ technique DrawRed
                                    : alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
         context->delayed_replay_enabled = true;
         context->replay_cts_driven_enabled = true;
+        context->repeat_missing_prefix =
+            obs_data_get_bool(settings, "repeat_missing_prefix");
         context->replay_texture_count =
             std::clamp(env_size_value("ALPHA_RECORDER_GPU_REPLAY_RING_FRAMES",
                                       kDefaultReplayTextureCount),
@@ -1862,17 +2413,40 @@ technique DrawRed
             context->replay_consume_start_render_time = 0U;
             context->replay_emitted_frames = 0U;
             context->replay_generation_queue.clear();
+            context->replay_retained_texture_generations.clear();
             context->replay_packet_generations.reset(
                 configured_encoder_pts_step(*context));
+            context->replay_has_exact_generation_evidence = false;
+            context->replay_prefix_repeated_packets = 0U;
             context->replay_main_pts_origin = 0;
+            context->replay_safe_main_pts_watermark = 0;
+            context->replay_has_safe_main_pts_watermark = false;
+            context->replay_main_packet_input_complete = false;
             context->replay_consumed_entries = 0U;
+            context->replay_queued_entries = 0U;
             context->replay_catchup_slots = 0U;
+            context->replay_compressed_gap_slots = 0U;
             context->replay_skipped_stale_entries = 0U;
             context->replay_last_emitted_generation = 0U;
             context->replay_has_last_emitted_generation = false;
             context->replay_queue_underflows = 0U;
             context->replay_repeated_slots = 0U;
             context->replay_missing_textures = 0U;
+            context->replay_protected_write_skips = 0U;
+            context->replay_pause_requested = false;
+            context->replay_resume_reconcile_pending = false;
+            context->replay_resume_min_packet_pts = 0;
+            context->replay_resume_attempts.clear();
+            context->replay_packet_pts_epochs.clear();
+            context->replay_dropped_input_pts = 0;
+            context->replay_main_minus_alpha_pause_ns = 0;
+            context->replay_pause_offset_difference_ns = 0;
+            context->replay_pause_target_adjustment_pts = 0;
+            context->replay_pause_reconciliations = 0U;
+            context->replay_pause_dropped_inputs = 0U;
+            context->replay_pause_reconcile_misses = 0U;
+            context->replay_ring_generation_misses = 0U;
+            context->replay_pause_seen = false;
         }
 
         std::string error_message;
@@ -1963,7 +2537,7 @@ technique DrawRed
         }
 
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u preset=%s tune=%s split=%s gpu=%d phase=%s delayed_replay=%s cts_driven_replay=%s replay_ring=%zu",
+             "[alpha_recorder_gpu_texture] started path=\"%s\" encoder=%s backend=%s size=%ux%u fps=%u/%u cqp=%u gop=%u preset=%s tune=%s split=%s gpu=%d phase=%s delayed_replay=%s cts_driven_replay=%s repeat_missing_prefix=%s replay_ring=%zu",
              context->path.generic_u8string().c_str(),
              context->encoder_id.c_str(),
              backend_name(backend_for_encoder_id(context->encoder_id)),
@@ -1984,6 +2558,7 @@ technique DrawRed
                  : "previous",
              context->delayed_replay_enabled ? "true" : "false",
              context->replay_cts_driven_enabled ? "true" : "false",
+             context->repeat_missing_prefix ? "true" : "false",
              context->replay_texture_count);
         obs_output_set_last_error(context->output, nullptr);
         return true;
@@ -2060,6 +2635,7 @@ technique DrawRed
         }
 
         merge_packet_fields(*record, *packet);
+        reconcile_replay_after_pause(*context, *packet);
         merge_replay_packet_generation(*context, *record);
         std::string error_message;
         if (!context->sink.submit_packet(packet, &error_message))
@@ -2360,6 +2936,7 @@ namespace alpha_recorder::obs
 
     bool gpu_texture_recording_output_set_paused(obs_output_t *output,
                                                  bool paused,
+                                                 std::uint64_t main_pause_offset_ns,
                                                  std::string *error_message) noexcept
     {
         GpuTextureRecordingOutputContext *context = find_context(output);
@@ -2369,6 +2946,8 @@ namespace alpha_recorder::obs
             return false;
         }
 
+        bool previous_pause_requested = false;
+        bool data_capture_started = false;
         {
             std::lock_guard<std::mutex> lock(context->mutex);
             if (context->stop_state != GpuTextureOutputStopState::Running)
@@ -2376,10 +2955,23 @@ namespace alpha_recorder::obs
                 assign_error(error_message, "Alpha Recorder GPU texture output is not running while changing pause state");
                 return false;
             }
+            previous_pause_requested = context->replay_pause_requested;
+            data_capture_started = context->data_capture_started;
+            context->replay_pause_requested = paused;
+        }
+
+        if (!data_capture_started)
+        {
+            blog(LOG_INFO,
+                 "[alpha_recorder_gpu_texture] output %s deferred until data capture starts",
+                 paused ? "pause" : "resume");
+            return true;
         }
 
         if (!obs_output_pause(output, paused))
         {
+            std::lock_guard<std::mutex> lock(context->mutex);
+            context->replay_pause_requested = previous_pause_requested;
             assign_error(error_message,
                          paused
                              ? "Alpha Recorder could not pause the GPU texture alpha output"
@@ -2388,26 +2980,114 @@ namespace alpha_recorder::obs
         }
 
         std::size_t replay_queue_pending = 0U;
+        const std::uint64_t current_video_time_ns =
+            obs_get_video_frame_time();
         std::int64_t replay_next_alpha_pts = 0;
+        std::uint64_t encoder_pause_offset_ns = 0U;
+        std::int64_t pause_offset_delta_ns = 0;
+        bool replay_resume_reconcile_pending = false;
+        std::int64_t replay_dropped_input_pts = 0;
+        std::int64_t main_minus_alpha_pause_ns = 0;
+        std::int64_t pause_offset_difference_ns = 0;
         {
             std::lock_guard<std::mutex> lock(context->mutex);
+            if (paused)
+            {
+                context->replay_pause_seen = true;
+                context->replay_resume_reconcile_pending = false;
+                context->replay_resume_min_packet_pts =
+                    replay_target_alpha_pts(*context);
+                context->replay_resume_attempts.clear();
+            }
+            else if (previous_pause_requested)
+            {
+                context->replay_resume_reconcile_pending =
+                    context->delayed_replay_enabled &&
+                    context->replay_cts_driven_enabled;
+                context->replay_resume_attempts.clear();
+            }
             replay_queue_pending = context->replay_generation_queue.size();
             replay_next_alpha_pts = context->replay_packet_generations.next_pts();
+            replay_resume_reconcile_pending =
+                context->replay_resume_reconcile_pending;
+            replay_dropped_input_pts =
+                context->replay_dropped_input_pts;
+            if (context->encoder != nullptr)
+            {
+                encoder_pause_offset_ns =
+                    obs_encoder_get_pause_offset(context->encoder);
+            }
+            if (encoder_pause_offset_ns >= main_pause_offset_ns)
+            {
+                const std::uint64_t delta =
+                    encoder_pause_offset_ns -
+                    main_pause_offset_ns;
+                pause_offset_delta_ns =
+                    delta >
+                            static_cast<std::uint64_t>(
+                                std::numeric_limits<std::int64_t>::max())
+                        ? std::numeric_limits<std::int64_t>::max()
+                        : static_cast<std::int64_t>(delta);
+            }
+            else
+            {
+                const std::uint64_t delta =
+                    main_pause_offset_ns -
+                    encoder_pause_offset_ns;
+                pause_offset_delta_ns =
+                    delta >
+                            static_cast<std::uint64_t>(
+                                std::numeric_limits<std::int64_t>::max())
+                        ? std::numeric_limits<std::int64_t>::min()
+                        : -static_cast<std::int64_t>(delta);
+            }
+            if (!paused && previous_pause_requested)
+            {
+                pause_offset_difference_ns =
+                    pause_offset_delta_ns ==
+                            std::numeric_limits<std::int64_t>::min()
+                        ? std::numeric_limits<std::int64_t>::max()
+                        : -pause_offset_delta_ns;
+                main_minus_alpha_pause_ns =
+                    pause_offset_difference_ns -
+                    context->replay_pause_offset_difference_ns;
+                context->replay_pause_offset_difference_ns =
+                    pause_offset_difference_ns;
+                context->replay_main_minus_alpha_pause_ns =
+                    main_minus_alpha_pause_ns;
+            }
         }
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] output %s replay_queue_pending=%zu replay_next_alpha_pts=%lld",
+             "[alpha_recorder_gpu_texture] output %s replay_queue_pending=%zu replay_next_alpha_pts=%lld replay_dropped_input_pts=%lld resume_reconcile_pending=%s current_video_time_ns=%llu main_pause_offset_ns=%llu encoder_pause_offset_ns=%llu pause_offset_delta_ns=%lld pause_offset_difference_ns=%lld main_minus_alpha_pause_ns=%lld",
              paused ? "paused" : "resumed",
              replay_queue_pending,
-             static_cast<long long>(replay_next_alpha_pts));
+             static_cast<long long>(replay_next_alpha_pts),
+             static_cast<long long>(replay_dropped_input_pts),
+             replay_resume_reconcile_pending ? "true" : "false",
+             static_cast<unsigned long long>(
+                 current_video_time_ns),
+             static_cast<unsigned long long>(main_pause_offset_ns),
+             static_cast<unsigned long long>(encoder_pause_offset_ns),
+             static_cast<long long>(pause_offset_delta_ns),
+             static_cast<long long>(pause_offset_difference_ns),
+             static_cast<long long>(main_minus_alpha_pause_ns));
         return true;
     }
 
     bool gpu_texture_recording_output_begin_delayed_replay(obs_output_t *output,
                                                            std::int64_t main_first_packet_pts,
                                                            std::uint64_t main_first_packet_cts,
+                                                           std::int64_t safe_main_pts_watermark,
+                                                           bool has_safe_main_pts_watermark,
+                                                           bool main_packet_input_complete,
                                                            bool main_texture_encoded,
-                                                           std::string *error_message) noexcept
+                                                           std::string *error_message,
+                                                           bool *main_packet_queued) noexcept
     {
+        if (main_packet_queued != nullptr)
+        {
+            *main_packet_queued = false;
+        }
         GpuTextureRecordingOutputContext *context = find_context(output);
         if (context == nullptr)
         {
@@ -2416,6 +3096,10 @@ namespace alpha_recorder::obs
         }
         if (!context->delayed_replay_enabled)
         {
+            if (main_packet_queued != nullptr)
+            {
+                *main_packet_queued = true;
+            }
             return true;
         }
 
@@ -2428,6 +3112,36 @@ namespace alpha_recorder::obs
             std::lock_guard<std::mutex> lock(context->mutex);
             if (context->data_capture_started)
             {
+                if (context->replay_cts_driven_enabled)
+                {
+                    if (has_safe_main_pts_watermark &&
+                        (!context->replay_has_safe_main_pts_watermark ||
+                         safe_main_pts_watermark >
+                             context->replay_safe_main_pts_watermark))
+                    {
+                        context->replay_safe_main_pts_watermark =
+                            safe_main_pts_watermark;
+                        context->replay_has_safe_main_pts_watermark = true;
+                    }
+                    context->replay_main_packet_input_complete =
+                        context->replay_main_packet_input_complete ||
+                        main_packet_input_complete;
+                    if (!queue_main_packet_replay_generation_locked(
+                            *context,
+                            main_first_packet_pts,
+                            main_first_packet_cts,
+                            main_texture_encoded,
+                            target_generation,
+                            latest_generation,
+                            error_message))
+                    {
+                        return false;
+                    }
+                }
+                if (main_packet_queued != nullptr)
+                {
+                    *main_packet_queued = true;
+                }
                 return true;
             }
 
@@ -2439,6 +3153,18 @@ namespace alpha_recorder::obs
             cts_driven = context->replay_cts_driven_enabled;
             if (cts_driven)
             {
+                if (has_safe_main_pts_watermark &&
+                    (!context->replay_has_safe_main_pts_watermark ||
+                     safe_main_pts_watermark >
+                         context->replay_safe_main_pts_watermark))
+                {
+                    context->replay_safe_main_pts_watermark =
+                        safe_main_pts_watermark;
+                    context->replay_has_safe_main_pts_watermark = true;
+                }
+                context->replay_main_packet_input_complete =
+                    context->replay_main_packet_input_complete ||
+                    main_packet_input_complete;
                 if (!queue_main_packet_replay_generation_locked(*context,
                                                                 main_first_packet_pts,
                                                                 main_first_packet_cts,
@@ -2448,6 +3174,10 @@ namespace alpha_recorder::obs
                                                                 error_message))
                 {
                     return false;
+                }
+                if (main_packet_queued != nullptr)
+                {
+                    *main_packet_queued = true;
                 }
                 context->replay_configured = true;
                 const auto first_entry = std::min_element(
@@ -2466,7 +3196,8 @@ namespace alpha_recorder::obs
                         : first_entry->pts;
                 context->replay_next_generation = context->replay_target_generation;
                 context->replay_main_cts = main_first_packet_cts;
-                if (context->replay_generation_queue.size() <
+                if (!context->replay_main_packet_input_complete &&
+                    context->replay_generation_queue.size() <
                     std::max<std::size_t>(1U, cts_replay_prebuffer))
                 {
                     assign_error(error_message,
@@ -2529,9 +3260,11 @@ namespace alpha_recorder::obs
             return false;
         }
 
+        bool pause_after_start = false;
         {
             std::lock_guard<std::mutex> lock(context->mutex);
             context->data_capture_started = true;
+            pause_after_start = context->replay_pause_requested;
             const std::uint64_t frame_interval_ns = configured_frame_interval_ns(*context);
             const std::uint64_t current_video_time = obs_get_video_frame_time();
             context->replay_consume_start_render_time =
@@ -2539,6 +3272,17 @@ namespace alpha_recorder::obs
             context->start_total_frames = obs_get_total_frames();
             context->start_lagged_frames = obs_get_lagged_frames();
             context->state_cv.notify_all();
+        }
+
+        if (pause_after_start && !obs_output_pause(output, true))
+        {
+            assign_error(error_message,
+                         "Alpha Recorder GPU delayed replay output could not apply its pending pause state");
+            obs_output_end_data_capture(output);
+            std::lock_guard<std::mutex> lock(context->mutex);
+            context->data_capture_started = false;
+            context->replay_configured = false;
+            return false;
         }
 
         blog(LOG_INFO,
@@ -2556,6 +3300,9 @@ namespace alpha_recorder::obs
     bool gpu_texture_recording_output_queue_main_packet_replay(obs_output_t *output,
                                                                std::int64_t main_packet_pts,
                                                                std::uint64_t main_packet_cts,
+                                                               std::int64_t safe_main_pts_watermark,
+                                                               bool has_safe_main_pts_watermark,
+                                                               bool main_packet_input_complete,
                                                                bool main_texture_encoded,
                                                                std::string *error_message) noexcept
     {
@@ -2582,6 +3329,18 @@ namespace alpha_recorder::obs
                              "Alpha Recorder GPU delayed replay has not been configured yet");
                 return false;
             }
+            if (has_safe_main_pts_watermark &&
+                (!context->replay_has_safe_main_pts_watermark ||
+                 safe_main_pts_watermark >
+                     context->replay_safe_main_pts_watermark))
+            {
+                context->replay_safe_main_pts_watermark =
+                    safe_main_pts_watermark;
+                context->replay_has_safe_main_pts_watermark = true;
+            }
+            context->replay_main_packet_input_complete =
+                context->replay_main_packet_input_complete ||
+                main_packet_input_complete;
             if (!queue_main_packet_replay_generation_locked(*context,
                                                             main_packet_pts,
                                                             main_packet_cts,
@@ -2742,23 +3501,35 @@ namespace alpha_recorder::obs
         context->stop_state = GpuTextureOutputStopState::MuxFinalized;
         context->state_cv.notify_all();
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] mux finalized packets=%llu muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%llu last_pts=%lld replay_queue_pending=%zu replay_consumed=%llu replay_catchup_slots=%llu replay_skipped_stale=%llu replay_underflows=%llu replay_emitted=%llu replay_repeated_slots=%llu replay_missing_textures=%llu replay_generation_slots=%zu replay_ambiguous_slots=%zu replay_next_alpha_pts=%lld",
+             "[alpha_recorder_gpu_texture] mux finalized packets=%llu muxed_packets=%llu max_buffered_packets=%llu max_buffered_bytes=%llu last_pts=%lld replay_queue_pending=%zu replay_queued=%llu replay_consumed=%llu replay_catchup_slots=%llu replay_compressed_gap_slots=%llu replay_skipped_stale=%llu replay_underflows=%llu replay_emitted=%llu replay_repeated_slots=%llu replay_prefix_repeated_packets=%llu replay_missing_textures=%llu replay_protected_write_skips=%llu replay_generation_slots=%zu replay_ambiguous_slots=%zu replay_next_alpha_pts=%lld replay_dropped_input_pts=%lld replay_pause_target_adjustment_pts=%lld replay_pause_reconciliations=%llu replay_pause_dropped_inputs=%llu replay_pause_reconcile_misses=%llu",
              static_cast<unsigned long long>(context->sink.stats().packet_count),
              static_cast<unsigned long long>(context->sink.stats().muxed_packet_count),
              static_cast<unsigned long long>(context->sink.stats().max_buffered_packet_count),
              static_cast<unsigned long long>(context->sink.stats().max_buffered_packet_bytes),
              static_cast<long long>(context->sink.stats().last_pts),
              context->replay_generation_queue.size(),
+             static_cast<unsigned long long>(context->replay_queued_entries),
              static_cast<unsigned long long>(context->replay_consumed_entries),
              static_cast<unsigned long long>(context->replay_catchup_slots),
+             static_cast<unsigned long long>(context->replay_compressed_gap_slots),
              static_cast<unsigned long long>(context->replay_skipped_stale_entries),
              static_cast<unsigned long long>(context->replay_queue_underflows),
              static_cast<unsigned long long>(context->replay_emitted_frames),
              static_cast<unsigned long long>(context->replay_repeated_slots),
+             static_cast<unsigned long long>(
+                 context->replay_prefix_repeated_packets),
              static_cast<unsigned long long>(context->replay_missing_textures),
+             static_cast<unsigned long long>(
+                 context->replay_protected_write_skips),
              context->replay_packet_generations.size(),
              context->replay_packet_generations.ambiguous_count(),
-             static_cast<long long>(context->replay_packet_generations.next_pts()));
+             static_cast<long long>(context->replay_packet_generations.next_pts()),
+             static_cast<long long>(context->replay_dropped_input_pts),
+             static_cast<long long>(
+                 context->replay_pause_target_adjustment_pts),
+             static_cast<unsigned long long>(context->replay_pause_reconciliations),
+             static_cast<unsigned long long>(context->replay_pause_dropped_inputs),
+             static_cast<unsigned long long>(context->replay_pause_reconcile_misses));
         return true;
     }
 
@@ -2804,6 +3575,8 @@ namespace alpha_recorder::obs
                                : alpha_recorder::obs::MainContentPhase::PreviousProgramGeneration;
         input.fps_num = context->fps_num;
         input.fps_den = context->fps_den;
+        input.allow_transient_generation_mismatch =
+            context->replay_pause_seen;
 
         std::uint64_t alpha_packets_with_generation = 0U;
         std::uint64_t alpha_packets_with_input_cts = 0U;
@@ -2924,7 +3697,7 @@ namespace alpha_recorder::obs
             }
             assign_error(error_message, alpha_recorder::obs::timeline_solve_error_message(solve.error));
             blog(LOG_WARNING,
-                 "[alpha_recorder_gpu_texture] timeline solve failed error=%s partial_media_time=%lld partial_duration=%lld main_packets=%llu alpha_packets=%llu alpha_packets_with_input_cts=%llu alpha_input_cts_range=%llu..%llu alpha_sys_dts_usec_range=%lld..%lld alpha_packets_with_generation=%llu alpha_generation_range=%llu..%llu alpha_renders=%llu alpha_render_cts_range=%llu..%llu phase=%s alpha_epoch_source=%s alpha_latency_frames=%llu alpha_latency_ns=%llu alpha_epoch_candidates=%llu",
+                 "[alpha_recorder_gpu_texture] timeline solve failed error=%s partial_media_time=%lld partial_duration=%lld main_packets=%llu alpha_packets=%llu alpha_packets_with_input_cts=%llu alpha_input_cts_range=%llu..%llu alpha_sys_dts_usec_range=%lld..%lld alpha_packets_with_generation=%llu alpha_generation_range=%llu..%llu alpha_renders=%llu alpha_render_cts_range=%llu..%llu phase=%s alpha_epoch_source=%s alpha_latency_frames=%llu alpha_latency_ns=%llu alpha_epoch_candidates=%llu recovery_allowed=%s transient_generation_mismatches=%llu terminal_clean_suffix_frames=%llu",
                  alpha_recorder::obs::timeline_solve_error_name(solve.error),
                  static_cast<long long>(solve.solution.range.media_time),
                  static_cast<long long>(solve.solution.range.duration),
@@ -2945,13 +3718,18 @@ namespace alpha_recorder::obs
                  alpha_recorder::obs::alpha_epoch_source_name(solve.solution.alpha_epoch_source),
                  static_cast<unsigned long long>(solve.solution.alpha_latency_frames),
                  static_cast<unsigned long long>(solve.solution.alpha_latency_ns),
-                 static_cast<unsigned long long>(solve.solution.alpha_epoch_candidate_count));
+                 static_cast<unsigned long long>(solve.solution.alpha_epoch_candidate_count),
+                 input.allow_transient_generation_mismatch ? "true" : "false",
+                 static_cast<unsigned long long>(
+                     solve.solution.transient_generation_mismatches),
+                 static_cast<unsigned long long>(
+                     solve.solution.terminal_clean_suffix_frames));
             return false;
         }
 
         range = solve.solution.range;
         blog(LOG_INFO,
-             "[alpha_recorder_gpu_texture] certified edit range media_time=%lld first_visible_alpha_pts=%lld duration=%lld main_generation=%llu alpha_generation=%llu alpha_pts_step=%lld main_packets=%llu alpha_packets=%llu alpha_packets_with_generation=%llu alpha_renders=%llu phase=%s alpha_epoch_source=%s alpha_latency_frames=%llu alpha_latency_ns=%llu alpha_epoch_candidates=%llu",
+             "[alpha_recorder_gpu_texture] certified edit range media_time=%lld first_visible_alpha_pts=%lld duration=%lld main_generation=%llu alpha_generation=%llu alpha_pts_step=%lld main_packets=%llu alpha_packets=%llu alpha_packets_with_generation=%llu alpha_renders=%llu phase=%s alpha_epoch_source=%s alpha_latency_frames=%llu alpha_latency_ns=%llu alpha_epoch_candidates=%llu recovery_certified=%s transient_generation_mismatches=%llu terminal_clean_suffix_frames=%llu",
              static_cast<long long>(range.media_time),
              static_cast<long long>(solve.solution.first_visible_alpha_pts),
              static_cast<long long>(range.duration),
@@ -2966,7 +3744,12 @@ namespace alpha_recorder::obs
              alpha_recorder::obs::alpha_epoch_source_name(solve.solution.alpha_epoch_source),
              static_cast<unsigned long long>(solve.solution.alpha_latency_frames),
              static_cast<unsigned long long>(solve.solution.alpha_latency_ns),
-             static_cast<unsigned long long>(solve.solution.alpha_epoch_candidate_count));
+             static_cast<unsigned long long>(solve.solution.alpha_epoch_candidate_count),
+             solve.solution.recovery_certified ? "true" : "false",
+             static_cast<unsigned long long>(
+                 solve.solution.transient_generation_mismatches),
+             static_cast<unsigned long long>(
+                 solve.solution.terminal_clean_suffix_frames));
         return true;
     }
 
@@ -2990,12 +3773,20 @@ namespace alpha_recorder::obs
         result.first_pts = stats.first_pts;
         result.last_pts = stats.last_pts;
         result.replay_consumed_entries = context->replay_consumed_entries;
+        result.replay_queued_entries = context->replay_queued_entries;
         result.replay_catchup_slots = context->replay_catchup_slots;
+        result.replay_compressed_gap_slots =
+            context->replay_compressed_gap_slots;
         result.replay_skipped_stale_entries =
             context->replay_skipped_stale_entries;
         result.replay_queue_underflows = context->replay_queue_underflows;
         result.replay_emitted_frames = context->replay_emitted_frames;
         result.replay_repeated_slots = context->replay_repeated_slots;
+        result.replay_prefix_repeated_packets =
+            context->replay_prefix_repeated_packets;
+        result.replay_queue_pending =
+            static_cast<std::uint64_t>(
+                context->replay_generation_queue.size());
         result.replay_missing_textures = context->replay_missing_textures;
         result.replay_generation_slots =
             static_cast<std::uint64_t>(context->replay_packet_generations.size());

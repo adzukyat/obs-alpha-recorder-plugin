@@ -25,11 +25,15 @@ namespace alpha_recorder::obs
         std::int64_t first_pts = 0;
         std::int64_t last_pts = 0;
         std::uint64_t replay_consumed_entries = 0U;
+        std::uint64_t replay_queued_entries = 0U;
         std::uint64_t replay_catchup_slots = 0U;
+        std::uint64_t replay_compressed_gap_slots = 0U;
         std::uint64_t replay_skipped_stale_entries = 0U;
         std::uint64_t replay_queue_underflows = 0U;
         std::uint64_t replay_emitted_frames = 0U;
         std::uint64_t replay_repeated_slots = 0U;
+        std::uint64_t replay_prefix_repeated_packets = 0U;
+        std::uint64_t replay_queue_pending = 0U;
         std::uint64_t replay_missing_textures = 0U;
         std::uint64_t replay_generation_slots = 0U;
         std::uint64_t replay_ambiguous_slots = 0U;
@@ -73,19 +77,27 @@ namespace alpha_recorder::obs
     [[nodiscard]] bool gpu_texture_recording_output_set_paused(
         obs_output_t *output,
         bool paused,
+        std::uint64_t main_pause_offset_ns,
         std::string *error_message = nullptr) noexcept;
 
     [[nodiscard]] bool gpu_texture_recording_output_begin_delayed_replay(
         obs_output_t *output,
         std::int64_t main_first_packet_pts,
         std::uint64_t main_first_packet_cts,
+        std::int64_t safe_main_pts_watermark,
+        bool has_safe_main_pts_watermark,
+        bool main_packet_input_complete,
         bool main_texture_encoded,
-        std::string *error_message = nullptr) noexcept;
+        std::string *error_message = nullptr,
+        bool *main_packet_queued = nullptr) noexcept;
 
     [[nodiscard]] bool gpu_texture_recording_output_queue_main_packet_replay(
         obs_output_t *output,
         std::int64_t main_packet_pts,
         std::uint64_t main_packet_cts,
+        std::int64_t safe_main_pts_watermark,
+        bool has_safe_main_pts_watermark,
+        bool main_packet_input_complete,
         bool main_texture_encoded,
         std::string *error_message = nullptr) noexcept;
 

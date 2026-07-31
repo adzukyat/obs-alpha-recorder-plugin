@@ -875,12 +875,16 @@ type GpuReplayTelemetry = {
   logFile: string;
   line: string;
   maskPath: string;
+  queued: number;
   consumed: number;
   catchupSlots: number;
+  compressedGapSlots: number;
   skippedStale: number;
   underflows: number;
   emitted: number;
   repeatedSlots: number;
+  prefixRepeated: number;
+  queuePending: number;
   generationSlots: number;
   ambiguousSlots: number;
   missingTextures: number;
@@ -926,7 +930,7 @@ function collectGpuReplayTelemetry(portableConfig: string): GpuReplayTelemetry[]
         continue;
       }
       const replay = line.match(
-        /replay=\{consumed=(\d+) catchup_slots=(\d+) skipped_stale=(\d+) underflows=(\d+) emitted=(\d+) repeated_slots=(\d+) generation_slots=(\d+) ambiguous_slots=(\d+)(?: missing_textures=(\d+))?\}/,
+        /replay=\{(?:queued=(\d+) )?consumed=(\d+) catchup_slots=(\d+) compressed_gap_slots=(\d+) skipped_stale=(\d+) underflows=(\d+) emitted=(\d+) repeated_slots=(\d+)(?: prefix_repeated=(\d+) queue_pending=(\d+))? generation_slots=(\d+) ambiguous_slots=(\d+)(?: missing_textures=(\d+))?\}/,
       );
       if (replay == null) {
         continue;
@@ -935,15 +939,19 @@ function collectGpuReplayTelemetry(portableConfig: string): GpuReplayTelemetry[]
         logFile,
         line: line.trim(),
         maskPath: line.match(/path="([^"]+)"/)?.[1] ?? "",
-        consumed: Number(replay[1]),
-        catchupSlots: Number(replay[2]),
-        skippedStale: Number(replay[3]),
-        underflows: Number(replay[4]),
-        emitted: Number(replay[5]),
-        repeatedSlots: Number(replay[6]),
-        generationSlots: Number(replay[7]),
-        ambiguousSlots: Number(replay[8]),
-        missingTextures: Number(replay[9] ?? 0),
+        queued: Number(replay[1] ?? 0),
+        consumed: Number(replay[2]),
+        catchupSlots: Number(replay[3]),
+        compressedGapSlots: Number(replay[4]),
+        skippedStale: Number(replay[5]),
+        underflows: Number(replay[6]),
+        emitted: Number(replay[7]),
+        repeatedSlots: Number(replay[8]),
+        prefixRepeated: Number(replay[9] ?? 0),
+        queuePending: Number(replay[10] ?? 0),
+        generationSlots: Number(replay[11]),
+        ambiguousSlots: Number(replay[12]),
+        missingTextures: Number(replay[13] ?? 0),
       });
     }
   }
@@ -1625,11 +1633,18 @@ async function waitForAlphaOutputSettled(
   allowRetainedSyncInvalid = false,
 ): Promise<void> {
   const deadline = Date.now() + timeoutSeconds * 1000;
+  const syncInvalidPath = syncInvalidPathForAlpha(alphaPath);
   let lastInvalidArtifacts: string[] = [];
   let cleanMissingSince: number | null = null;
   let emptyOutputSince: number | null = null;
   while (Date.now() < deadline) {
     throwIfAlphaRecorderFailureDetected(failureWatch);
+    if (isNonEmptyFile(syncInvalidPath)) {
+      throw new Error(
+        `Alpha Recorder retained sync-invalid evidence instead of publishing the expected alpha output: ` +
+          `alpha=${alphaPath}; syncInvalid=${syncInvalidPath}`,
+      );
+    }
     lastInvalidArtifacts = invalidAlphaArtifacts(
       artifactRoot,
       allowRetainedSyncInvalid,
@@ -2264,6 +2279,7 @@ function verifyRgbAlphaFrameSync(
   fps: number,
   overloadObserved: boolean,
   lifecycleBoundaryObserved: boolean,
+  startupBoundaryObserved: boolean,
   verifyNleTimeline: boolean,
   strictAllFrames: boolean,
 ): SyncVerification {
@@ -2332,16 +2348,6 @@ function verifyRgbAlphaFrameSync(
         `frameCodes=${rgbCodes.length}/${alphaCodes.length}; ` +
         `bestFrameCodeOffset=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
         `bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
-    );
-  }
-
-  if (!overloadObserved && bestCodeOffset.offset !== expectedFrameCodeOffset) {
-    throw new Error(
-        `RGB/alpha frame-code offset does not match the expected value: ` +
-        `offset=${bestCodeOffset.offset} expected=${expectedFrameCodeOffset} ` +
-        `matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
-        `mainReorderDepth=${mainReorderDepth}; ` +
-        `frames=${rgbFrames}/${alphaFrames}; bestContentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
     );
   }
 
@@ -2427,6 +2433,10 @@ function verifyRgbAlphaFrameSync(
   const lifecycleMismatchBudget = Math.max(6, Math.ceil(fps * 0.15));
   const lifecycleTerminalWindow = Math.min(comparedFrames, Math.max(60, Math.ceil(fps)));
   const lifecycleTerminalStart = Math.max(0, comparedFrames - lifecycleTerminalWindow);
+  const lifecycleCleanSuffixEnd = Math.max(
+    lifecycleTerminalStart,
+    comparedFrames - toleratedTerminalFrames,
+  );
   const lifecycleOffsetStable =
     lifecycleBoundaryObserved &&
     bestCodeOffset.offset === 0 &&
@@ -2435,8 +2445,45 @@ function verifyRgbAlphaFrameSync(
     overloadTerminalContentOffset.offset === 0 &&
     overloadTerminalFrameCodeOffset.total > 0 &&
     overloadTerminalContentOffset.total > 0;
+  const startupOffsetRecovered =
+    startupBoundaryObserved &&
+    hasConfidentZeroOffset(overloadTerminalFrameCodeOffset) &&
+    hasConfidentZeroOffset(overloadTerminalContentOffset);
 
-  if (overloadObserved && !overloadOffsetStable) {
+  if (
+    !overloadObserved &&
+    !lifecycleBoundaryObserved &&
+    !startupBoundaryObserved &&
+    (bestCodeOffset.offset !== expectedFrameCodeOffset || bestOffset.offset !== 0)
+  ) {
+    throw new Error(
+      `RGB/alpha offset does not match the strict expected value: ` +
+        `frameCodeOffset=${bestCodeOffset.offset} expected=${expectedFrameCodeOffset} ` +
+        `matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `contentOffset=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}`,
+    );
+  }
+  if (lifecycleBoundaryObserved && !lifecycleOffsetStable) {
+    throw new Error(
+      `RGB/alpha offset did not recover after the pause/resume boundary: ` +
+        `globalFrameCode=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
+        `globalContent=${bestOffset.offset} matched=${bestOffset.matches}/${bestOffset.total}; ` +
+        `terminalFrameCode=${overloadTerminalFrameCodeOffset.offset} ` +
+        `matched=${overloadTerminalFrameCodeOffset.matches}/${overloadTerminalFrameCodeOffset.total}; ` +
+        `terminalContent=${overloadTerminalContentOffset.offset} ` +
+        `matched=${overloadTerminalContentOffset.matches}/${overloadTerminalContentOffset.total}`,
+    );
+  }
+  if (startupBoundaryObserved && !startupOffsetRecovered) {
+    throw new Error(
+      `RGB/alpha offset did not recover after the split prefix: ` +
+        `terminalFrameCode=${overloadTerminalFrameCodeOffset.offset} ` +
+        `matched=${overloadTerminalFrameCodeOffset.matches}/${overloadTerminalFrameCodeOffset.total}; ` +
+        `terminalContent=${overloadTerminalContentOffset.offset} ` +
+        `matched=${overloadTerminalContentOffset.matches}/${overloadTerminalContentOffset.total}`,
+    );
+  }
+  if (overloadObserved && !overloadOffsetStable && !startupOffsetRecovered) {
     throw new Error(
       `RGB/alpha offset did not recover after the declared recovery window: ` +
         `globalFrameCode=${bestCodeOffset.offset} matched=${bestCodeOffset.matches}/${bestCodeOffset.total}; ` +
@@ -2481,6 +2528,7 @@ function verifyRgbAlphaFrameSync(
   const firstFrameCodeMismatches: string[] = [];
   const firstMaskBoundsMismatches: string[] = [];
   const frameCodeMismatchFlags: boolean[] = [];
+  const maskBoundsMismatchFlags: boolean[] = [];
 
   for (let frame = 0; frame < comparedFrames; ++frame) {
     const alphaFrame = frame;
@@ -2504,6 +2552,7 @@ function verifyRgbAlphaFrameSync(
     }
 
     if (alphaBound == null || !boundsAreSimilar(rgbBounds[frame], alphaBound)) {
+      maskBoundsMismatchFlags.push(true);
       ++maskBoundsMismatches;
       if (frame < toleratedBoundaryFrames) {
         ++startMaskBoundsMismatches;
@@ -2520,8 +2569,29 @@ function verifyRgbAlphaFrameSync(
             `local=${candidates.length === 0 ? "none" : candidates.join(",")}`,
         );
       }
+    } else {
+      maskBoundsMismatchFlags.push(false);
     }
   }
+
+  const startupCleanSuffixStart = Math.max(
+    0,
+    comparedFrames - Math.max(60, Math.ceil(fps)),
+  );
+  const startupCleanSuffixEnd = Math.max(
+    startupCleanSuffixStart,
+    comparedFrames - toleratedTerminalFrames,
+  );
+  const startupFrameCodeRecovered =
+    startupOffsetRecovered &&
+    frameCodeMismatchFlags
+      .slice(startupCleanSuffixStart, startupCleanSuffixEnd)
+      .every((mismatch) => !mismatch);
+  const startupContentRecovered =
+    startupOffsetRecovered &&
+    maskBoundsMismatchFlags
+      .slice(startupCleanSuffixStart, startupCleanSuffixEnd)
+      .every((mismatch) => !mismatch);
 
   if (
     interiorFrameCodeMismatches > toleratedPerFrameMismatches ||
@@ -2530,11 +2600,21 @@ function verifyRgbAlphaFrameSync(
   ) {
     if (lifecycleOffsetStable &&
         frameCodeMismatches <= lifecycleMismatchBudget &&
-        frameCodeMismatchFlags.slice(lifecycleTerminalStart).every((mismatch) => !mismatch)) {
+        frameCodeMismatchFlags
+          .slice(lifecycleTerminalStart, lifecycleCleanSuffixEnd)
+          .every((mismatch) => !mismatch)) {
       console.warn(
         `RGB/alpha frame-code mismatches were confined to a pause/resume boundary and recovered to offset zero: ` +
           `mismatches=${frameCodeMismatches}/${comparedFrames}; budget=${lifecycleMismatchBudget}; ` +
           `examples=${firstFrameCodeMismatches.join("; ")}; terminalWindow=${lifecycleTerminalWindow}`,
+      );
+    } else if (startupFrameCodeRecovered) {
+      console.warn(
+        `RGB/alpha frame-code mismatches were confined to an unrecoverable split prefix and recovered to offset zero: ` +
+          `mismatches=${frameCodeMismatches}/${comparedFrames}; ` +
+          `examples=${firstFrameCodeMismatches.join("; ")}; ` +
+          `terminalFrameCodeOffset=${overloadTerminalFrameCodeOffset.offset} ` +
+          `matched=${overloadTerminalFrameCodeOffset.matches}/${overloadTerminalFrameCodeOffset.total}`,
       );
     } else if (overloadOffsetStable) {
       console.warn(
@@ -2566,11 +2646,25 @@ function verifyRgbAlphaFrameSync(
     startMaskBoundsMismatches > toleratedBoundaryFrames ||
     terminalMaskBoundsMismatches > toleratedBoundaryFrames
   ) {
-    if (lifecycleOffsetStable && maskBoundsMismatches <= lifecycleMismatchBudget) {
+    if (
+      lifecycleOffsetStable &&
+      maskBoundsMismatches <= lifecycleMismatchBudget &&
+      maskBoundsMismatchFlags
+        .slice(lifecycleTerminalStart, lifecycleCleanSuffixEnd)
+        .every((mismatch) => !mismatch)
+    ) {
       console.warn(
         `RGB/alpha mask mismatches were confined to a pause/resume boundary and recovered to offset zero: ` +
           `mismatches=${maskBoundsMismatches}/${comparedFrames}; budget=${lifecycleMismatchBudget}; ` +
           `examples=${firstMaskBoundsMismatches.join("; ")}; terminalWindow=${lifecycleTerminalWindow}`,
+      );
+    } else if (startupContentRecovered) {
+      console.warn(
+        `RGB/alpha mask mismatches were confined to an unrecoverable split prefix and recovered to offset zero: ` +
+          `mismatches=${maskBoundsMismatches}/${comparedFrames}; ` +
+          `examples=${firstMaskBoundsMismatches.join("; ")}; ` +
+          `terminalContentOffset=${overloadTerminalContentOffset.offset} ` +
+          `matched=${overloadTerminalContentOffset.matches}/${overloadTerminalContentOffset.total}`,
       );
     } else if (overloadOffsetStable) {
       console.warn(
@@ -2611,10 +2705,13 @@ function verifyRgbAlphaFrameSync(
   }
   const terminalRepeatOnly =
     frameCodeMismatches === 1 &&
-    maskBoundsMismatches === 1 &&
+    maskBoundsMismatches <= 1 &&
     comparedFrames >= 2 &&
     frameCodeMismatchFlags[comparedFrames - 1] &&
     frameCodeMismatchFlags.slice(0, comparedFrames - 1).every((mismatch) => !mismatch) &&
+    (maskBoundsMismatches === 0 ||
+      (maskBoundsMismatchFlags[comparedFrames - 1] &&
+        maskBoundsMismatchFlags.slice(0, comparedFrames - 1).every((mismatch) => !mismatch))) &&
     alphaCodes[comparedFrames - 1] === alphaCodes[comparedFrames - 2] &&
     rgbCodes[comparedFrames - 1] !== rgbCodes[comparedFrames - 2];
 
@@ -2775,6 +2872,7 @@ async function verifyRecordingOutputs(
     fps,
     overloadObserved,
     lifecycleBoundaryObserved,
+    false,
     verifyNleTimeline,
     strictAllFrames,
   );
@@ -2812,6 +2910,7 @@ async function verifyExpectedNonNormalOutput(
       width,
       height,
       fps,
+      false,
       false,
       false,
       false,
@@ -3056,7 +3155,9 @@ finalization_format=${args.finalizationFormat}
     ...(args.testFault ? { ALPHA_RECORDER_E2E_FAULT: args.testFault } : {}),
     ...(args.faultSegment > 0 ? { ALPHA_RECORDER_E2E_FAULT_SEGMENT: String(args.faultSegment) } : {}),
     ...(args.testFault === "replay-evidence-gap"
-      ? { ALPHA_RECORDER_E2E_REPLAY_GAP_PACKETS: String(args.replayGapPackets) }
+      ? {
+          ALPHA_RECORDER_E2E_REPLAY_GAP_PACKETS: String(args.replayGapPackets),
+        }
       : {}),
   };
 
@@ -3334,7 +3435,7 @@ finalization_format=${args.finalizationFormat}
         const splitLifecycleResult =
           attempt.actualResult === "split-published" ||
           attempt.actualResult === "split-isolated";
-        const syncVerification = splitLifecycleResult
+        let syncVerification = splitLifecycleResult
           ? undefined
           : await verifyExpectedNonNormalOutput(
               stageBin,
@@ -3352,6 +3453,23 @@ finalization_format=${args.finalizationFormat}
             attempt.rgbPath,
             attempt.alphaArtifactPath,
           );
+          if (attempt.alphaArtifactPath) {
+            const ffmpeg = findTool(stageBin, args.repoRoot, "ffmpeg");
+            syncVerification = verifyRgbAlphaFrameSync(
+              ffmpeg,
+              ffprobe,
+              attempt.rgbPath,
+              attempt.alphaArtifactPath,
+              args.width,
+              args.height,
+              fpsValue(args),
+              attempt.overloaded,
+              false,
+              true,
+              false,
+              false,
+            );
+          }
         }
         attempts.push({
           ...attempt,

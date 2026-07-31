@@ -129,8 +129,175 @@ namespace
                "ambiguous evidence must fail closed at packet merge");
     }
 
+    void test_pause_target_adjustment_reconciles_texture_phase()
+    {
+        expect(alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   0,
+                   1) == 1,
+               "no dropped input must advance the replay target by the one-slot texture phase");
+        expect(alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   1,
+                   1) == 0,
+               "one dropped input must cancel the one-slot texture phase");
+        expect(alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   2,
+                   1) == -1,
+               "two dropped inputs must move the replay target back by one slot");
+        expect(alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   1001,
+                   1001) == 0,
+               "one 59.94 fps dropped input must cancel its one-slot texture phase");
+        expect(alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   2002,
+                   1001) == -1001,
+               "two 59.94 fps dropped inputs must move the replay target back by one slot");
+        expect(alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   1,
+                   0) == 0,
+               "an invalid encoder PTS step must disable pause adjustment");
+        expect(alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   1,
+                   1001) == 0,
+               "a correction outside the encoder PTS grid must disable pause adjustment");
+        const std::int64_t first_pause_adjustment =
+            alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                2, 1);
+        const std::int64_t second_pause_adjustment =
+            alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                2, 1);
+        expect(first_pause_adjustment + second_pause_adjustment == -2,
+               "successive pauses must accumulate only each pause's newly dropped inputs");
+
+        expect(-alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   0, 1) == -1,
+               "a zero-drop resume must map packet proof one generation slot back");
+        expect(-alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   1, 1) == 0,
+               "a one-drop resume must preserve the existing packet-generation mapping");
+        expect(-alpha_recorder::obs::replay_pause_target_adjustment_pts(
+                   2, 1) == 1,
+               "a two-drop resume must map packet proof one generation slot forward");
+    }
+
+    void test_pause_packet_pts_epochs_map_only_accepted_inputs()
+    {
+        using alpha_recorder::obs::ReplayPacketPtsEpoch;
+
+        const std::vector<ReplayPacketPtsEpoch> epochs{
+            {46, 1},
+            {120, 2},
+        };
+        expect(alpha_recorder::obs::replay_input_pts_for_packet(
+                   45, epochs) == 45,
+               "packets before a pause epoch must retain their original input PTS");
+        expect(alpha_recorder::obs::replay_input_pts_for_packet(
+                   46, epochs) == 47,
+               "the first resumed packet must map by the uncompensated generation slot");
+        expect(alpha_recorder::obs::replay_input_pts_for_packet(
+                   119, epochs) == 120,
+               "a generation PTS epoch must remain active until the next pause");
+        expect(alpha_recorder::obs::replay_input_pts_for_packet(
+                   120, epochs) == 122,
+               "a later pause epoch must replace the cumulative generation offset");
+
+        alpha_recorder::obs::ReplayGenerationLedger ledger{};
+        ledger.record(47, 530U);
+        alpha_recorder::obs::GpuTexturePacketRecord packet{};
+        packet.pts = 46;
+        alpha_recorder::obs::merge_replay_generation(
+            ledger,
+            alpha_recorder::obs::replay_input_pts_for_packet(
+                packet.pts, epochs),
+            packet);
+        expect(packet.has_generation &&
+                   packet.emitted_generation == 530U,
+               "packet proof must use the generation PTS after source-side pause compensation");
+    }
+
+    void test_split_prefix_fallback_is_bounded_to_startup()
+    {
+        std::uint64_t generation = 999U;
+        expect(!alpha_recorder::obs::choose_replay_prefix_fallback_generation(
+                   {8U, 6U, 7U}, false, false, generation),
+               "normal segments must not synthesize missing prefix evidence");
+        expect(!alpha_recorder::obs::choose_replay_prefix_fallback_generation(
+                   {}, true, false, generation),
+               "a split prefix cannot be repeated before any texture exists");
+        expect(alpha_recorder::obs::choose_replay_prefix_fallback_generation(
+                   {8U, 6U, 7U}, true, false, generation) &&
+                   generation == 6U,
+               "a split segment must repeat its oldest retained texture for an unavailable prefix");
+        expect(!alpha_recorder::obs::choose_replay_prefix_fallback_generation(
+                   {8U, 6U, 7U}, true, true, generation),
+               "fallback must stop permanently after exact generation evidence begins");
+    }
+
+    void test_replay_write_slot_preserves_pending_generations()
+    {
+        const std::vector<std::uint64_t> generations{
+            100U, 101U, 102U, 103U};
+        const std::vector<bool> valid{true, true, true, false};
+        const std::vector<ReplayGenerationQueueEntry> pending{
+            {0, 100U},
+            {1, 101U},
+        };
+
+        const auto selected =
+            alpha_recorder::obs::choose_replay_safe_texture_slot(
+                generations, valid, 0U, pending);
+        expect(selected.has_value() && *selected == 2U,
+               "resume capture must skip ring slots needed by pending replay packets");
+
+        const auto wrapped =
+            alpha_recorder::obs::choose_replay_safe_texture_slot(
+                generations, valid, 3U, pending);
+        expect(wrapped.has_value() && *wrapped == 3U,
+               "an unused ring slot must remain writable before wraparound");
+
+        const auto all_protected =
+            alpha_recorder::obs::choose_replay_safe_texture_slot(
+                generations,
+                std::vector<bool>{true, true, true, true},
+                1U,
+                std::vector<ReplayGenerationQueueEntry>{
+                    {0, 100U},
+                    {1, 101U},
+                    {2, 102U},
+                    {3, 103U},
+                });
+        expect(!all_protected.has_value(),
+               "a full protected ring must drop current retention instead of overwriting replay proof");
+
+        const auto invalid_shape =
+            alpha_recorder::obs::choose_replay_safe_texture_slot(
+                generations, std::vector<bool>{true}, 0U, pending);
+        expect(!invalid_shape.has_value(),
+               "mismatched ring metadata must fail safely");
+    }
+
     void test_replay_queue_catches_up_without_replaying_backlog()
     {
+        std::vector<ReplayGenerationQueueEntry> reordered_queue{
+            {0, 100U},
+            {3, 103U},
+            {1, 101U},
+            {2, 102U},
+        };
+        for (std::int64_t pts = 0; pts < 4; ++pts)
+        {
+            const auto presentation =
+                alpha_recorder::obs::consume_latest_replay_generation(
+                    reordered_queue, pts);
+            expect(presentation.status ==
+                       ReplayGenerationSelectionStatus::Exact,
+                   "reordered encoder callbacks must be consumed by presentation PTS");
+            expect(presentation.generation ==
+                       100U + static_cast<std::uint64_t>(pts),
+                   "callback/DTS order must not become alpha content order");
+        }
+        expect(reordered_queue.empty(),
+               "all reordered presentation entries must be consumed once");
+
         std::vector<ReplayGenerationQueueEntry> queue{
             {10, 100U},
             {12, 102U},
@@ -164,6 +331,31 @@ namespace
                    future_only.removed_entries == 0U &&
                    queue.size() == 1U,
                "future-only proof must not be consumed early");
+
+        const auto confirmed_gap =
+            alpha_recorder::obs::consume_latest_replay_generation(
+                queue, 23, false, 0U, true, 24);
+        expect(confirmed_gap.status == ReplayGenerationSelectionStatus::NextConfirmed,
+               "a presentation gap below the safe watermark must use the next written packet");
+        expect(confirmed_gap.pts == 24 && confirmed_gap.generation == 204U,
+               "gap compression must preserve the next written packet generation");
+        expect(queue.empty(),
+               "the confirmed future packet must be consumed exactly once");
+
+        queue = {{21, 201U}, {24, 204U}};
+        const auto confirmed_gap_with_stale =
+            alpha_recorder::obs::consume_latest_replay_generation(
+                queue, 23, false, 0U, true, 24);
+        expect(confirmed_gap_with_stale.status ==
+                   ReplayGenerationSelectionStatus::NextConfirmed,
+               "a safe future packet must win over stale proof for a permanent PTS gap");
+        expect(confirmed_gap_with_stale.pts == 24 &&
+                   confirmed_gap_with_stale.generation == 204U,
+               "gap compression must advance to the next written main packet");
+        expect(confirmed_gap_with_stale.removed_entries == 2U &&
+                   confirmed_gap_with_stale.skipped_entries == 1U &&
+                   queue.empty(),
+               "gap compression must discard stale proof with the selected future packet");
 
         queue = {{40, 400U}, {40, 401U}, {41, 402U}};
         const auto ambiguous =
@@ -268,6 +460,10 @@ int main()
     test_packet_callbacks_before_and_after_generation();
     test_b_frame_callback_order();
     test_repeat_and_conflict();
+    test_pause_target_adjustment_reconciles_texture_phase();
+    test_pause_packet_pts_epochs_map_only_accepted_inputs();
+    test_split_prefix_fallback_is_bounded_to_startup();
+    test_replay_write_slot_preserves_pending_generations();
     test_replay_queue_catches_up_without_replaying_backlog();
     test_replay_queue_never_regresses_generation();
     property_test_replay_queue_latency_recovery();

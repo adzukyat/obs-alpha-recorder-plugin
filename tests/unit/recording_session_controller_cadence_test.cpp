@@ -234,6 +234,85 @@ namespace
         return expect(selection.status == alpha_recorder::obs::TimestampFrameSelectionStatus::NoPlausibleFrame,
                       "selector should reject missing exact runtime timestamp evidence");
     }
+
+    bool test_main_packet_admission_reconciles_unwritten_stop_suffix()
+    {
+        alpha_recorder::obs::MainPacketAdmissionLedger ledger;
+        std::vector<std::int64_t> live_admitted_pts{};
+        for (std::int64_t pts = 0; pts < 18; ++pts)
+        {
+            const std::optional<alpha_recorder::obs::MainPacketTiming> admitted =
+                ledger.remember(
+                    alpha_recorder::obs::MainPacketTiming{
+                        pts, static_cast<std::uint64_t>(1000 + pts)},
+                    16U);
+            if (admitted)
+            {
+                live_admitted_pts.push_back(admitted->pts);
+            }
+        }
+
+        if (!expect(live_admitted_pts == std::vector<std::int64_t>{0, 1},
+                    "admission hold must release only callbacks older than its window"))
+        {
+            return false;
+        }
+
+        std::vector<alpha_recorder::obs::MainPacketTiming> admitted_tail{};
+        const alpha_recorder::obs::MainPacketAdmissionReconcileResult result =
+            ledger.reconcile(16U, admitted_tail);
+        if (!expect(result.ok, "written packet count should reconcile inside the admission window") ||
+            !expect(result.callback_packet_count == 18U &&
+                        result.written_packet_count == 16U &&
+                        result.already_admitted_packet_count == 2U,
+                    "reconcile counts changed") ||
+            !expect(result.admitted_tail_packet_count == 14U &&
+                        result.removed_unwritten_suffix_packets == 2U,
+                    "reconcile must admit the written tail and discard two unwritten callbacks") ||
+            !expect(admitted_tail.size() == 14U,
+                    "reconcile returned the wrong admitted tail size"))
+        {
+            return false;
+        }
+
+        for (std::size_t index = 0U; index < admitted_tail.size(); ++index)
+        {
+            if (!expect(admitted_tail[index].pts ==
+                            static_cast<std::int64_t>(index + 2U),
+                        "reconciled packet timing order changed"))
+            {
+                return false;
+            }
+        }
+
+        return expect(ledger.pending_packet_count() == 0U &&
+                          ledger.admitted_packet_count() == 16U,
+                      "reconciled admission ledger did not reach the written packet count");
+    }
+
+    bool test_main_packet_admission_rejects_irreconcilable_counts()
+    {
+        alpha_recorder::obs::MainPacketAdmissionLedger ledger;
+        for (std::int64_t pts = 0; pts < 4; ++pts)
+        {
+            (void)ledger.remember(
+                alpha_recorder::obs::MainPacketTiming{
+                    pts, static_cast<std::uint64_t>(1000 + pts)},
+                2U);
+        }
+
+        std::vector<alpha_recorder::obs::MainPacketTiming> admitted_tail{};
+        const auto fewer_written = ledger.reconcile(1U, admitted_tail);
+        if (!expect(!fewer_written.ok,
+                    "written count below already-admitted callbacks must fail"))
+        {
+            return false;
+        }
+
+        const auto extra_written = ledger.reconcile(5U, admitted_tail);
+        return expect(!extra_written.ok,
+                      "written count above observed callbacks must fail");
+    }
 } // namespace
 
 int main()
@@ -248,7 +327,9 @@ int main()
         !test_texture_successor_waits_for_future_cadence() ||
         !test_duplicate_startup_cadence_preserves_content_timestamp() ||
         !test_selector_waits_for_future_runtime_evidence() ||
-        !test_selector_rejects_missing_exact_runtime_evidence())
+        !test_selector_rejects_missing_exact_runtime_evidence() ||
+        !test_main_packet_admission_reconciles_unwritten_stop_suffix() ||
+        !test_main_packet_admission_rejects_irreconcilable_counts())
     {
         return 1;
     }

@@ -238,8 +238,11 @@ HEVC GPU texture path:
    generation for a texture main encoder and the previous Program generation
    for a software/raw main encoder.
 2. Start the auxiliary encoder only after the first main packet supplies the
-   target CTS. Replay retained generations in main-packet order so alpha PTS 0
-   begins on an IDR and corresponds to the first admitted RGB content.
+   target CTS. Hold a bounded callback suffix until it is known to belong to
+   the written main recording, but keep each packet's real presentation PTS as
+   the replay key. Replay retained generations in presentation order, not
+   callback/DTS order, so alpha PTS 0 begins on an IDR and corresponds to the
+   first admitted RGB content even when the main encoder reorders packets.
    When several delayed main-packet records are available for one alpha slot,
    select the newest record at or before that slot and discard older backlog in
    one operation. Never replay stale generations one frame at a time after
@@ -250,13 +253,34 @@ HEVC GPU texture path:
    or regressive evidence repeats the last emitted generation while preserving
    the next alpha PTS slot. Conflicting generations for one main PTS mark the
    corresponding alpha slot ambiguous rather than choosing either value.
-4. Before stopping, allow at most one second for queued main generations to
-   reach the auxiliary mix. Then request stop, end data capture, wait for OBS
-   output deactivation (the encoder-drain boundary), solve the final visible
-   range, finalize the muxer, and publish.
+4. Before stopping, wait for queued main generations to reach the auxiliary
+   mix using a timeout derived from frame cadence, the held admission suffix,
+   and the encoder drain allowance. Before solving, reconcile the main
+   packet-timing ledger to the video packet count in the completed main
+   recording. OBS invokes packet callbacks before the recording output applies
+   its stop boundary, so callback records that form an unwritten suffix are
+   excluded from the proof. At a split boundary, wait briefly for the old main
+   file to become inspectable, transfer any callback suffix that was not
+   written to the old file into the next segment's ledger, and preserve its
+   original PTS/CTS evidence. If the completed main file contains more video
+   packets than have callback timing evidence, or the completed file cannot be
+   inspected, the segment cannot be certified. Then request stop, end data
+   capture, wait for OBS output deactivation (the encoder-drain boundary), solve
+   the final visible range, finalize the muxer, and publish.
 5. Packet write failure is latched for the whole segment. A later successful
    trailer write cannot turn a segment with a missing encoded packet into a
    successful output.
+
+OBS reports `file_changed` only after the main muxer has crossed the split
+boundary, so a newly opened alpha segment cannot recover Program generations
+that predate that notification. For split-following segments only, Alpha
+Recorder fills this bounded, physically unavailable prefix with the oldest
+retained alpha texture until exact generation evidence becomes available. The
+PTS grid and main-file packet-count duration are preserved, and delayed backlog
+is never replayed after recovery. Strict proof still reports
+`MissingPrefixContent`; best-effort mode may publish the segment only after all
+main replay entries have been consumed and the alpha encoder has recovered exact
+generation evidence. Normal recording startup does not use this fallback.
 
 The GPU path deliberately does not register a global raw-video callback; doing
 so would reactivate OBS staging/readback and defeat the GPU-resident performance
@@ -266,11 +290,27 @@ generation is content identity.
 Pause state follows the OBS alpha encoder's atomic pause state, not only the
 frontend event's bookkeeping flag. Program renders continue to be observed
 while paused so the newest generation is available at resume, but alpha replay
-PTS advances only for slots the encoder accepts. A dedicated copy of the last
-emitted texture remains immutable across the pause boundary; if a requested
-generation is no longer retained, the output repeats that copy and still
-advances one PTS slot so recovery cannot create a permanent offset. Delayed
-encoded packets may still be collected during the boundary.
+PTS advances only for slots the encoder accepts. The first Program generation
+observed after the encoder enters its paused state is retained in a protected
+replay-ring slot because OBS may still admit one boundary frame from the main
+software path. A dedicated copy of the last emitted texture remains immutable
+across the pause boundary, and retained ring slots needed by pending replay
+evidence are not overwritten on the first resumed renders. If a requested
+generation is no longer retained, the output repeats the immutable copy and
+still advances one PTS slot so recovery cannot create a permanent offset.
+
+Delayed encoded packets may still be collected during the boundary. On resume,
+the first accepted alpha packet matches its render attempt by `sys_dts_usec`
+plus one graphics cadence and identifies how many provisional texture inputs
+OBS dropped. The source target and packet-generation proof are then adjusted
+in opposite directions for only that pause's input delta: a one-slot OBS
+texture phase cancels one dropped input, while zero or multiple dropped inputs
+move the two mappings by the remaining PTS distance. Packet PTS epochs preserve
+the provisional generation ledger without compacting or replaying dropped
+attempts. OBS reports the original input-frame CTS even after a pause, so
+CTS-to-generation lookup uses that value unchanged; encoder pause offsets are
+diagnostic evidence only. No fixed content delay, CTS rewrite, or unconditional
+one-frame pause correction is applied.
 
 Strict sync proof rejects a segment when OBS reports graphics-lagged frames
 during its capture interval. The current ledger cannot prove which Program
@@ -503,8 +543,9 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_t
   test.
 - `alpha_recorder_test_sync_nightly` adds the complete timeline fault set,
   best-effort publishing, mux/deactivate/rename failures, a 20-bucket
-  start/stop phase sweep, 60000/1001 cadence, pause/resume, split rotation,
-  split failure isolation, and the real NVENC main packet-reorder case.
+  start/stop phase sweep, 60000/1001 cadence, a five-bucket pause/resume phase
+  sweep, split rotation, split failure isolation, and the real NVENC main
+  packet-reorder case.
 - `alpha_recorder_test_sync_release` additionally exercises delayed replay
   backlog recovery, strict graphics-overload evidence behavior, and the
   available 4K60 overload profile.
@@ -593,10 +634,15 @@ The OBS app E2E target:
 - For declared recovery tests, permits localized mismatches only when a
   sufficiently matching zero-offset prefix and terminal suffix are both
   observed. A zero-offset tie with too few matching frames is not accepted.
+- Split-rotation tests decode and verify every published segment. A
+  split-following segment may have only the unrecoverable startup prefix
+  described above; it must then recover a sufficiently long terminal clean
+  suffix with zero frame-code and content offset. The first segment remains
+  subject to the normal strict-start rules.
 - Collects main packet PTS gaps/reorder depth and GPU replay underflow,
-  catch-up, stale-skip, repeat, missing-texture, and ambiguous-slot counters.
-  Tests that require one of these conditions fail when the condition was not
-  actually observed.
+  catch-up, stale-skip, repeat, split-prefix-repeat, pending-queue,
+  missing-texture, and ambiguous-slot counters. Tests that require one of these
+  conditions fail when the condition was not actually observed.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
 - For HEVC targets, verifies the alpha output container follows the OBS
@@ -620,10 +666,11 @@ summaries are not treated as overload by themselves.
 
 Fault injection is active only when the staged E2E process has
 `ALPHA_RECORDER_E2E_TEST=1`. Timeline faults cover missing prefix, missing alpha
-generation, missing tail, and ambiguous generation. Lifecycle faults cover
-deactivate timeout, mux finalization, publish rename, split-segment isolation,
-and a delayed replay-evidence batch. These controls are not user settings and
-have no effect without the E2E gate.
+generation, missing tail, ambiguous generation, and an unwritten stop-boundary
+main packet callback. Lifecycle faults cover deactivate timeout, mux
+finalization, publish rename, split-segment isolation, and a delayed
+replay-evidence batch. These controls are not user settings and have no effect
+without the E2E gate.
 
 ## OBS App E2E Matrix
 
@@ -746,11 +793,12 @@ Completed:
   outputs, including zero frame-code offset plus frame-by-frame sync between a
   moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths.
 - Pure replay-generation ledger regression covering callback permutations,
-  dense and fractional PTS domains, repeats, ambiguity, generation regression,
-  and delayed-backlog catch-up without stale replay.
+  reordered presentation PTS, dense and fractional PTS domains, repeats,
+  ambiguity, generation regression, measured pause CTS adjustment, and
+  delayed-backlog catch-up without stale replay.
 - Real OBS regressions for phase sweep, 59.94 fps, pause/resume, split rotation,
-  isolated split failure, delayed replay evidence, graphics overload, and main
-  packet reorder.
+  isolated split failure, split-boundary callback carry, delayed replay
+  evidence, graphics overload, and main packet reorder.
 - Optional CTest registration behind:
   - `ALPHA_RECORDER_ENABLE_OBS_APP_E2E`
 - OBS staging that copies the full OBS plugin set before overlaying Alpha

@@ -2,7 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace alpha_recorder::obs
@@ -24,6 +27,134 @@ namespace alpha_recorder::obs
         std::uint64_t timestamp = 0U;
         std::uint64_t content_timestamp = 0U;
         bool duplicate_previous = false;
+    };
+
+    struct MainPacketTiming
+    {
+        std::int64_t pts = 0;
+        std::uint64_t cts = 0U;
+        std::uint64_t fer = 0U;
+        std::uint64_t ferc = 0U;
+        bool texture_encoded = false;
+    };
+
+    struct MainPacketAdmissionReconcileResult
+    {
+        bool ok = false;
+        std::uint64_t callback_packet_count = 0U;
+        std::uint64_t written_packet_count = 0U;
+        std::uint64_t already_admitted_packet_count = 0U;
+        std::uint64_t admitted_tail_packet_count = 0U;
+        std::uint64_t removed_unwritten_suffix_packets = 0U;
+    };
+
+    class MainPacketAdmissionLedger
+    {
+    public:
+        [[nodiscard]] std::optional<MainPacketTiming> remember(
+            MainPacketTiming packet,
+            std::size_t admission_hold)
+        {
+            ++callback_packet_count_;
+            pending_packets_.push_back(std::move(packet));
+            if (pending_packets_.size() <= admission_hold)
+            {
+                return std::nullopt;
+            }
+
+            MainPacketTiming admitted = std::move(pending_packets_.front());
+            pending_packets_.pop_front();
+            ++admitted_packet_count_;
+            return admitted;
+        }
+
+        [[nodiscard]] MainPacketAdmissionReconcileResult reconcile(
+            std::uint64_t written_packet_count,
+            std::vector<MainPacketTiming> &admitted_tail)
+        {
+            MainPacketAdmissionReconcileResult result{};
+            result.callback_packet_count = callback_packet_count_;
+            result.written_packet_count = written_packet_count;
+            result.already_admitted_packet_count = admitted_packet_count_;
+            if (written_packet_count > callback_packet_count_ ||
+                written_packet_count < admitted_packet_count_)
+            {
+                return result;
+            }
+
+            const std::uint64_t tail_count =
+                written_packet_count - admitted_packet_count_;
+            if (tail_count >
+                static_cast<std::uint64_t>(pending_packets_.size()))
+            {
+                return result;
+            }
+
+            admitted_tail.reserve(
+                admitted_tail.size() + static_cast<std::size_t>(tail_count));
+            for (std::uint64_t index = 0U; index < tail_count; ++index)
+            {
+                admitted_tail.push_back(std::move(pending_packets_.front()));
+                pending_packets_.pop_front();
+            }
+
+            result.ok = true;
+            result.admitted_tail_packet_count = tail_count;
+            result.removed_unwritten_suffix_packets =
+                static_cast<std::uint64_t>(pending_packets_.size());
+            admitted_packet_count_ += tail_count;
+            pending_packets_.clear();
+            return result;
+        }
+
+        [[nodiscard]] std::vector<MainPacketTiming> take_pending() noexcept
+        {
+            std::vector<MainPacketTiming> result{};
+            result.reserve(pending_packets_.size());
+            while (!pending_packets_.empty())
+            {
+                result.push_back(std::move(pending_packets_.front()));
+                pending_packets_.pop_front();
+            }
+            admitted_packet_count_ +=
+                static_cast<std::uint64_t>(result.size());
+            return result;
+        }
+
+        [[nodiscard]] std::uint64_t discard_pending() noexcept
+        {
+            const std::uint64_t discarded =
+                static_cast<std::uint64_t>(pending_packets_.size());
+            pending_packets_.clear();
+            return discarded;
+        }
+
+        void reset() noexcept
+        {
+            pending_packets_.clear();
+            callback_packet_count_ = 0U;
+            admitted_packet_count_ = 0U;
+        }
+
+        [[nodiscard]] std::uint64_t callback_packet_count() const noexcept
+        {
+            return callback_packet_count_;
+        }
+
+        [[nodiscard]] std::uint64_t admitted_packet_count() const noexcept
+        {
+            return admitted_packet_count_;
+        }
+
+        [[nodiscard]] std::size_t pending_packet_count() const noexcept
+        {
+            return pending_packets_.size();
+        }
+
+    private:
+        std::deque<MainPacketTiming> pending_packets_{};
+        std::uint64_t callback_packet_count_ = 0U;
+        std::uint64_t admitted_packet_count_ = 0U;
     };
 
     enum class TimestampFrameSelectionStatus

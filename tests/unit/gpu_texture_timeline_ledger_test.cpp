@@ -542,6 +542,174 @@ int main()
         }
     }
 
+    {
+        std::vector<alpha_recorder::obs::GpuTexturePacketRecord> packets{
+            main_packet(0, 1000),
+            main_packet(3003, 4000),
+            main_packet(1001, 2000),
+            main_packet(2002, 3000),
+        };
+        const alpha_recorder::obs::MainPacketLedgerReconcileResult result =
+            alpha_recorder::obs::reconcile_main_packet_ledger_to_written_count(
+                packets, 3U);
+        if (!result.ok || result.callback_packet_count != 4U ||
+            result.written_packet_count != 3U ||
+            result.removed_unwritten_suffix_packets != 1U ||
+            result.removed_unwritten_suffix.size() != 1U ||
+            result.removed_unwritten_suffix.front().pts != 2002 ||
+            packets.size() != 3U || packets[0].pts != 0 ||
+            packets[1].pts != 3003 || packets[2].pts != 1001)
+        {
+            std::cerr << "unwritten callback suffix was not removed in delivery order\n";
+            return 20;
+        }
+    }
+
+    {
+        std::vector<alpha_recorder::obs::GpuTexturePacketRecord> packets{
+            main_packet(0, 1000),
+            main_packet(1001, 2000),
+        };
+        const alpha_recorder::obs::MainPacketLedgerReconcileResult result =
+            alpha_recorder::obs::reconcile_main_packet_ledger_to_written_count(
+                packets, 3U);
+        if (result.ok || packets.size() != 2U ||
+            result.callback_packet_count != 2U ||
+            result.written_packet_count != 3U ||
+            result.removed_unwritten_suffix_packets != 0U)
+        {
+            std::cerr << "missing callback timing was incorrectly synthesized\n";
+            return 21;
+        }
+    }
+
+    {
+        std::vector<alpha_recorder::obs::GpuTexturePacketRecord> packets{
+            main_packet(0, 1000),
+        };
+        const alpha_recorder::obs::MainPacketLedgerReconcileResult result =
+            alpha_recorder::obs::reconcile_main_packet_ledger_to_written_count(
+                packets, 0U);
+        if (!result.ok || !packets.empty() ||
+            result.removed_unwritten_suffix_packets != 1U)
+        {
+            std::cerr << "empty written main stream did not clear callback timing\n";
+            return 22;
+        }
+    }
+
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase =
+            alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.main_packets = {
+            main_packet(0, 1000),
+            main_packet(1001, 2000),
+            main_packet(2002, 3000),
+            main_packet(3003, 4000),
+        };
+        input.alpha_packets = {
+            alpha_packet(0, 1000, 0),
+            alpha_packet(1001, 2000, 1),
+            alpha_packet(2002, 3000, 2),
+        };
+        input.alpha_renders = {
+            render(0, 1000, 0),
+            render(1, 2000, 1),
+            render(2, 3000, 2),
+            render(3, 4000, 3),
+        };
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult before =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (before.error !=
+            alpha_recorder::obs::TimelineSolveError::MissingTailCoverage)
+        {
+            std::cerr << "unwritten stop-boundary callback did not reproduce tail failure\n";
+            return 23;
+        }
+
+        const alpha_recorder::obs::MainPacketLedgerReconcileResult reconcile =
+            alpha_recorder::obs::reconcile_main_packet_ledger_to_written_count(
+                input.main_packets, 3U);
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult after =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (!reconcile.ok ||
+            reconcile.removed_unwritten_suffix_packets != 1U ||
+            after.error != alpha_recorder::obs::TimelineSolveError::None ||
+            after.solution.range.media_time != 0 ||
+            after.solution.range.duration != 3003)
+        {
+            std::cerr << "written main packet reconciliation did not repair tail proof\n";
+            return 24;
+        }
+    }
+
+    {
+        alpha_recorder::obs::GpuTextureTimelineInput input{};
+        input.cts_tolerance_ns = 0U;
+        input.main_phase =
+            alpha_recorder::obs::MainContentPhase::LiveProgramGeneration;
+        input.fps_num = 60U;
+        input.fps_den = 1U;
+        for (std::int64_t index = 0; index < 120; ++index)
+        {
+            const std::uint64_t cts =
+                1000U + static_cast<std::uint64_t>(index);
+            input.main_packets.push_back(
+                main_packet(index, cts, index, 1, 60));
+            const std::uint64_t alpha_generation =
+                index == 40 || index == 41
+                    ? static_cast<std::uint64_t>(index + 1)
+                    : static_cast<std::uint64_t>(index);
+            input.alpha_packets.push_back(
+                alpha_packet(index,
+                             cts,
+                             alpha_generation,
+                             index,
+                             1,
+                             60));
+            input.alpha_renders.push_back(
+                render(static_cast<std::uint64_t>(index),
+                       cts,
+                       static_cast<std::uint64_t>(index)));
+        }
+
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult strict =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (strict.error !=
+            alpha_recorder::obs::TimelineSolveError::MissingTailCoverage)
+        {
+            std::cerr << "strict timeline unexpectedly accepted transient generation mismatches\n";
+            return 25;
+        }
+
+        input.allow_transient_generation_mismatch = true;
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult recovered =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (recovered.error !=
+                alpha_recorder::obs::TimelineSolveError::None ||
+            !recovered.solution.recovery_certified ||
+            recovered.solution.transient_generation_mismatches != 2U ||
+            recovered.solution.terminal_clean_suffix_frames != 78U)
+        {
+            std::cerr << "timeline did not certify a bounded mismatch with a clean terminal suffix\n";
+            return 26;
+        }
+
+        input.alpha_packets[110].input_generation = 111U;
+        input.alpha_packets[110].emitted_generation = 111U;
+        const alpha_recorder::obs::GpuTextureTimelineSolveResult dirty_tail =
+            alpha_recorder::obs::solve_gpu_texture_timeline(input);
+        if (dirty_tail.error !=
+            alpha_recorder::obs::TimelineSolveError::MissingTailCoverage)
+        {
+            std::cerr << "timeline accepted a recovery without a long clean terminal suffix\n";
+            return 27;
+        }
+    }
+
     std::cout << "gpu texture timeline ledger test passed\n";
     return 0;
 }

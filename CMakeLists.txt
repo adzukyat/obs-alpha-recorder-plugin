@@ -887,6 +887,21 @@ if(TARGET alpha_recorder_plugin)
         list(APPEND _alpha_recorder_sync_pr_targets
             alpha_recorder_run_obs_app_e2e_sync_pr_strict)
 
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_stop_boundary_reconcile
+            sync-stop-boundary-reconcile
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER software
+            SYNC_RECORD_SECONDS 1
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 0.1
+            TEST_FAULT unwritten-main-tail
+            STRICT_ALL_FRAMES
+            EXPERIMENTAL
+        )
+        list(APPEND _alpha_recorder_sync_pr_targets
+            alpha_recorder_run_obs_app_e2e_sync_stop_boundary_reconcile)
+
         foreach(_alpha_recorder_sync_fault IN ITEMS
                 missing-prefix
                 missing-alpha-generation
@@ -996,11 +1011,12 @@ if(TARGET alpha_recorder_plugin)
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER software
             OUTPUT_MODE advanced-standard
-            SYNC_RECORD_SECONDS 3
-            SYNC_ATTEMPTS 1
-            DURABILITY_RECORD_SECONDS 4
+            SYNC_RECORD_SECONDS 2
+            SYNC_ATTEMPTS 5
+            DURABILITY_RECORD_SECONDS 3
+            PHASE_SWEEP_STEPS 5
             PAUSE_AT_MS 750
-            PAUSE_DURATION_MS 500
+            PAUSE_DURATION_MS 517
             EXPERIMENTAL
         )
         alpha_recorder_add_obs_app_e2e_target(

@@ -795,6 +795,29 @@ namespace alpha_recorder::obs
         }
     } // namespace
 
+    MainPacketLedgerReconcileResult reconcile_main_packet_ledger_to_written_count(
+        std::vector<GpuTexturePacketRecord> &packets,
+        std::uint64_t written_packet_count) noexcept
+    {
+        MainPacketLedgerReconcileResult result{};
+        result.callback_packet_count = static_cast<std::uint64_t>(packets.size());
+        result.written_packet_count = written_packet_count;
+        if (written_packet_count > result.callback_packet_count)
+        {
+            return result;
+        }
+
+        result.removed_unwritten_suffix_packets =
+            result.callback_packet_count - written_packet_count;
+        result.removed_unwritten_suffix.assign(
+            packets.begin() +
+                static_cast<std::ptrdiff_t>(written_packet_count),
+            packets.end());
+        packets.resize(static_cast<std::size_t>(written_packet_count));
+        result.ok = true;
+        return result;
+    }
+
     const char *timeline_solve_error_name(TimelineSolveError error) noexcept
     {
         switch (error)
@@ -965,6 +988,16 @@ namespace alpha_recorder::obs
         bool saw_prefix_generation = false;
         bool saw_tail_candidate = false;
         bool saw_generation_mismatch = false;
+        const std::uint64_t fps_frames =
+            std::max<std::uint64_t>(
+                1U,
+                (static_cast<std::uint64_t>(input.fps_num) +
+                 std::max<std::uint32_t>(1U, input.fps_den) - 1U) /
+                    std::max<std::uint32_t>(1U, input.fps_den));
+        const std::uint64_t required_clean_suffix_frames =
+            std::max<std::uint64_t>(1U, fps_frames / 2U);
+        const std::uint64_t maximum_transient_mismatches =
+            std::max<std::uint64_t>(1U, fps_frames / 2U);
         for (const GpuTexturePacketRecord &candidate : alpha_sorted)
         {
             if (!candidate.has_generation || candidate.emitted_generation != main_generation)
@@ -976,6 +1009,8 @@ namespace alpha_recorder::obs
             std::uint64_t visible_packet_count = 0U;
             bool missing_generation = false;
             bool generation_mismatch = false;
+            std::uint64_t generation_mismatch_count = 0U;
+            std::uint64_t terminal_clean_suffix_frames = 0U;
             while (visible_packet_count < main_packet_count &&
                    visible_packet_count <=
                        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() / alpha_step))
@@ -996,7 +1031,16 @@ namespace alpha_recorder::obs
                 if (alpha_packet->emitted_generation != main_generations[visible_packet_count])
                 {
                     generation_mismatch = true;
-                    break;
+                    ++generation_mismatch_count;
+                    terminal_clean_suffix_frames = 0U;
+                    if (!input.allow_transient_generation_mismatch)
+                    {
+                        break;
+                    }
+                }
+                else
+                {
+                    ++terminal_clean_suffix_frames;
                 }
                 ++visible_packet_count;
             }
@@ -1018,11 +1062,25 @@ namespace alpha_recorder::obs
                 result.solution.alpha_latency_frames = generation_resolution.latency_frames;
                 result.solution.alpha_latency_ns = generation_resolution.latency_ns;
                 result.solution.alpha_epoch_candidate_count = generation_resolution.candidate_count;
+                result.solution.recovery_certified = false;
+                result.solution.transient_generation_mismatches =
+                    generation_mismatch_count;
+                result.solution.terminal_clean_suffix_frames =
+                    terminal_clean_suffix_frames;
             }
 
-            if (visible_packet_count == main_packet_count)
+            const bool recovery_certified =
+                generation_mismatch &&
+                input.allow_transient_generation_mismatch &&
+                generation_mismatch_count <= maximum_transient_mismatches &&
+                terminal_clean_suffix_frames >=
+                    required_clean_suffix_frames;
+            if (visible_packet_count == main_packet_count &&
+                (!generation_mismatch || recovery_certified))
             {
                 alpha_visible_first = &candidate;
+                result.solution.recovery_certified =
+                    recovery_certified;
                 break;
             }
             saw_tail_candidate = saw_tail_candidate || visible_packet_count > 0U;

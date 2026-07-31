@@ -72,6 +72,7 @@ namespace alpha_recorder::obs
         std::uint32_t fps_num = 60U;
         std::uint32_t fps_den = 1U;
         std::uint64_t cts_tolerance_ns = 10000U;
+        bool allow_transient_generation_mismatch = false;
     };
 
     struct GpuTextureTimelineSolution
@@ -88,6 +89,9 @@ namespace alpha_recorder::obs
         std::uint64_t alpha_latency_frames = 0U;
         std::uint64_t alpha_latency_ns = 0U;
         std::uint64_t alpha_epoch_candidate_count = 0U;
+        bool recovery_certified = false;
+        std::uint64_t transient_generation_mismatches = 0U;
+        std::uint64_t terminal_clean_suffix_frames = 0U;
     };
 
     struct GpuTextureTimelineSolveResult
@@ -96,9 +100,22 @@ namespace alpha_recorder::obs
         GpuTextureTimelineSolution solution{};
     };
 
+    struct MainPacketLedgerReconcileResult
+    {
+        bool ok = false;
+        std::uint64_t callback_packet_count = 0U;
+        std::uint64_t written_packet_count = 0U;
+        std::uint64_t removed_unwritten_suffix_packets = 0U;
+        std::vector<GpuTexturePacketRecord> removed_unwritten_suffix{};
+    };
+
     [[nodiscard]] const char *timeline_solve_error_name(TimelineSolveError error) noexcept;
     [[nodiscard]] const char *alpha_epoch_source_name(AlphaEpochSource source) noexcept;
     [[nodiscard]] std::string timeline_solve_error_message(TimelineSolveError error);
+
+    [[nodiscard]] MainPacketLedgerReconcileResult reconcile_main_packet_ledger_to_written_count(
+        std::vector<GpuTexturePacketRecord> &packets,
+        std::uint64_t written_packet_count) noexcept;
 
     [[nodiscard]] GpuTextureTimelineSolveResult solve_gpu_texture_timeline(
         const GpuTextureTimelineInput &input) noexcept;
