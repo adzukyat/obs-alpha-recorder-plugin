@@ -3799,6 +3799,13 @@ namespace alpha_recorder::obs
                 static_cast<std::uint64_t>(
                     context->stop_lagged_frames - context->start_lagged_frames);
         }
+        if (alpha_recorder::obs::e2e_test_fault_enabled(
+                "graphics-lag-counter"))
+        {
+            result.lagged_frames_during_capture =
+                std::max<std::uint64_t>(
+                    1U, result.lagged_frames_during_capture);
+        }
         result.finalized = stats.finalized;
         return result;
     }

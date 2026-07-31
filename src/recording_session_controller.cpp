@@ -1773,13 +1773,50 @@ namespace
                 visible_range_certified &&
                 proof_stats.lagged_frames_during_capture > 0U)
             {
-                visible_range_certified = false;
-                range_error =
-                    "Alpha Recorder GPU texture timeline could not be proven: "
-                    "UnsupportedObsTimingModel (OBS graphics lagged frames=" +
-                    std::to_string(
-                        proof_stats.lagged_frames_during_capture) +
-                    ")";
+                if (recording_texture_encoded_)
+                {
+                    blog(LOG_INFO,
+                         "[alpha_recorder] GPU texture timeline remained certified across OBS graphics lag on a texture-encoded main recording: lagged_frames=%llu main_packets=%llu alpha_packets=%llu replay_repeated_slots=%llu replay_ambiguous_slots=%llu",
+                         static_cast<unsigned long long>(
+                             proof_stats.lagged_frames_during_capture),
+                         static_cast<unsigned long long>(
+                             gpu_main_packets_.size()),
+                         static_cast<unsigned long long>(
+                             proof_stats.packet_count),
+                         static_cast<unsigned long long>(
+                             proof_stats.replay_repeated_slots),
+                         static_cast<unsigned long long>(
+                             proof_stats.replay_ambiguous_slots));
+                    if (settings_.diagnostic_logging)
+                    {
+                        alpha_recorder::obs::append_diagnostic_log_line(
+                            "Alpha Recorder GPU texture timeline remained certified across OBS graphics lag on a texture-encoded main recording: "
+                            "lagged_frames=\"" +
+                            std::to_string(
+                                proof_stats.lagged_frames_during_capture) +
+                            "\" main_packets=\"" +
+                            std::to_string(gpu_main_packets_.size()) +
+                            "\" alpha_packets=\"" +
+                            std::to_string(proof_stats.packet_count) +
+                            "\" replay_repeated_slots=\"" +
+                            std::to_string(
+                                proof_stats.replay_repeated_slots) +
+                            "\" replay_ambiguous_slots=\"" +
+                            std::to_string(
+                                proof_stats.replay_ambiguous_slots) +
+                            "\"");
+                    }
+                }
+                else
+                {
+                    visible_range_certified = false;
+                    range_error =
+                        "Alpha Recorder GPU texture timeline could not be proven: "
+                        "UnsupportedObsTimingModel (software/raw main with OBS graphics lagged frames=" +
+                        std::to_string(
+                            proof_stats.lagged_frames_during_capture) +
+                        ")";
+                }
             }
 
             if (!finalize_failed && !visible_range_certified)

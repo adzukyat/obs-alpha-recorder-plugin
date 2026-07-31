@@ -115,6 +115,18 @@ namespace alpha_recorder::obs
                 static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())));
         }
 
+        [[nodiscard]] std::int64_t rescale_timestamp(std::int64_t value,
+                                                     AVRational source_time_base,
+                                                     AVRational destination_time_base,
+                                                     AVRounding rounding) noexcept
+        {
+            return av_rescale_q_rnd(
+                value,
+                source_time_base,
+                destination_time_base,
+                static_cast<AVRounding>(rounding | AV_ROUND_PASS_MINMAX));
+        }
+
         [[nodiscard]] bool checked_range_end(const AlphaVisiblePacketRange &range,
                                              std::int64_t &end,
                                              std::string *error_message)
@@ -345,6 +357,7 @@ namespace alpha_recorder::obs
 
         [[nodiscard]] bool write_packet(const PendingMatroskaPacket &pending,
                                         std::int64_t visible_end,
+                                        bool terminal_visible_packet,
                                         std::string *error_message)
         {
             if (pending.sample_index >= samples.size())
@@ -389,6 +402,55 @@ namespace alpha_recorder::obs
             }
             av_packet_rescale_ts(packet, AVRational{timebase_num, timebase_den}, stream->time_base);
 
+            if (terminal_visible_packet &&
+                visible_end != std::numeric_limits<std::int64_t>::max() &&
+                sample.pts == sample.dts)
+            {
+                const AVRational packet_time_base{timebase_num, timebase_den};
+                const std::int64_t source_frame_duration =
+                    fallback_sample_duration(samples, timebase_num);
+                const std::int64_t visible_duration =
+                    visible_end - timestamp_origin;
+                const std::int64_t target_visible_end =
+                    rescale_timestamp(visible_duration,
+                                      packet_time_base,
+                                      stream->time_base,
+                                      AV_ROUND_DOWN);
+                const std::int64_t demux_visible_duration =
+                    std::max<std::int64_t>(
+                        1,
+                        rescale_timestamp(source_frame_duration,
+                                          packet_time_base,
+                                          stream->time_base,
+                                          AV_ROUND_DOWN));
+                const std::int64_t target_terminal_pts =
+                    target_visible_end - demux_visible_duration;
+                const std::int64_t adjustment =
+                    target_terminal_pts - packet->pts;
+
+                // FFmpeg's Matroska muxer uses a millisecond timecode scale and
+                // its demuxer reports the floored DefaultDuration. Concentrate
+                // the sub-millisecond CFR rounding remainder in the final
+                // sample so a later stream-copy remux retains the intended
+                // frame-count duration instead of ending one millisecond early.
+                if (adjustment >= 0 && adjustment <= 1 &&
+                    target_terminal_pts > 0)
+                {
+                    packet->pts = target_terminal_pts;
+                    packet->dts += adjustment;
+                    packet->duration = demux_visible_duration;
+                    if (adjustment > 0)
+                    {
+                        blog(LOG_INFO,
+                             "[alpha_recorder_matroska] compensated terminal CFR timestamp by %lld Matroska tick(s): visible_end=%lld terminal_pts=%lld duration=%lld",
+                             static_cast<long long>(adjustment),
+                             static_cast<long long>(target_visible_end),
+                             static_cast<long long>(packet->pts),
+                             static_cast<long long>(packet->duration));
+                    }
+                }
+            }
+
             result = av_interleaved_write_frame(format_context, packet);
             av_packet_free(&packet);
             if (result < 0)
@@ -421,7 +483,10 @@ namespace alpha_recorder::obs
                 return false;
             }
             if (!open_format_context(samples.front().pts, error_message) ||
-                !write_packet(pending, std::numeric_limits<std::int64_t>::max(), error_message))
+                !write_packet(pending,
+                              std::numeric_limits<std::int64_t>::max(),
+                              false,
+                              error_message))
             {
                 return false;
             }
@@ -690,6 +755,26 @@ namespace alpha_recorder::obs
             assign_error(error_message, "Matroska HEVC output does not start on an IDR/keyframe packet");
             return false;
         }
+        const auto last_visible = std::max_element(
+            impl_->samples.begin(),
+            impl_->samples.end(),
+            [visible_start, visible_end](const MatroskaSample &left,
+                                         const MatroskaSample &right) {
+                const bool left_visible =
+                    left.pts >= visible_start && left.pts < visible_end;
+                const bool right_visible =
+                    right.pts >= visible_start && right.pts < visible_end;
+                if (left_visible != right_visible)
+                {
+                    return !left_visible;
+                }
+                return left.pts < right.pts;
+            });
+        const std::size_t last_visible_index =
+            last_visible == impl_->samples.end()
+                ? std::numeric_limits<std::size_t>::max()
+                : static_cast<std::size_t>(
+                      std::distance(impl_->samples.begin(), last_visible));
 
         const std::int64_t origin = impl_->committed_sample_count > 0U
                                         ? impl_->samples.front().pts
@@ -706,7 +791,11 @@ namespace alpha_recorder::obs
             {
                 continue;
             }
-            if (!impl_->write_packet(pending, visible_end, error_message))
+            if (!impl_->write_packet(
+                    pending,
+                    visible_end,
+                    pending.sample_index == last_visible_index,
+                    error_message))
             {
                 return false;
             }

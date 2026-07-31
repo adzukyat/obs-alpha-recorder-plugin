@@ -312,11 +312,14 @@ CTS-to-generation lookup uses that value unchanged; encoder pause offsets are
 diagnostic evidence only. No fixed content delay, CTS rewrite, or unconditional
 one-frame pause correction is applied.
 
-Strict sync proof rejects a segment when OBS reports graphics-lagged frames
-during its capture interval. The current ledger cannot prove which Program
-generation a dropped graphics cadence would have supplied. Best-effort mode
-keeps the completed alpha movie, while strict mode publishes only the
-`.sync-invalid` evidence name.
+OBS graphics-lagged frames are handled according to the main encoder topology.
+For a texture-encoded main recording, main and alpha consume the same live
+Program texture generation, so a cadence absent from both timelines does not
+change their offset; strict sync may accept the segment when generation mapping,
+PTS grid, visible prefix, and tail coverage all agree. For a software/raw main
+recording, staging can retain a different Program generation across the dropped
+cadence, so any observed graphics lag remains `UnsupportedObsTimingModel` and
+fails closed. The lag count and selected topology are retained in telemetry.
 
 If the main Program texture produces only opaque alpha in a future OBS/runtime
 configuration, the fallback is a dedicated render path: render the active
@@ -648,6 +651,11 @@ The OBS app E2E target:
 - For HEVC targets, verifies the alpha output container follows the OBS
   recording container for MP4, MOV, and MKV, `ffprobe` reports `hevc`, and the
   output does not use an alpha pixel format.
+- The MKV NLE-remux regression stream-copies both RGB and alpha video tracks to
+  MP4 and requires identical frame counts, track durations, and average frame
+  rates. This catches a one-millisecond terminal Matroska rounding loss that
+  otherwise makes Adobe applications report a nominal 60 fps alpha track as
+  60.001 fps.
 
 The plugin logs one per-segment OBS performance summary covering
 capture/readback CPU time, GPU submission timing, alignment-worker batches,
@@ -669,7 +677,10 @@ Fault injection is active only when the staged E2E process has
 generation, missing tail, ambiguous generation, and an unwritten stop-boundary
 main packet callback. Lifecycle faults cover deactivate timeout, mux
 finalization, publish rename, split-segment isolation, and a delayed
-replay-evidence batch. These controls are not user settings and have no effect
+replay-evidence batch. A graphics-lag counter fault verifies that a
+texture-encoded main remains publishable when the generation proof is complete,
+while a real render-stall regression verifies that software/raw main recordings
+still fail closed. These controls are not user settings and have no effect
 without the E2E gate.
 
 ## OBS App E2E Matrix
@@ -699,8 +710,10 @@ Registered target families include:
 - `alpha_recorder_run_obs_app_e2e_sync_pause_resume`
 - `alpha_recorder_run_obs_app_e2e_sync_split`
 - `alpha_recorder_run_obs_app_e2e_sync_replay_gap_recovery`
-- `alpha_recorder_run_obs_app_e2e_sync_overload_fail_closed`
+- `alpha_recorder_run_obs_app_e2e_sync_overload_software_fail_closed`
+- `alpha_recorder_run_obs_app_e2e_sync_texture_lag_counter_generation_proof`
 - `alpha_recorder_run_obs_app_e2e_sync_packet_reorder`
+- `alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mkv_remux_timeline`
 
 Example sync-bug exposure matrix:
 

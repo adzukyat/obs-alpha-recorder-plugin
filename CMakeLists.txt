@@ -537,7 +537,7 @@ if(TARGET alpha_recorder_plugin)
     set(_alpha_recorder_obs_app_e2e_skipped_targets)
 
     function(alpha_recorder_add_obs_app_e2e_target target_name stage_suffix)
-        set(options ALLOW_OVERLOAD EXPERIMENTAL WITH_AUDIO VERIFY_NLE_TIMELINE STRICT_ALL_FRAMES REQUIRE_MAIN_PTS_GAP REQUIRE_PACKET_REORDER REQUIRE_REPLAY_UNDERFLOW REQUIRE_REPLAY_CATCHUP REQUIRE_OVERLOAD REQUIRE_TAIL_REPEAT BEST_EFFORT_SYNC)
+        set(options ALLOW_OVERLOAD EXPERIMENTAL WITH_AUDIO VERIFY_NLE_TIMELINE VERIFY_REMUX_TIMELINE STRICT_ALL_FRAMES REQUIRE_MAIN_PTS_GAP REQUIRE_PACKET_REORDER REQUIRE_REPLAY_UNDERFLOW REQUIRE_REPLAY_CATCHUP REQUIRE_OVERLOAD REQUIRE_TAIL_REPEAT BEST_EFFORT_SYNC)
         set(one_value_args FINALIZATION_FORMAT RGB_ENCODER WIDTH HEIGHT FPS FPS_NUM FPS_DEN RECORD_FORMAT OUTPUT_MODE RECORD_AUDIO_ENCODER RECORD_SECONDS MAX_RECORD_SECONDS SYNC_RECORD_SECONDS SYNC_ATTEMPTS DURABILITY_RECORD_SECONDS HEVC_GOP_SIZE PHASE_SWEEP_STEPS PAUSE_AT_MS PAUSE_DURATION_MS SPLIT_AT_MS OVERLOAD_PULSE_AT_MS OVERLOAD_PULSE_DURATION_MS OVERLOAD_PULSE_DELAY_MS TEST_FAULT FAULT_SEGMENT REPLAY_GAP_PACKETS EXPECT_RESULT)
         set(multi_value_args)
         cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
@@ -635,6 +635,11 @@ if(TARGET alpha_recorder_plugin)
         else()
             set(ARG_VERIFY_NLE_TIMELINE_VALUE "OFF")
         endif()
+        if(ARG_VERIFY_REMUX_TIMELINE)
+            set(ARG_VERIFY_REMUX_TIMELINE_VALUE "ON")
+        else()
+            set(ARG_VERIFY_REMUX_TIMELINE_VALUE "OFF")
+        endif()
         foreach(_alpha_recorder_bool_name IN ITEMS
                 STRICT_ALL_FRAMES
                 REQUIRE_MAIN_PTS_GAP
@@ -674,6 +679,7 @@ if(TARGET alpha_recorder_plugin)
                 "-DALLOW_OVERLOAD=${ARG_ALLOW_OVERLOAD_VALUE}"
                 "-DWITH_AUDIO=${ARG_WITH_AUDIO_VALUE}"
                 "-DVERIFY_NLE_TIMELINE=${ARG_VERIFY_NLE_TIMELINE_VALUE}"
+                "-DVERIFY_REMUX_TIMELINE=${ARG_VERIFY_REMUX_TIMELINE_VALUE}"
                 "-DSTRICT_ALL_FRAMES=${ARG_STRICT_ALL_FRAMES_VALUE}"
                 "-DPHASE_SWEEP_STEPS=${ARG_PHASE_SWEEP_STEPS}"
                 "-DREQUIRE_MAIN_PTS_GAP=${ARG_REQUIRE_MAIN_PTS_GAP_VALUE}"
@@ -759,6 +765,17 @@ if(TARGET alpha_recorder_plugin)
             RECORD_FORMAT mp4
             EXPERIMENTAL
         )
+        alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mkv_remux_timeline fhd60-rgb-nvenc-hevc-alpha-hevc-nvenc-mkv-remux-timeline
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            RECORD_FORMAT mkv
+            SYNC_RECORD_SECONDS 2
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 2
+            WITH_AUDIO
+            VERIFY_REMUX_TIMELINE
+            EXPERIMENTAL
+        )
         alpha_recorder_add_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_gop120 fhd60-rgb-nvenc-hevc-alpha-hevc-nvenc-gop120
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER nvenc_hevc
@@ -790,6 +807,7 @@ if(TARGET alpha_recorder_plugin)
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_png_mov "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mp4 "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
+        alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mkv_remux_timeline "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_gop120 "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_hybrid_mov "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
     endif()
@@ -1078,8 +1096,8 @@ if(TARGET alpha_recorder_plugin)
             alpha_recorder_run_obs_app_e2e_sync_replay_gap_recovery)
 
         alpha_recorder_add_obs_app_e2e_target(
-            alpha_recorder_run_obs_app_e2e_sync_overload_fail_closed
-            sync-overload-fail-closed
+            alpha_recorder_run_obs_app_e2e_sync_overload_software_fail_closed
+            sync-overload-software-fail-closed
             FINALIZATION_FORMAT mask_hevc_nvenc
             RGB_ENCODER software
             SYNC_RECORD_SECONDS 4
@@ -1094,7 +1112,7 @@ if(TARGET alpha_recorder_plugin)
             EXPERIMENTAL
         )
         list(APPEND _alpha_recorder_sync_release_targets
-            alpha_recorder_run_obs_app_e2e_sync_overload_fail_closed)
+            alpha_recorder_run_obs_app_e2e_sync_overload_software_fail_closed)
     else()
         foreach(_alpha_recorder_sync_target IN ITEMS
                 alpha_recorder_run_obs_app_e2e_sync_pr_strict
@@ -1112,7 +1130,7 @@ if(TARGET alpha_recorder_plugin)
                 alpha_recorder_run_obs_app_e2e_sync_split
                 alpha_recorder_run_obs_app_e2e_sync_split_failure_isolated
                 alpha_recorder_run_obs_app_e2e_sync_replay_gap_recovery
-                alpha_recorder_run_obs_app_e2e_sync_overload_fail_closed)
+                alpha_recorder_run_obs_app_e2e_sync_overload_software_fail_closed)
             alpha_recorder_skip_obs_app_e2e_target(
                 ${_alpha_recorder_sync_target}
                 "${_alpha_recorder_obs_app_e2e_nvenc_reason}")
@@ -1120,6 +1138,20 @@ if(TARGET alpha_recorder_plugin)
     endif()
 
     if(_alpha_recorder_obs_app_e2e_has_nvenc_rgb)
+        alpha_recorder_add_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_texture_lag_counter_generation_proof
+            sync-texture-lag-counter-generation-proof
+            FINALIZATION_FORMAT mask_hevc_nvenc
+            RGB_ENCODER nvenc_hevc
+            SYNC_RECORD_SECONDS 2
+            SYNC_ATTEMPTS 1
+            DURABILITY_RECORD_SECONDS 2
+            TEST_FAULT graphics-lag-counter
+            EXPECT_RESULT normal
+            EXPERIMENTAL
+        )
+        list(APPEND _alpha_recorder_sync_release_targets
+            alpha_recorder_run_obs_app_e2e_sync_texture_lag_counter_generation_proof)
         alpha_recorder_add_obs_app_e2e_target(
             alpha_recorder_run_obs_app_e2e_sync_packet_reorder
             sync-packet-reorder
@@ -1136,7 +1168,12 @@ if(TARGET alpha_recorder_plugin)
             alpha_recorder_run_obs_app_e2e_sync_packet_reorder)
         list(APPEND _alpha_recorder_sync_release_targets
             alpha_recorder_run_obs_app_e2e_4k60_allow_overload_rgb_nvenc_hevc_alpha_hevc_nvenc)
+        list(APPEND _alpha_recorder_sync_release_targets
+            alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mkv_remux_timeline)
     else()
+        alpha_recorder_skip_obs_app_e2e_target(
+            alpha_recorder_run_obs_app_e2e_sync_texture_lag_counter_generation_proof
+            "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")
         alpha_recorder_skip_obs_app_e2e_target(
             alpha_recorder_run_obs_app_e2e_sync_packet_reorder
             "${_alpha_recorder_obs_app_e2e_nvenc_rgb_reason}")

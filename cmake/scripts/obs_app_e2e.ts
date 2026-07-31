@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from "bun";
 import { createHash, randomBytes } from "node:crypto";
-import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { platform } from "node:process";
 
@@ -42,6 +42,7 @@ type Args = {
   hevcNvencTune: string;
   hevcGopSize: number;
   verifyNleTimeline: boolean;
+  verifyRemuxTimeline: boolean;
   strictAllFrames: boolean;
   phaseSweepSteps: number;
   requireMainPtsGap: boolean;
@@ -115,6 +116,7 @@ function parseArgs(argv: string[]): Args {
     hevcNvencTune: "hq",
     hevcGopSize: 0,
     verifyNleTimeline: false,
+    verifyRemuxTimeline: false,
     strictAllFrames: false,
     phaseSweepSteps: 0,
     requireMainPtsGap: false,
@@ -252,6 +254,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--verify-nle-timeline":
         args.verifyNleTimeline = true;
+        break;
+      case "--verify-remux-timeline":
+        args.verifyRemuxTimeline = true;
         break;
       case "--strict-all-frames":
         args.strictAllFrames = true;
@@ -2099,6 +2104,19 @@ type PacketTimingSummary = {
   gridViolations: number;
 };
 
+type VideoTimelineSummary = {
+  frameCount: string;
+  durationTs: string;
+  timeBase: string;
+  averageFrameRate: string;
+  realFrameRate: string;
+};
+
+type StreamCopyRemuxTimelineSummary = {
+  rgb: VideoTimelineSummary;
+  alpha: VideoTimelineSummary;
+};
+
 function integerGcd(left: number, right: number): number {
   let a = Math.abs(Math.trunc(left));
   let b = Math.abs(Math.trunc(right));
@@ -2191,6 +2209,133 @@ function packetTimingSummary(ffprobe: string, path: string): PacketTimingSummary
     gapCount,
     gridViolations,
   };
+}
+
+function rationalParts(value: string): [bigint, bigint] {
+  const [numeratorText, denominatorText] = value.split("/");
+  const numerator = BigInt(numeratorText || "0");
+  const denominator = BigInt(denominatorText || "1");
+  if (denominator === 0n) {
+    throw new Error(`Invalid rational value: ${value}`);
+  }
+  return [numerator, denominator];
+}
+
+function rationalsEqual(left: string, right: string): boolean {
+  const [leftNumerator, leftDenominator] = rationalParts(left);
+  const [rightNumerator, rightDenominator] = rationalParts(right);
+  return leftNumerator * rightDenominator === rightNumerator * leftDenominator;
+}
+
+function videoTimelineSummary(ffprobe: string, path: string): VideoTimelineSummary {
+  const probe = checkedJson(
+    ffprobe,
+    [
+      "-v",
+      "error",
+      "-select_streams",
+      "v:0",
+      "-show_entries",
+      "stream=nb_frames,duration_ts,time_base,avg_frame_rate,r_frame_rate",
+      "-of",
+      "json",
+      path,
+    ],
+    180,
+  ) as {
+    streams?: Array<{
+      nb_frames?: number | string;
+      duration_ts?: number | string;
+      time_base?: string;
+      avg_frame_rate?: string;
+      r_frame_rate?: string;
+    }>;
+  };
+  const stream = probe.streams?.[0];
+  if (
+    stream?.nb_frames === undefined ||
+    stream.duration_ts === undefined ||
+    !stream.time_base ||
+    !stream.avg_frame_rate ||
+    !stream.r_frame_rate
+  ) {
+    throw new Error(`Video timeline metadata is incomplete for ${path}: ${JSON.stringify(probe)}`);
+  }
+  return {
+    frameCount: String(stream.nb_frames),
+    durationTs: String(stream.duration_ts),
+    timeBase: stream.time_base,
+    averageFrameRate: stream.avg_frame_rate,
+    realFrameRate: stream.r_frame_rate,
+  };
+}
+
+function timelineDurationsEqual(left: VideoTimelineSummary, right: VideoTimelineSummary): boolean {
+  const [leftTimeBaseNumerator, leftTimeBaseDenominator] = rationalParts(left.timeBase);
+  const [rightTimeBaseNumerator, rightTimeBaseDenominator] = rationalParts(right.timeBase);
+  return (
+    BigInt(left.durationTs) *
+      leftTimeBaseNumerator *
+      rightTimeBaseDenominator ===
+    BigInt(right.durationTs) *
+      rightTimeBaseNumerator *
+      leftTimeBaseDenominator
+  );
+}
+
+function verifyStreamCopyRemuxTimeline(
+  ffmpeg: string,
+  ffprobe: string,
+  rgbPath: string,
+  alphaPath: string,
+): StreamCopyRemuxTimelineSummary {
+  const token = randomBytes(8).toString("hex");
+  const rgbRemuxPath = join(dirname(rgbPath), `.alpha-recorder-remux-rgb-${token}.mp4`);
+  const alphaRemuxPath = join(dirname(alphaPath), `.alpha-recorder-remux-alpha-${token}.mp4`);
+  try {
+    for (const [inputPath, outputPath] of [
+      [rgbPath, rgbRemuxPath],
+      [alphaPath, alphaRemuxPath],
+    ]) {
+      checkedProcess(
+        ffmpeg,
+        [
+          "-v",
+          "error",
+          "-y",
+          "-i",
+          inputPath,
+          "-map",
+          "0:v:0",
+          "-an",
+          "-c:v",
+          "copy",
+          "-tag:v",
+          "hvc1",
+          outputPath,
+        ],
+        180,
+      );
+    }
+
+    const summary: StreamCopyRemuxTimelineSummary = {
+      rgb: videoTimelineSummary(ffprobe, rgbRemuxPath),
+      alpha: videoTimelineSummary(ffprobe, alphaRemuxPath),
+    };
+    if (
+      summary.rgb.frameCount !== summary.alpha.frameCount ||
+      !timelineDurationsEqual(summary.rgb, summary.alpha) ||
+      !rationalsEqual(summary.rgb.averageFrameRate, summary.alpha.averageFrameRate)
+    ) {
+      throw new Error(
+        `RGB/alpha stream-copy MP4 timelines differ: ${JSON.stringify(summary)}`,
+      );
+    }
+    return summary;
+  } finally {
+    rmSync(rgbRemuxPath, { force: true });
+    rmSync(alphaRemuxPath, { force: true });
+  }
 }
 
 function consecutiveDuplicateCount(values: number[]): number {
@@ -2782,9 +2927,17 @@ async function verifyRecordingOutputs(
   overloadObserved: boolean,
   lifecycleBoundaryObserved: boolean,
   verifyNleTimeline: boolean,
+  verifyRemuxTimeline: boolean,
   strictAllFrames: boolean,
   allowRetainedSyncInvalid = false,
-): Promise<{ rgbPath: string; alphaPath: string; rgbProbe: any; alphaProbe: any; syncVerification: SyncVerification }> {
+): Promise<{
+  rgbPath: string;
+  alphaPath: string;
+  rgbProbe: any;
+  alphaProbe: any;
+  syncVerification: SyncVerification;
+  remuxTimeline?: StreamCopyRemuxTimelineSummary;
+}> {
   if (!rgbPath) {
     const mkvs = readdirSync(artifactRoot)
       .filter((name) => name.endsWith(".mkv"))
@@ -2876,7 +3029,10 @@ async function verifyRecordingOutputs(
     verifyNleTimeline,
     strictAllFrames,
   );
-  return { rgbPath, alphaPath, rgbProbe, alphaProbe, syncVerification };
+  const remuxTimeline = verifyRemuxTimeline
+    ? verifyStreamCopyRemuxTimeline(ffmpeg, ffprobe, rgbPath, alphaPath)
+    : undefined;
+  return { rgbPath, alphaPath, rgbProbe, alphaProbe, syncVerification, remuxTimeline };
 }
 
 async function verifyExpectedNonNormalOutput(
@@ -3503,6 +3659,7 @@ finalization_format=${args.finalizationFormat}
           args.testFault === "replay-evidence-gap",
         args.pauseAtMs >= 0,
         args.verifyNleTimeline,
+        args.verifyRemuxTimeline,
         args.strictAllFrames,
         args.expectedResult === "normal-or-sync-invalid",
       );
@@ -3521,6 +3678,7 @@ finalization_format=${args.finalizationFormat}
           `mainPtsGaps=${outputs.syncVerification.mainPacketTiming.gapCount} ` +
           `alphaConstantPacketDuration=${outputs.syncVerification.alphaConstantPacketDuration ?? "n/a"} ` +
           `contentOffset=${outputs.syncVerification.bestContentOffset.offset} ` +
+          `remuxRate=${outputs.remuxTimeline?.alpha.averageFrameRate ?? "n/a"} ` +
           `mismatches=${outputs.syncVerification.frameCodeMismatches}/${outputs.syncVerification.maskBoundsMismatches} ` +
           `duplicates=${outputs.syncVerification.rgbConsecutiveDuplicateCodes}/${outputs.syncVerification.alphaConsecutiveDuplicateCodes}`,
       );
@@ -3577,6 +3735,7 @@ finalization_format=${args.finalizationFormat}
           },
           nleTimeline: {
             verify: args.verifyNleTimeline,
+            verifyStreamCopyRemux: args.verifyRemuxTimeline,
           },
           width: args.width,
           height: args.height,
