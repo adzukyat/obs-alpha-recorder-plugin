@@ -381,7 +381,7 @@ and the platform's OBS runtime/plugin/data layout.
 The OBS source checkout is tracked as a git submodule at
 `deps/obs/obs-studio`. When bootstrapped from source, the staged developer tree
 lives under `deps/obs/obs-build/rundir/RelWithDebInfo` alongside the pinned
-source and build trees. Release 0.1.3 pins OBS Studio 32.2.1 and its FFmpeg
+source and build trees. Release 0.2.0 pins OBS Studio 32.2.1 and its FFmpeg
 8.1.2 ABI. Because the plugin calls libavcodec, libavformat, and libavutil
 directly, release artifacts must be rebuilt whenever OBS changes the bundled
 FFmpeg ABI; an OBS 32.1.x build imports FFmpeg 7 DLL/SONAME versions and is not
