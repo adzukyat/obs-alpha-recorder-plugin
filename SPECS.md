@@ -28,20 +28,18 @@ E2E path that can run without desktop automation.
 - There is no separate "Start Alpha Recording" button.
 - Capture target is Program output, not Preview.
 - Missing settings default to Enabled ON.
-- When no finalization format has been saved, the plugin prefers an available
-  hardware HEVC encoder before falling back to PNG MOV.
-- Scenario files are retained only for synthetic/non-UI E2E paths.
+- When no finalization format has been saved, the plugin uses the safe PNG MOV
+  fallback. Hardware HEVC formats are preserved when explicitly selected and are
+  exposed only when the matching runtime backend is available.
 - External capture apps are not part of the product path.
 - The shipping OBS runtime writes the playable alpha mask movie directly.
-- Raw sidecar and manifest primitives remain only for synthetic/non-UI
-  E2E support.
 - Build and staging produce one normal user OBS plugin artifact named
   `alpha_recorder`.
 - The `alpha_recorder` artifact contains both runtime recording hooks and
   `Tools > Alpha Recorder Settings`.
-- The separate `alpha_recorder_e2e` module is test-only for deterministic and
-  synthetic E2E support.
-- `alpha_recorder_e2e` must not register runtime UI or obs-websocket hooks.
+- Real OBS app E2E additionally stages the test-only
+  `alpha_recorder_obs_app_e2e_source` module, which registers only the moving
+  alpha test source and is never included in release packages.
 
 ## Non-Goals
 
@@ -79,7 +77,9 @@ The plugin follows OBS's recording path and naming rules. If OBS records
 `C:\Recordings\MyRec.mkv`, Alpha Recorder writes:
 
 - `C:\Recordings\MyRec.alpha.mov` for PNG MOV.
-- `C:\Recordings\MyRec.alpha.mp4` for HEVC NVENC or HEVC AMF.
+- `C:\Recordings\MyRec.alpha.mkv` for HEVC NVENC, HEVC AMF, HEVC QSV, or HEVC
+  VAAPI when the OBS recording is MKV. HEVC alpha also follows MP4 and MOV
+  recording containers; unknown recording extensions fall back to `.alpha.mp4`.
 
 Failure behavior:
 
@@ -88,8 +88,17 @@ Failure behavior:
 - If alignment or mask writing cannot keep up, keep alpha mask movie generation
   running by repeating the previous alpha frame for recoverable gaps, log the
   repeat/drop counts, and do not stop or slow the main OBS recording.
-- If finalization fails on record stop, log the error and leave any partial mask
-  movie as a debugging artifact.
+- Temporary alpha files are published only after mux finalization succeeds.
+  Encoder or mux failures remove incomplete temporary files; they are not
+  renamed to the final recording path.
+- Sync-proof failure is best-effort by default: apply a usable proven start
+  when one exists, extend it through the available alpha tail, and cap it to
+  the written main-video frame count; otherwise publish the complete alpha
+  timeline. When
+  `Fail close on sync proof failure` is enabled under Debug, the affected alpha
+  segment is not published under the normal `.alpha` name. A successfully
+  finalized diagnostic movie is retained as `.alpha.sync-invalid.<container>`
+  so the unproven recording remains available for investigation.
 - The main OBS recording must remain the highest-priority artifact.
 
 ## Settings Contract
@@ -101,22 +110,30 @@ Settings include:
 - Installed version status. The dialog checks GitHub asynchronously for the
   latest published release and verified signed `v*` tags, then links to GitHub
   Releases when the installed version is older.
-- HEVC encoder controls when NVENC/AMF mask output is selected:
+- HEVC encoder controls when HEVC mask output is selected:
   - Quality Profile.
   - CQ.
   - Encoder-specific Preset.
   - Tune for NVENC.
-  - Advanced GOP, B-frames, Lookahead, AQ, NVENC GPU, and NVENC Split Encode
-    controls.
+  - Advanced GOP, AQ, NVENC GPU, and NVENC Split Encode controls.
 - NVENC exposes P1 through P7 preset values, Tune, GPU index, and Split Encode
   mode.
 - AMF exposes Speed, Balanced, and Quality presets without Tune.
+- QSV exposes TU7 through TU1 preset values without NVENC Tune, GPU index, or
+  Split Encode controls.
+- VAAPI exposes a conservative default preset and common CQ/GOP controls only.
 - Quality Profile buttons apply full encoder presets, not CQ-only shortcuts.
 - HEVC profile buttons have complete tuning semantics:
   - Lossless disables the lossy tuning path.
-  - High Quality enables the quality preset with B-frames, lookahead, and AQ.
-  - Balanced uses lighter B-frame, lookahead, and AQ settings.
-  - Fast disables latency-heavy B-frame, lookahead, and AQ options.
+  - High Quality enables the quality preset with AQ.
+  - Balanced uses lighter CQ and AQ settings.
+  - Fast disables latency-heavy AQ options.
+- HEVC alpha encoding fixes B-frames to 0 and disables encoder lookahead.
+  Reordered alpha texture packets cannot currently be proven sync-safe across
+  supported OBS texture encoders, so these controls are intentionally not
+  exposed through the UI, config, WebSocket API, or E2E harness.
+- A Debug group at the bottom of the dialog contains Diagnostic Log and
+  `Fail close on sync proof failure`. Both default to off.
 
 Persisted OBS user config keys:
 
@@ -129,32 +146,48 @@ Persisted OBS user config keys:
 | HEVC preset | `AlphaRecorder.hevc_preset` |
 | HEVC NVENC tune | `AlphaRecorder.hevc_nvenc_tune` |
 | HEVC GOP size | `AlphaRecorder.hevc_gop_size` |
-| HEVC B-frames | `AlphaRecorder.hevc_b_frames` |
-| HEVC lookahead | `AlphaRecorder.hevc_lookahead` |
 | HEVC adaptive quantization | `AlphaRecorder.hevc_adaptive_quantization` |
 | HEVC NVENC Split Encode | `AlphaRecorder.hevc_nvenc_split_encode` |
 | HEVC NVENC GPU index | `AlphaRecorder.hevc_nvenc_gpu_index` |
 | Diagnostic logging | `AlphaRecorder.diagnostic_logging` |
+| Fail close on sync proof failure | `AlphaRecorder.fail_close_on_sync_proof_failure` |
 
 NVENC Split Encode accepts `auto`, `disabled`, `forced`, `2`, and `3`. Non-auto
-Split Encode settings are rejected when the bundled FFmpeg NVENC encoder does
-not expose `split_encode_mode`. Persisted non-auto Split Encode values are reset
-to `auto` during settings load when the current FFmpeg NVENC encoder no longer
-exposes that option. NVENC GPU index uses `-1` for FFmpeg/NVIDIA default device
-selection and `0+` for an explicit NVENC-capable GPU index. When NVENC output is
-selected, save paths probe the selected Split Encode and GPU index against the
-current runtime before persisting them.
+Split Encode settings are passed to OBS's NVENC texture encoder as
+encoder-specific settings. Persisted values are preserved across machines; if the
+current OBS/NVIDIA runtime rejects the selected Split Encode or GPU index, alpha
+output startup fails with the OBS encoder error instead of silently changing the
+user's setting. NVENC GPU index uses `-1` for OBS/NVIDIA default device selection
+and `0+` for an explicit NVENC-capable GPU index.
 
 Supported finalization formats:
 
 | Format id | Output | Notes |
 | --- | --- | --- |
-| `mask_png_mov` | Lossless grayscale PNG MOV `.mov` | CPU-heavy fallback, disk-light relative to raw masks |
-| `mask_hevc_nvenc` | HEVC NVENC `.mp4` | Requires the NVENC HEVC encoder to open |
-| `mask_hevc_amf` | HEVC AMF `.mp4` | Requires the AMF HEVC encoder to open |
+| `mask_png_mov` | Lossless grayscale PNG MOV `.mov` | CPU-heavy fallback |
+| `mask_hevc_nvenc` | HEVC NVENC `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `obs_nvenc_hevc_tex`; container follows the OBS recording |
+| `mask_hevc_amf` | HEVC AMF `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `h265_texture_amf`; container follows the OBS recording |
+| `mask_hevc_qsv` | HEVC QSV `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `obs_qsv11_hevc`; container follows the OBS recording |
+| `mask_hevc_vaapi` | HEVC VAAPI `.mp4` / `.mov` / `.mkv` | Uses OBS texture encoder `hevc_ffmpeg_vaapi_tex`; container follows the OBS recording |
 
-HEVC options are exposed only when the matching runtime encoder can actually
-open on the current machine. Encoder-name presence alone is not enough.
+HEVC GPU texture options are exposed only when OBS registers the matching HEVC
+video encoder and that encoder advertises `OBS_ENCODER_CAP_PASS_TEXTURE`.
+Encoder-name presence alone is not enough.
+
+Container selection is independent from the HEVC backend. MP4, hybrid MP4, and
+fragmented MP4 recordings use the ISO BMFF MP4 flavor; MOV, hybrid MOV, and
+fragmented MOV recordings use the QuickTime flavor; MKV recordings use
+Matroska. Advanced FFmpeg recording uses `FFExtension` when OBS has not exposed
+the final output path yet. Unknown extensions use MP4.
+
+MP4/MOV write packet payloads directly and build their final sample tables at
+stop. Matroska writes directly through libavformat while retaining only twice
+the configured replay-ring length (at most 256 encoded packets), enough to
+discard the bounded delayed-replay tail.
+This keeps Matroska stop cost bounded instead of copying the complete recording
+from a second spool file. The visible start must be an IDR/keyframe; a range
+that would exclude already-written Matroska packets is rejected and follows the
+configured sync-proof failure policy.
 
 Settings can also be driven by obs-websocket vendor API for automated E2E:
 
@@ -163,59 +196,133 @@ Settings can also be driven by obs-websocket vendor API for automated E2E:
 
 ## Technical Design
 
-The repo contains core primitives for admission gating, sidecar support,
-settings, and live mask movie encoding. The OBS integration adds live capture,
-lifecycle wiring, settings, and automated control.
+Production implementation files live in one flat `src/` directory. The shipping
+module owns recording lifecycle integration, alpha capture and alignment, mask
+movie encoding, settings, and automated control.
 
 The current tree provides:
 
 - OBS recording lifecycle hooks plus a Tools menu settings dialog.
-- A core static library for pair gating, sidecar primitives, settings,
-  and live mask movie encoding.
+- Direct PNG MOV writing for the CPU path and OBS texture-encoder output for HEVC
+  GPU paths.
 - Unit test executables registered with CTest.
-- Deterministic E2E executables and CMake-native staging helpers.
+- A test-only moving-alpha OBS source module used only by app E2E.
 - A cross-platform OBS app E2E path driven by CMake and obs-websocket.
 - CMake presets for Windows x64 MSVC, macOS, and Linux x64.
 
 ## Alignment Strategy
 
+Common rules:
+
 1. Keep OBS's normal recording color format independent of Alpha Recorder so
    production recording can use hardware-friendly formats such as NV12/P010.
-2. Retain the active recording output and register render, raw-video, and packet
-   callbacks on `OBS_FRONTEND_EVENT_RECORDING_STARTING`.
-3. Open the alpha movie writer on `OBS_FRONTEND_EVENT_RECORDING_STARTED`, once
-   the recording path is available.
-4. Capture the rendered Program texture after OBS renders the main mix, extract
-   its alpha into a `GS_R8` mask texture on the GPU, then read it back through a
-   small staging-surface ring before adding it to the pending-frame queue.
-5. Use OBS raw-video callbacks as the final video-output cadence source.
-6. Use encoded packet composition timestamp (`encoder_packet_time::cts`) to
-   identify the raw-video cadence frame actually admitted into the RGB
-   recording, rather than applying encoder-specific startup offsets.
-7. For texture encoders, use the next observed raw-video cadence frame after
-   CTS, because OBS queues the current rendered texture while draining the
-   previous raw-video timestamp.
-8. When OBS repeats the same cached output frame, duplicate the previous alpha
-   mask frame so the mask movie mirrors RGB duplicate/drop behavior.
-9. If the first admitted RGB frame is already a duplicate, use the duplicate's
-   raw content-origin timestamp to select the matching alpha frame.
-10. Use video packet callbacks from the active recording output only to enqueue
-    encoded-video packet ordering evidence, sorted by packet PTS.
-11. Resolve and hand off aligned mask frames on Alpha Recorder's alignment
-    worker rather than inside OBS callbacks.
-12. Cache the texture-encoder path classification from recording output
-    capabilities and OBS's active NV12/P010 texture state.
-13. Do not query per-encoder texture/mix state from packet callbacks or from the
-    `OBS_FRONTEND_EVENT_RECORDING_STARTING` transition.
-14. Pause capture on recording pause.
-15. Do not pause on `OBS_FRONTEND_EVENT_RECORDING_STOPPING`; keep capturing
-    until `OBS_FRONTEND_EVENT_RECORDING_STOPPED` so stop-edge frames can
-    reconcile.
-16. Close the mask movie on recording stop or split rotation.
-17. Never decode or modify the RGB recording in Alpha Recorder.
+2. Retain the active recording output on
+   `OBS_FRONTEND_EVENT_RECORDING_STARTING`, classify the main encoder topology,
+   and collect its encoded packet timing evidence.
+   Delayed GPU replay begins alpha data capture from the post-frame graphics
+   task boundary, so its first consumed generation is also the first texture
+   submitted to the alpha encoder; it must not use a fixed cadence delay.
+3. Pause alpha admission with the main recording, but keep stop-edge processing
+   active until OBS reports recording stopped.
+4. Never decode or modify the RGB recording, and never block or stop it because
+   an alpha segment failed.
 
-Raw-video callbacks are used only as cadence evidence for the final OBS video
-output. Packet callbacks are used only for encoded packet ordering.
+PNG MOV CPU path:
+
+1. Capture Program alpha through the staging-surface ring.
+2. Treat OBS raw-video callbacks as authoritative output cadence.
+3. Use packet CTS to identify which cadence frames were admitted, repeat the
+   previous alpha content for recoverable gaps, and perform writer work on the
+   alignment worker.
+
+HEVC GPU texture path:
+
+1. Extract Program alpha into retained GPU textures. Select the live Program
+   generation for a texture main encoder and the previous Program generation
+   for a software/raw main encoder.
+2. Start the auxiliary encoder only after the first main packet supplies the
+   target CTS. Hold a bounded callback suffix until it is known to belong to
+   the written main recording, but keep each packet's real presentation PTS as
+   the replay key. Replay retained generations in presentation order, not
+   callback/DTS order, so alpha PTS 0 begins on an IDR and corresponds to the
+   first admitted RGB content even when the main encoder reorders packets.
+   When several delayed main-packet records are available for one alpha slot,
+   select the newest record at or before that slot and discard older backlog in
+   one operation. Never replay stale generations one frame at a time after
+   pressure subsides.
+3. Record Program generation, render time, main packet CTS, alpha packet PTS,
+   and emitted generation in the timeline ledger. A fixed content delay or
+   backend-specific packet offset is not part of the correctness path. Missing
+   or regressive evidence repeats the last emitted generation while preserving
+   the next alpha PTS slot. Conflicting generations for one main PTS mark the
+   corresponding alpha slot ambiguous rather than choosing either value.
+4. Before stopping, wait for queued main generations to reach the auxiliary
+   mix using a timeout derived from frame cadence, the held admission suffix,
+   and the encoder drain allowance. Before solving, reconcile the main
+   packet-timing ledger to the video packet count in the completed main
+   recording. OBS invokes packet callbacks before the recording output applies
+   its stop boundary, so callback records that form an unwritten suffix are
+   excluded from the proof. At a split boundary, wait briefly for the old main
+   file to become inspectable, transfer any callback suffix that was not
+   written to the old file into the next segment's ledger, and preserve its
+   original PTS/CTS evidence. If the completed main file contains more video
+   packets than have callback timing evidence, or the completed file cannot be
+   inspected, the segment cannot be certified. Then request stop, end data
+   capture, wait for OBS output deactivation (the encoder-drain boundary), solve
+   the final visible range, finalize the muxer, and publish.
+5. Packet write failure is latched for the whole segment. A later successful
+   trailer write cannot turn a segment with a missing encoded packet into a
+   successful output.
+
+OBS reports `file_changed` only after the main muxer has crossed the split
+boundary, so a newly opened alpha segment cannot recover Program generations
+that predate that notification. For split-following segments only, Alpha
+Recorder fills this bounded, physically unavailable prefix with the oldest
+retained alpha texture until exact generation evidence becomes available. The
+PTS grid and main-file packet-count duration are preserved, and delayed backlog
+is never replayed after recovery. Strict proof still reports
+`MissingPrefixContent`; best-effort mode may publish the segment only after all
+main replay entries have been consumed and the alpha encoder has recovered exact
+generation evidence. Normal recording startup does not use this fallback.
+
+The GPU path deliberately does not register a global raw-video callback; doing
+so would reactivate OBS staging/readback and defeat the GPU-resident performance
+path. Packet callbacks remain ordering and presentation evidence, while Program
+generation is content identity.
+
+Pause state follows the OBS alpha encoder's atomic pause state, not only the
+frontend event's bookkeeping flag. Program renders continue to be observed
+while paused so the newest generation is available at resume, but alpha replay
+PTS advances only for slots the encoder accepts. The first Program generation
+observed after the encoder enters its paused state is retained in a protected
+replay-ring slot because OBS may still admit one boundary frame from the main
+software path. A dedicated copy of the last emitted texture remains immutable
+across the pause boundary, and retained ring slots needed by pending replay
+evidence are not overwritten on the first resumed renders. If a requested
+generation is no longer retained, the output repeats the immutable copy and
+still advances one PTS slot so recovery cannot create a permanent offset.
+
+Delayed encoded packets may still be collected during the boundary. On resume,
+the first accepted alpha packet matches its render attempt by `sys_dts_usec`
+plus one graphics cadence and identifies how many provisional texture inputs
+OBS dropped. The source target and packet-generation proof are then adjusted
+in opposite directions for only that pause's input delta: a one-slot OBS
+texture phase cancels one dropped input, while zero or multiple dropped inputs
+move the two mappings by the remaining PTS distance. Packet PTS epochs preserve
+the provisional generation ledger without compacting or replaying dropped
+attempts. OBS reports the original input-frame CTS even after a pause, so
+CTS-to-generation lookup uses that value unchanged; encoder pause offsets are
+diagnostic evidence only. No fixed content delay, CTS rewrite, or unconditional
+one-frame pause correction is applied.
+
+OBS graphics-lagged frames are handled according to the main encoder topology.
+For a texture-encoded main recording, main and alpha consume the same live
+Program texture generation, so a cadence absent from both timelines does not
+change their offset; strict sync may accept the segment when generation mapping,
+PTS grid, visible prefix, and tail coverage all agree. For a software/raw main
+recording, staging can retain a different Program generation across the dropped
+cadence, so any observed graphics lag remains `UnsupportedObsTimingModel` and
+fails closed. The lag count and selected topology are retained in telemetry.
 
 If the main Program texture produces only opaque alpha in a future OBS/runtime
 configuration, the fallback is a dedicated render path: render the active
@@ -267,14 +374,18 @@ Automation:
 
 ## Build and Staging Contract
 
-The OBS module target and the E2E harness require a real OBS developer tree.
+The OBS module targets and the app E2E harness require a real OBS developer tree.
 `OBS_ROOT` must point to a tree with libobs headers, import libraries,
-`bin/64bit`, and `data`.
+and the platform's OBS runtime/plugin/data layout.
 
 The OBS source checkout is tracked as a git submodule at
 `deps/obs/obs-studio`. When bootstrapped from source, the staged developer tree
 lives under `deps/obs/obs-build/rundir/RelWithDebInfo` alongside the pinned
-source and build trees.
+source and build trees. Release 0.1.3 pins OBS Studio 32.2.1 and its FFmpeg
+8.1.2 ABI. Because the plugin calls libavcodec, libavformat, and libavutil
+directly, release artifacts must be rebuilt whenever OBS changes the bundled
+FFmpeg ABI; an OBS 32.1.x build imports FFmpeg 7 DLL/SONAME versions and is not
+a valid OBS 32.2.x artifact.
 
 Preferred bootstrap:
 
@@ -296,9 +407,12 @@ uses Ninja and stages the installed OBS runtime layout under
 
 `deps/obs/obs-root.cmake` is an optional CMake fragment generated by
 `cmake/scripts/BootstrapObs.cmake`. `OBS_ROOT` may also be supplied through the
-environment or the CMake preset. `cmake/FindOBS.cmake` looks for libobs headers
-and import libraries under the configured root and creates an imported
-`OBS::libobs` target when found.
+environment, the CMake preset, or `-DOBS_ROOT=...`; an explicit non-empty value
+always takes precedence over the generated fragment. Linux/WSL dependency
+discovery ignores OBS `.deps` bundles from the shared checkout so a Windows or
+macOS dependency package cannot enter an ELF link. `cmake/FindOBS.cmake` looks
+for libobs headers and import libraries under the configured root and creates
+an imported `OBS::libobs` target when found.
 
 Configure and build:
 
@@ -330,9 +444,9 @@ Stage a portable OBS tree with Alpha Recorder overlaid:
 cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_stage_obs_tree
 ```
 
-Staging overlays one normal user plugin artifact, `alpha_recorder`. When
-deterministic E2E support is built, staging may also overlay the separate
-test-only `alpha_recorder_e2e` module.
+Normal staging overlays one user plugin artifact, `alpha_recorder`. The OBS app
+E2E runner additionally overlays `alpha_recorder_obs_app_e2e_source` so the test
+scene can use its moving-alpha source.
 
 Staged plugin locations:
 
@@ -359,13 +473,15 @@ rejected.
 
 The canonical project release version lives in the root `VERSION` file. CMake
 uses that file for `project(... VERSION ...)` and generates
-`alpha_recorder/version.hpp`, which is the runtime source for manifest
-`project_version` metadata. The release workflow also rejects a signed release
-tag when its `vX.X.X` payload does not match `VERSION`.
+`alpha_recorder/version.hpp`, which supplies the installed version shown in the
+settings dialog. The release workflow also rejects a signed release tag when its
+`vX.X.X` payload does not match `VERSION`.
 
 The release artifacts contain the user plugin package layout plus `README.md`,
 `LICENSE`, and `VERSION`; they do not include the staged OBS runtime or the
-test-only `alpha_recorder_e2e` module.
+test-only `alpha_recorder_obs_app_e2e_source` module. Each artifact is compatible
+with the pinned OBS release family used by that release build; it does not
+bundle a private FFmpeg runtime.
 
 - Windows: `alpha-recorder-vX.X.X-windows-x64.zip`.
 - macOS: `alpha-recorder-vX.X.X-macos-arm64.zip`.
@@ -420,16 +536,25 @@ All unit tests:
 ctest --test-dir out/build/macos-arm64 -C RelWithDebInfo -L unit --output-on-failure
 ```
 
-Deterministic E2E:
+Synchronization regression tiers:
 
 ```sh
-cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_e2e
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_pr
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_nightly
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_release
 ```
 
-The deterministic E2E host starts libobs, loads the staged
-`alpha_recorder_e2e` module, produces RGB raw and alpha mask artifacts, and the
-verifier parses those files rather than checking file existence alone. Scenario
-files under `tests/e2e/scenarios` are E2E-only inputs.
+- `alpha_recorder_test_sync_pr` runs all unit tests, a strict decoded
+  full-frame smoke test, and a representative strict proof-failure evidence
+  test.
+- `alpha_recorder_test_sync_nightly` adds the complete timeline fault set,
+  best-effort publishing, mux/deactivate/rename failures, a 20-bucket
+  start/stop phase sweep, 60000/1001 cadence, a five-bucket pause/resume phase
+  sweep, split rotation, split failure isolation, and the real NVENC main
+  packet-reorder case.
+- `alpha_recorder_test_sync_release` additionally exercises delayed replay
+  backlog recovery, strict graphics-overload evidence behavior, and the
+  available 4K60 overload profile.
 
 Automated OBS app E2E:
 
@@ -446,7 +571,6 @@ cmake -DREPO_ROOT="$PWD" -DBUILD_FROM_SOURCE=ON -P cmake/scripts/BootstrapObs.cm
 cmake --preset linux-x64
 cmake --build --preset linux-x64-relwithdebinfo
 ctest --preset linux-x64-relwithdebinfo --output-on-failure
-cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_e2e
 cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e_fhd60_rgb_sw_alpha_png_mov
 ```
 
@@ -471,7 +595,8 @@ tools, obs-websocket plugin, and `bun` on PATH.
 
 The OBS app E2E target:
 
-- Builds and stages OBS plus the plugin into an isolated app/runtime tree.
+- Builds and stages OBS, the user plugin, and the test-only moving-alpha source
+  module into an isolated app/runtime tree.
 - Creates an isolated OBS profile and scene collection.
 - On macOS, uses isolated `HOME` and `CFFIXED_USER_HOME`.
 - On Linux, uses isolated `HOME` and `XDG_CONFIG_HOME` because the pinned OBS
@@ -485,12 +610,21 @@ The OBS app E2E target:
   launch, each requiring decoded zero frame-code offset.
 - Runs one 30-second durability recording after the startup sync gate passes to
   catch sustained capture, writer, encoder, and stop-edge failures.
+- Supports rational cadence through separate FPS numerator and denominator
+  settings; the 60000/1001 regression checks PTS-domain duration and decoded
+  frame identity rather than rounded wall-clock FPS.
+- Can sweep recording start and stop across 20 positions inside one graphics
+  cadence interval.
+- Can schedule pause/resume, output splitting, and a bounded test-source render
+  stall without relying on desktop input automation.
 - Uses OBS's default hardware-friendly NV12 color format in the app-level E2E
   profile while Alpha Recorder extracts alpha through its own GPU-side path.
 - Can run the RGB recording profile with software encoding, explicit NVENC
   HEVC, or explicit AMF HEVC.
-- Pairs hardware RGB matrix targets with PNG MOV or the same vendor's HEVC
-  alpha output.
+- Pairs standard hardware RGB matrix targets with PNG MOV or the same vendor's
+  HEVC alpha output; QSV/VAAPI alpha paths are available through the manual
+  `RunObsAppE2E.cmake` finalization-format switch when matching hardware is
+  present.
 - Waits for RGB recording and alpha mask movie outputs.
 - Writes `alpha-recorder-performance.json` under the OBS app E2E artifact root.
 - Keeps CMake stdout compact by writing detailed OBS stdout/stderr to
@@ -498,29 +632,61 @@ The OBS app E2E target:
   under the artifact root.
 - Uses `ffprobe` and `ffmpeg` to confirm both RGB and alpha outputs are
   playable.
-- Adds a test-only moving colored object over a transparent background with an
-  opaque binary frame-code strip.
+- Uses `alpha_recorder_obs_app_e2e_source` to add a moving colored object over a
+  transparent background with an opaque binary frame-code strip.
 - Decodes RGB and alpha mask frames for PNG MOV and HEVC targets.
 - Verifies zero frame-code offset plus moving mask bounds frame-by-frame,
-  allowing only small start/terminal/count mismatches.
+  with a strict mode that requires every shared frame to match.
+- For declared recovery tests, permits localized mismatches only when a
+  sufficiently matching zero-offset prefix and terminal suffix are both
+  observed. A zero-offset tie with too few matching frames is not accepted.
+- Split-rotation tests decode and verify every published segment. A
+  split-following segment may have only the unrecoverable startup prefix
+  described above; it must then recover a sufficiently long terminal clean
+  suffix with zero frame-code and content offset. The first segment remains
+  subject to the normal strict-start rules.
+- Collects main packet PTS gaps/reorder depth and GPU replay underflow,
+  catch-up, stale-skip, repeat, split-prefix-repeat, pending-queue,
+  missing-texture, and ambiguous-slot counters. Tests that require one of these
+  conditions fail when the condition was not actually observed.
 - Verifies the PNG MOV alpha movie reports `png` and does not use an alpha
   pixel format.
-- For HEVC targets, verifies the alpha output is `.mp4`, `ffprobe` reports
-  `hevc`, and the output does not use an alpha pixel format.
+- For HEVC targets, verifies the alpha output container follows the OBS
+  recording container for MP4, MOV, and MKV, `ffprobe` reports `hevc`, and the
+  output does not use an alpha pixel format.
+- The MKV NLE-remux regression stream-copies both RGB and alpha video tracks to
+  MP4 and requires identical frame counts and average frame rates, with track
+  durations differing by no more than one Matroska millisecond. This catches a
+  one-millisecond terminal Matroska rounding loss that otherwise makes Adobe
+  applications report a nominal 60 fps alpha track as 60.001 fps, while
+  allowing the harmless terminal tick difference caused by B-frame RGB and
+  non-reordered alpha tracks using different decode timelines.
 
 The plugin logs one per-segment OBS performance summary covering
 capture/readback CPU time, GPU submission timing, alignment-worker batches,
 alignment recovery counts, queue depths, writer overflow repeat count, and
 mask encode timing. If diagnostic logging is enabled, the same summary plus
-segment-start encoder settings, dynamic alignment/writer queue limits, NVENC
-option readback, and encode-stage timing breakdowns are appended to the plugin
-diagnostic log file. The OBS app E2E harness copies OBS performance summaries into
+segment-start encoder settings, dynamic alignment/writer queue limits, and
+encode-stage timing breakdowns are appended to the plugin diagnostic log file.
+The OBS app E2E harness copies OBS performance summaries into
 `alpha-recorder-performance.json`.
 
-If OBS logs `Encoding overloaded!`, severe skipped frames due to encoding lag,
-or severe render lag, the app E2E stops recording and fails immediately with an
-overload-specific error instead of continuing to decoded sync verification.
-Tiny skipped-frame summaries are not treated as overload by themselves.
+By default, if OBS logs `Encoding overloaded!`, severe skipped frames due to
+encoding lag, or severe render lag, the app E2E stops recording and fails with
+an overload-specific error. An explicit allow-overload profile continues long
+enough to verify recovery or strict fail-close behavior. Tiny skipped-frame
+summaries are not treated as overload by themselves.
+
+Fault injection is active only when the staged E2E process has
+`ALPHA_RECORDER_E2E_TEST=1`. Timeline faults cover missing prefix, missing alpha
+generation, missing tail, ambiguous generation, and an unwritten stop-boundary
+main packet callback. Lifecycle faults cover deactivate timeout, mux
+finalization, publish rename, split-segment isolation, and a delayed
+replay-evidence batch. A graphics-lag counter fault verifies that a
+texture-encoded main remains publishable when the generation proof is complete,
+while a real render-stall regression verifies that software/raw main recordings
+still fail closed. These controls are not user settings and have no effect
+without the E2E gate.
 
 ## OBS App E2E Matrix
 
@@ -543,6 +709,16 @@ Registered target families include:
 - `alpha_recorder_run_obs_app_e2e_wqhd60_rgb_amf_hevc_alpha_*`
 - `alpha_recorder_run_obs_app_e2e_4k30_rgb_nvenc_hevc_alpha_*`
 - `alpha_recorder_run_obs_app_e2e_4k30_rgb_amf_hevc_alpha_*`
+- `alpha_recorder_run_obs_app_e2e_sync_pr_strict`
+- `alpha_recorder_run_obs_app_e2e_sync_phase_sweep`
+- `alpha_recorder_run_obs_app_e2e_sync_5994`
+- `alpha_recorder_run_obs_app_e2e_sync_pause_resume`
+- `alpha_recorder_run_obs_app_e2e_sync_split`
+- `alpha_recorder_run_obs_app_e2e_sync_replay_gap_recovery`
+- `alpha_recorder_run_obs_app_e2e_sync_overload_software_fail_closed`
+- `alpha_recorder_run_obs_app_e2e_sync_texture_lag_counter_generation_proof`
+- `alpha_recorder_run_obs_app_e2e_sync_packet_reorder`
+- `alpha_recorder_run_obs_app_e2e_fhd60_rgb_nvenc_hevc_alpha_hevc_nvenc_mkv_remux_timeline`
 
 Example sync-bug exposure matrix:
 
@@ -562,7 +738,8 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 Runtime matrix rules:
 
 - Configure probes `hevc_nvenc` and `hevc_amf` on the target machine with a
-  realistic 1080p FFmpeg encode.
+  1080p FFmpeg encode before registering the corresponding hardware app E2E
+  matrix targets.
 - Configure registers only matching alpha HEVC targets whose encoder opens.
 - RGB NVENC targets additionally require the staged OBS NVENC plugin.
 - The target matrix is runtime-aware rather than OS-only.
@@ -576,8 +753,8 @@ Runtime matrix rules:
   matrix.
 - RGB NVENC plus alpha AMF, or RGB AMF plus alpha NVENC, require a test machine
   with both NVIDIA and AMD hardware encoders.
-- NVIDIA/AMD-specific alpha HEVC targets may appear on any platform where the
-  matching encoder opens through the runtime probe.
+- NVENC/AMF/QSV/VAAPI alpha HEVC formats appear in the plugin UI/API only where
+  OBS registers the matching texture encoder.
 - RGB hardware targets are skipped if the staged OBS runtime lacks the matching
   OBS encoder plugin.
 
@@ -585,7 +762,6 @@ Runtime matrix rules:
 
 Completed:
 
-- Pair admission logic with all-or-nothing frame-pair acceptance.
 - `Tools > Alpha Recorder Settings` dialog with Enabled, Finalization Format,
   and HEVC encoder tuning controls.
 - OBS user config persistence for enabled state, finalization format, and HEVC
@@ -616,7 +792,7 @@ Completed:
 - Texture-encoder path classification cached before packet handling so packet
   callbacks only enqueue packet PTS/CTS evidence.
 - Lightweight per-segment performance telemetry for capture/readback,
-  alignment-worker batches/recovery, queue depths, split-encode option readback,
+  alignment-worker batches/recovery, queue depths, selected encoder settings,
   and mask encode-stage timing.
 - Optional diagnostic log file with a settings-dialog reveal button.
 - Alpha mask movie finalization on stop and split rotation.
@@ -624,32 +800,34 @@ Completed:
 - obs-websocket vendor API for `alpha_recorder.GetSettings` and
   `alpha_recorder.SetSettings`.
 - obs-websocket settings coverage for HEVC quality profile, CQ, preset, NVENC
-  tune, GOP, B-frames, lookahead, adaptive quantization, NVENC Split Encode,
-  and NVENC GPU index.
-- CMake-native OBS bootstrap, staging, deterministic E2E, and OBS app E2E
-  scripts:
+  tune, GOP, adaptive quantization, NVENC Split Encode, and NVENC GPU index.
+- CMake-native OBS bootstrap, staging, and OBS app E2E scripts:
   - `cmake/scripts/BootstrapObs.cmake`
   - `cmake/scripts/StageObsTree.cmake`
-  - `cmake/scripts/RunE2E.cmake`
   - `cmake/scripts/RunObsAppE2E.cmake`
 - Cross-platform OBS app E2E helper, run with Bun:
   - `cmake/scripts/obs_app_e2e.ts`
-- Deterministic split-rotation E2E scenario:
-  - `tests/e2e/scenarios/split_rotation.scenario`
-- Deterministic E2E validation of RGB raw artifacts, alpha mask artifacts, and
-  split-rotation behavior through the OBS module boundary.
 - Cross-platform OBS app E2E harness that verifies RGB and alpha mask movie
   outputs, including zero frame-code offset plus frame-by-frame sync between a
   moving colored object and its grayscale alpha mask on PNG MOV and HEVC paths.
+- Pure replay-generation ledger regression covering callback permutations,
+  reordered presentation PTS, dense and fractional PTS domains, repeats,
+  ambiguity, generation regression, measured pause CTS adjustment, and
+  delayed-backlog catch-up without stale replay.
+- Real OBS regressions for phase sweep, 59.94 fps, pause/resume, split rotation,
+  isolated split failure, split-boundary callback carry, delayed replay
+  evidence, graphics overload, and main packet reorder.
 - Optional CTest registration behind:
   - `ALPHA_RECORDER_ENABLE_OBS_APP_E2E`
-- OBS staging updates that copy the full OBS plugin set before overlaying Alpha
-  Recorder binaries.
+- OBS staging that copies the full OBS plugin set before overlaying Alpha
+  Recorder and, for app E2E only, the moving-alpha source module.
 
 Still useful follow-up work:
 
-- Broaden automated coverage for pause/unpause scenarios.
-- Add stress coverage for encoder pressure or unusually slow finalization.
+- Run the runtime-aware nightly/release tiers on AMF, QSV, and VAAPI hardware
+  in addition to the currently available NVENC machine.
+- Add longer multi-hour durability coverage outside the normal local release
+  gate.
 - Improve localized error text and recovery guidance.
 
 ## Open Questions

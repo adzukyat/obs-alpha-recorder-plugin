@@ -12,8 +12,8 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 1. OBSを起動する
 2. OBSの「録画開始」をクリック
 3. お好きなタイミングで録画を停止
-4. 録画した動画と同じ場所に `.alpha.mov` または `.alpha.mp4`
-   というファイルができています
+4. 録画した動画と同じ場所と拡張子で `.alpha.mov`、`.alpha.mp4`、または
+   `.alpha.mkv` というファイルができています
 
 > [!IMPORTANT]
 > Alpha
@@ -21,14 +21,17 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 
 ## 機能
 
-- HEVCハードウェアエンコーダー（NVENC /
-  AMF）を使用したアルファマスクの書き出しに対応
-- PNG MOV形式でのロスレスアルファマスク書き出しにも対応
-- エンコーダーの設定を簡単に切り替え可能
-- アルファとメイン動画の開始位置とフレームが完全に同期
+- OBSのHEVCテクスチャエンコーダー（NVENC / AMF / QSV / VAAPI）を
+  使用したアルファマスクの書き出しに対応
+- コンテナはOBSの録画設定に自動追従（Hybrid/Fragmentedにも対応）
+- PNG MOV形式でのロスレスアルファマスク書き出しも可能
+- エンコーダーの設定を簡単に切り替えできる設定画面
+- アルファとメイン動画の開始位置と各フレームが完全に同期（NVENCのみ保証）
 - Windows、macOS、およびLinux版OBSで動作
 
 ## クイックスタート
+
+OBS 32.2以降に対応
 
 1. [Releases](https://github.com/adzukyat/obs-alpha-recorder-plugin/releases)
    から最新版をダウンロードして解凍します。
@@ -51,22 +54,23 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 
 ## 設定
 
-<img width="540" height="581" src="https://github.com/user-attachments/assets/ecfaecf7-79db-4c6d-8e28-62fc2aa7f350" />
+<img width="484" height="676" src="https://github.com/user-attachments/assets/50e99ba1-3ab5-437c-a9fd-f25148015116" />
 
-※HEVC関連の設定はNVENCやAMFが利用できない環境では表示されません。
+※HEVC関連の設定は対応するOBSテクスチャエンコーダーが利用できる環境でのみ表示されます。
 
 ## トラブルシューティング
 
 | 症状                               | 考えられる理由                                                      |
 | ---------------------------------- | ------------------------------------------------------------------- |
-| HEVCオプションが表示されない       | NVENCやAMFエンコーダーが使用できない環境で実行している              |
+| HEVCオプションが表示されない       | 対応するOBSテクスチャHEVCエンコーダーが利用できない                 |
 | マスクが出力されない               | Alpha Recorderの設定の「Enabled」がオフになっている                 |
 | Spout2でアルファが黒くなってしまう | Spout2のソース設定で「Composite Mode」をOpaqueからDefaultに変更する |
 
 ## ビルド
 
 Alpha
-RecorderはC++で書かれたOBSプラグインで、サブモジュールにOBSを含みます。ビルドにはCMakeとOBSのビルド環境が必要です。また、アプリケーションE2Eテストを実行するにはBunランタイムが必要になります。
+RecorderはC++で書かれたOBSプラグインで、サブモジュールにOBSを含みます。ビルドにはCMakeとOBSのビルド環境が必要です。また、アプリケーションE2Eテストを実行するにはBunランタイムが必要になります。固定しているソースと依存ランタイムはOBS
+32.2.1で、FFmpeg 8.1.2 ABIを含みます。
 
 ### 1. サブモジュールの初期化
 
@@ -147,12 +151,6 @@ curl -fsSL https://bun.sh/install | bash
 ctest --test-dir out/build/windows-x64-msvc -C RelWithDebInfo -L unit --output-on-failure
 ```
 
-Deterministic E2Eテストの実行
-
-```sh
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_e2e
-```
-
 アプリケーションE2Eテストの実行
 
 ```sh
@@ -162,5 +160,6 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 アプリケーションE2Eテストでは実際にOBSが起動し、録画からフレーム同期検証までの一連の流れがWebSocket経由で自動で実行されます。全ランタイムでの検証が走りますが、非対応環境はスキップされます。
 
 > [!WARNING]
-> AMFでの動作は私がRadeon
-> GPUを持っていないためテストしていません。バグを見つけた場合はパッチの提出をお願いします。
+> 今のところ私の環境ではNVENCでしか動作をテストできていません。
+> 他のバックエンドではフレームが完全に同期しない可能性が高く、そもそも正常に録画できない可能性もあります。
+> もし他のバックエンドで動作確認ができる方がいれば、教えていただけると助かります。

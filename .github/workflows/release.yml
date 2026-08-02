@@ -146,7 +146,6 @@ jobs:
         run: >
           cmake --preset "${{ matrix.configure_preset }}"
           -DALPHA_RECORDER_BUILD_UNIT_TESTS=OFF
-          -DALPHA_RECORDER_BUILD_E2E_TESTS=OFF
 
       - name: Build plugin
         shell: bash

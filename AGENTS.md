@@ -23,6 +23,15 @@ The alpha movie is a standalone grayscale mask video. The captured alpha values
 are encoded as visible pixel intensity; the file is not expected to carry its
 own transparency channel.
 
+Production implementation files live directly under `src/`; do not recreate a
+`core`/`obs` directory split. The separate `alpha_recorder_obs_app_e2e_source`
+module is test-only and contains only the moving-alpha OBS source used by the
+real app E2E harness.
+
+The pinned release/developer runtime is OBS Studio 32.2.1 with its FFmpeg 8.1.2
+ABI. Alpha Recorder links libavcodec, libavformat, and libavutil directly, so an
+OBS update that changes their ABI requires rebuilding the release artifacts.
+
 ## User-Facing Contract
 
 - Users start and stop recording with OBS's normal controls.
@@ -34,7 +43,8 @@ own transparency channel.
   slow the main OBS recording.
 - Alpha output is written beside the OBS recording. For example:
   - `.alpha.mov` for PNG MOV.
-  - `.alpha.mp4` for HEVC NVENC/AMF.
+  - `.alpha.mp4`, `.alpha.mov`, or `.alpha.mkv` for HEVC GPU outputs, matching
+    the OBS recording container when it is MP4, MOV, or MKV.
 
 ## Editing Guardrails
 
@@ -45,9 +55,14 @@ own transparency channel.
 - Preserve runtime-aware HEVC handling: expose NVENC/AMF options only when the
   matching encoder can actually open on the current machine.
 - Preserve the explicit NVENC and AMF split in settings, target names, and docs.
+- An explicit `OBS_ROOT` must override the generated local OBS root. Never add
+  Windows/macOS OBS `.deps` directories to Linux/WSL dependency discovery.
+- On Windows and macOS, resolve OBS dependencies from the prefix paths recorded
+  by the pinned OBS build. Do not select an older retained `obs-deps-*` tree.
 - For sync changes, preserve the alignment contract in `SPECS.md`: raw-video
-  cadence is authoritative, packet callbacks carry ordering evidence, and the
-  app E2E verifier requires zero decoded frame-code offset.
+  cadence is authoritative for the CPU path; Program generation plus packet
+  timing is authoritative for the GPU texture path; and the app E2E verifier
+  requires zero decoded frame-code offset.
 - If a target is unavailable, prefer a clear runtime skip reason over an
   impossible or trap target.
 
@@ -87,12 +102,6 @@ Run the focused cadence regression:
 ctest --test-dir out/build/macos-arm64 -C RelWithDebInfo -R alpha_recorder.unit.recording_session_cadence --output-on-failure
 ```
 
-Run deterministic E2E:
-
-```sh
-cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_e2e
-```
-
 Run real OBS app E2E:
 
 ```sh
@@ -100,6 +109,18 @@ cmake --build --preset macos-arm64-relwithdebinfo --target alpha_recorder_run_ob
 cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 cmake --build --preset linux-x64-relwithdebinfo --target alpha_recorder_run_obs_app_e2e
 ```
+
+Run synchronization regression tiers on Windows:
+
+```powershell
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_pr
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_nightly
+cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_test_sync_release
+```
+
+The staged E2E harness may set `ALPHA_RECORDER_E2E_TEST=1` together with a
+specific fault name. Never make a fault respond to its fault variable without
+that gate, and do not expose test faults as user settings.
 
 Package the built user plugin for release:
 

@@ -97,6 +97,7 @@ function(alpha_recorder_linux_runtime_layout obs_root out_bin_dir out_plugin_dir
 
     alpha_recorder_first_existing(data_dir
         "${obs_root}/share/obs/obs-studio"
+        "${obs_root}/share/obs"
         "${obs_root}/data"
     )
 
@@ -147,6 +148,7 @@ function(alpha_recorder_validate_obs_runtime obs_root)
             alpha_recorder_any_exists(has_runtime_candidate
                 "${lib_dir}/libobs.so"
                 "${lib_dir}/libobs.so.0"
+                "${lib_dir}/libobs.so.30"
             )
             if(has_runtime_candidate)
                 set(has_runtime ON)
@@ -199,7 +201,10 @@ function(alpha_recorder_write_obs_root_config obs_root config_file)
     cmake_path(ABSOLUTE_PATH obs_root NORMALIZE OUTPUT_VARIABLE resolved_obs_root)
     cmake_path(GET config_file PARENT_PATH config_dir)
     file(MAKE_DIRECTORY "${config_dir}")
-    file(WRITE "${config_file}" "set(OBS_ROOT \"${resolved_obs_root}\" CACHE PATH \"Path to a staged OBS developer tree\" FORCE)\n")
+    file(WRITE "${config_file}"
+        "if(NOT DEFINED OBS_ROOT OR OBS_ROOT STREQUAL \"\")\n"
+        "    set(OBS_ROOT \"${resolved_obs_root}\" CACHE PATH \"Path to a staged OBS developer tree\" FORCE)\n"
+        "endif()\n")
 endfunction()
 
 function(alpha_recorder_write_json_manifest output_path)

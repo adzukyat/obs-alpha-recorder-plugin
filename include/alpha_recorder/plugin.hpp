@@ -1,9 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <string>
 #include <string_view>
 
 struct config_data;
@@ -16,6 +19,15 @@ namespace alpha_recorder::obs
         MaskPngMov,
         MaskHevcNvenc,
         MaskHevcAmf,
+        MaskHevcQsv,
+        MaskHevcVaapi,
+    };
+
+    enum class AlphaMovieContainer
+    {
+        Mp4,
+        Mov,
+        Mkv,
     };
 
     enum class HevcQualityProfile
@@ -65,8 +77,6 @@ namespace alpha_recorder::obs
         HevcEncoderPreset preset = HevcEncoderPreset::NvencP3;
         HevcNvencTune nvenc_tune = HevcNvencTune::HighQuality;
         std::uint32_t gop_size = 0;
-        std::uint32_t b_frames = 0;
-        std::uint32_t lookahead = 0;
         bool adaptive_quantization = false;
         HevcNvencSplitEncodeMode nvenc_split_encode = HevcNvencSplitEncodeMode::Auto;
         std::int32_t nvenc_gpu_index = -1;
@@ -78,6 +88,7 @@ namespace alpha_recorder::obs
         FinalizationFormat finalization_format = FinalizationFormat::MaskPngMov;
         HevcEncoderSettings hevc_encoder{};
         bool diagnostic_logging = false;
+        bool fail_close_on_sync_proof_failure = false;
     };
 
     struct FinalizationFormatOption
@@ -127,16 +138,6 @@ namespace alpha_recorder::obs
         return "hevc_gop_size";
     }
 
-    [[nodiscard]] inline constexpr std::string_view settings_hevc_b_frames_key() noexcept
-    {
-        return "hevc_b_frames";
-    }
-
-    [[nodiscard]] inline constexpr std::string_view settings_hevc_lookahead_key() noexcept
-    {
-        return "hevc_lookahead";
-    }
-
     [[nodiscard]] inline constexpr std::string_view settings_hevc_adaptive_quantization_key() noexcept
     {
         return "hevc_adaptive_quantization";
@@ -157,51 +158,27 @@ namespace alpha_recorder::obs
         return "diagnostic_logging";
     }
 
+    [[nodiscard]] inline constexpr std::string_view settings_fail_close_on_sync_proof_failure_key() noexcept
+    {
+        return "fail_close_on_sync_proof_failure";
+    }
+
     [[nodiscard]] inline constexpr FinalizationFormat finalization_format_default() noexcept
     {
         return FinalizationFormat::MaskPngMov;
     }
 
-    [[nodiscard]] inline std::filesystem::path recording_sidecar_path(const std::filesystem::path &recording_path)
-    {
-        std::filesystem::path sidecar_path = recording_path;
-        sidecar_path.replace_extension(".alpha.sidecar");
-        return sidecar_path;
-    }
-
-    [[nodiscard]] inline std::filesystem::path recording_manifest_path(const std::filesystem::path &recording_path)
-    {
-        std::filesystem::path manifest_path = recording_path;
-        manifest_path.replace_extension(".alpha.manifest.json");
-        return manifest_path;
-    }
-
     [[nodiscard]] inline constexpr Settings default_settings() noexcept
     {
-        return Settings{true, finalization_format_default(), HevcEncoderSettings{}, false};
+        return Settings{true, finalization_format_default(), HevcEncoderSettings{}, false, false};
     }
 
-    [[nodiscard]] inline std::uint64_t frame_pts_from_elapsed_ns(std::uint64_t elapsed_ns,
-                                                                 std::uint32_t fps_num,
-                                                                 std::uint32_t fps_den) noexcept
-    {
-        if (fps_num == 0U || fps_den == 0U)
-        {
-            return 0U;
-        }
-
-        const std::uint64_t denominator = 1000000000ULL * static_cast<std::uint64_t>(fps_den);
-        const std::uint64_t quotient = elapsed_ns / denominator;
-        const std::uint64_t remainder = elapsed_ns % denominator;
-
-        return (quotient * static_cast<std::uint64_t>(fps_num)) +
-               ((remainder * static_cast<std::uint64_t>(fps_num)) / denominator);
-    }
-
-    inline constexpr std::array<FinalizationFormatOption, 3> finalization_format_options{{
+    inline constexpr std::array<FinalizationFormatOption, 5> finalization_format_options{{
         {FinalizationFormat::MaskPngMov, "mask_png_mov", "Lossless PNG MOV Mask"},
         {FinalizationFormat::MaskHevcNvenc, "mask_hevc_nvenc", "HEVC NVENC Mask"},
         {FinalizationFormat::MaskHevcAmf, "mask_hevc_amf", "HEVC AMF Mask"},
+        {FinalizationFormat::MaskHevcQsv, "mask_hevc_qsv", "HEVC QSV Mask"},
+        {FinalizationFormat::MaskHevcVaapi, "mask_hevc_vaapi", "HEVC VAAPI Mask"},
     }};
 
     [[nodiscard]] inline constexpr std::string_view hevc_quality_profile_config_value(HevcQualityProfile profile) noexcept
@@ -219,23 +196,6 @@ namespace alpha_recorder::obs
         }
 
         return "high_quality";
-    }
-
-    [[nodiscard]] inline constexpr std::string_view hevc_quality_profile_display_name(HevcQualityProfile profile) noexcept
-    {
-        switch (profile)
-        {
-        case HevcQualityProfile::Lossless:
-            return "Lossless";
-        case HevcQualityProfile::HighQuality:
-            return "High Quality";
-        case HevcQualityProfile::Balanced:
-            return "Balanced";
-        case HevcQualityProfile::Fast:
-            return "Fast";
-        }
-
-        return "High Quality";
     }
 
     [[nodiscard]] inline bool try_parse_hevc_quality_profile(std::string_view value, HevcQualityProfile &profile) noexcept
@@ -293,37 +253,6 @@ namespace alpha_recorder::obs
         }
 
         return "nvenc_p3";
-    }
-
-    [[nodiscard]] inline constexpr std::string_view hevc_encoder_preset_display_name(HevcEncoderPreset preset) noexcept
-    {
-        switch (preset)
-        {
-        case HevcEncoderPreset::NvencLossless:
-            return "Lossless";
-        case HevcEncoderPreset::NvencP1:
-            return "P1";
-        case HevcEncoderPreset::NvencP2:
-            return "P2";
-        case HevcEncoderPreset::NvencP3:
-            return "P3";
-        case HevcEncoderPreset::NvencP4:
-            return "P4";
-        case HevcEncoderPreset::NvencP5:
-            return "P5";
-        case HevcEncoderPreset::NvencP6:
-            return "P6";
-        case HevcEncoderPreset::NvencP7:
-            return "P7";
-        case HevcEncoderPreset::AmfSpeed:
-            return "Speed";
-        case HevcEncoderPreset::AmfBalanced:
-            return "Balanced";
-        case HevcEncoderPreset::AmfQuality:
-            return "Quality";
-        }
-
-        return "P3";
     }
 
     [[nodiscard]] inline bool try_parse_hevc_encoder_preset(std::string_view value, HevcEncoderPreset &preset) noexcept
@@ -404,23 +333,6 @@ namespace alpha_recorder::obs
         return "hq";
     }
 
-    [[nodiscard]] inline constexpr std::string_view hevc_nvenc_tune_display_name(HevcNvencTune tune) noexcept
-    {
-        switch (tune)
-        {
-        case HevcNvencTune::Lossless:
-            return "Lossless";
-        case HevcNvencTune::HighQuality:
-            return "High Quality";
-        case HevcNvencTune::LowLatency:
-            return "Low Latency";
-        case HevcNvencTune::UltraLowLatency:
-            return "Ultra Low Latency";
-        }
-
-        return "High Quality";
-    }
-
     [[nodiscard]] inline bool try_parse_hevc_nvenc_tune(std::string_view value, HevcNvencTune &tune) noexcept
     {
         if (value == "lossless")
@@ -466,25 +378,6 @@ namespace alpha_recorder::obs
         return "auto";
     }
 
-    [[nodiscard]] inline constexpr std::string_view hevc_nvenc_split_encode_display_name(HevcNvencSplitEncodeMode mode) noexcept
-    {
-        switch (mode)
-        {
-        case HevcNvencSplitEncodeMode::Auto:
-            return "Auto";
-        case HevcNvencSplitEncodeMode::Disabled:
-            return "Disabled";
-        case HevcNvencSplitEncodeMode::Forced:
-            return "Forced";
-        case HevcNvencSplitEncodeMode::TwoWay:
-            return "2 strips";
-        case HevcNvencSplitEncodeMode::ThreeWay:
-            return "3 strips";
-        }
-
-        return "Auto";
-    }
-
     [[nodiscard]] inline bool try_parse_hevc_nvenc_split_encode(std::string_view value,
                                                                 HevcNvencSplitEncodeMode &mode) noexcept
     {
@@ -527,18 +420,8 @@ namespace alpha_recorder::obs
         return gop_size > 1000U ? 1000U : gop_size;
     }
 
-    [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_b_frames(std::uint32_t b_frames) noexcept
-    {
-        return b_frames > 4U ? 4U : b_frames;
-    }
-
-    [[nodiscard]] inline constexpr std::uint32_t clamp_hevc_lookahead(std::uint32_t lookahead) noexcept
-    {
-        return lookahead > 32U ? 32U : lookahead;
-    }
-
     [[nodiscard]] inline constexpr bool try_normalize_hevc_nvenc_gpu_index(std::int64_t gpu_index,
-                                                                            std::int32_t &normalized) noexcept
+                                                                           std::int32_t &normalized) noexcept
     {
         if (gpu_index < -1 || gpu_index > static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()))
         {
@@ -568,6 +451,8 @@ namespace alpha_recorder::obs
         case FinalizationFormat::MaskPngMov:
         case FinalizationFormat::MaskHevcNvenc:
         case FinalizationFormat::MaskHevcAmf:
+        case FinalizationFormat::MaskHevcQsv:
+        case FinalizationFormat::MaskHevcVaapi:
             return {};
         }
 
@@ -584,35 +469,96 @@ namespace alpha_recorder::obs
         return finalization_format_is_supported(format) ? format : finalization_format_default();
     }
 
-    [[nodiscard]] inline constexpr std::string_view finalization_format_output_extension(FinalizationFormat format) noexcept
+    [[nodiscard]] inline constexpr bool finalization_format_is_hevc(FinalizationFormat format) noexcept
     {
         switch (format)
         {
-        case FinalizationFormat::MaskPngMov:
-            return ".mov";
-
         case FinalizationFormat::MaskHevcNvenc:
         case FinalizationFormat::MaskHevcAmf:
-            return ".mp4";
+        case FinalizationFormat::MaskHevcQsv:
+        case FinalizationFormat::MaskHevcVaapi:
+            return true;
+
+        case FinalizationFormat::MaskPngMov:
+            return false;
         }
 
-        return ".mov";
+        return false;
     }
 
-    [[nodiscard]] inline std::filesystem::path finalization_output_path(const std::filesystem::path &sidecar_path,
-                                                                        FinalizationFormat format)
+    [[nodiscard]] inline constexpr std::string_view alpha_movie_container_extension(AlphaMovieContainer container) noexcept
     {
-        std::filesystem::path output_path = sidecar_path;
-        output_path.replace_extension(finalization_format_output_extension(format));
-        return output_path;
+        switch (container)
+        {
+        case AlphaMovieContainer::Mp4:
+            return ".mp4";
+        case AlphaMovieContainer::Mov:
+            return ".mov";
+        case AlphaMovieContainer::Mkv:
+            return ".mkv";
+        }
+
+        return ".mp4";
+    }
+
+    [[nodiscard]] inline AlphaMovieContainer alpha_movie_container_for_recording_format(
+        std::string_view recording_format,
+        FinalizationFormat format);
+
+    [[nodiscard]] inline AlphaMovieContainer alpha_movie_container_for_recording_path(
+        const std::filesystem::path &recording_path,
+        FinalizationFormat format)
+    {
+        if (!finalization_format_is_hevc(format))
+        {
+            return AlphaMovieContainer::Mov;
+        }
+
+        return alpha_movie_container_for_recording_format(recording_path.extension().string(), format);
+    }
+
+    [[nodiscard]] inline AlphaMovieContainer alpha_movie_container_for_recording_format(
+        std::string_view recording_format,
+        FinalizationFormat format)
+    {
+        if (!finalization_format_is_hevc(format))
+        {
+            return AlphaMovieContainer::Mov;
+        }
+
+        std::string normalized{recording_format};
+        if (!normalized.empty() && normalized.front() == '.')
+        {
+            normalized.erase(normalized.begin());
+        }
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                       [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+        if (normalized == "mov" || normalized == "hybrid_mov" || normalized == "fragmented_mov")
+        {
+            return AlphaMovieContainer::Mov;
+        }
+        if (normalized == "mkv")
+        {
+            return AlphaMovieContainer::Mkv;
+        }
+        return AlphaMovieContainer::Mp4;
+    }
+
+    [[nodiscard]] inline std::filesystem::path recording_alpha_movie_path_for_container(
+        const std::filesystem::path &recording_path,
+        AlphaMovieContainer container)
+    {
+        std::filesystem::path movie_path = recording_path;
+        movie_path.replace_extension(std::string{".alpha"} + std::string{alpha_movie_container_extension(container)});
+        return movie_path;
     }
 
     [[nodiscard]] inline std::filesystem::path recording_alpha_movie_path(const std::filesystem::path &recording_path,
                                                                           FinalizationFormat format)
     {
-        std::filesystem::path movie_path = recording_path;
-        movie_path.replace_extension(std::string{".alpha"} + std::string{finalization_format_output_extension(format)});
-        return movie_path;
+        return recording_alpha_movie_path_for_container(
+            recording_path,
+            alpha_movie_container_for_recording_path(recording_path, format));
     }
 
     [[nodiscard]] inline std::string_view finalization_format_config_value(FinalizationFormat format) noexcept
@@ -655,7 +601,6 @@ namespace alpha_recorder::obs
         return false;
     }
 
-    [[nodiscard]] std::string_view module_name() noexcept;
     [[nodiscard]] std::string_view module_description() noexcept;
     [[nodiscard]] Settings load_settings(struct config_data *config) noexcept;
     bool register_runtime_hooks() noexcept;
@@ -664,8 +609,6 @@ namespace alpha_recorder::obs
     void unregister_websocket_vendor_api() noexcept;
     void register_settings_ui() noexcept;
     void unregister_settings_ui() noexcept;
-    bool register_output_module() noexcept;
-    bool register_e2e_sources() noexcept;
     bool initialize_module() noexcept;
 
 } // namespace alpha_recorder::obs

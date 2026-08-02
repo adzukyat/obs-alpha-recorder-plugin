@@ -13,7 +13,8 @@ Use OBS the way you already do:
 1. Open OBS.
 2. Start Recording.
 3. Stop Recording.
-4. Find an extra `.alpha.mov` or `.alpha.mp4` file beside your video.
+4. Find an extra `.alpha.mov`, `.alpha.mp4`, or `.alpha.mkv` file beside your
+   video. Same location, same extension.
 
 > [!IMPORTANT]
 > Alpha Recorder does not add alpha to the normal recording file. The main video
@@ -22,13 +23,19 @@ Use OBS the way you already do:
 
 ## :sparkles: Features
 
-- Alpha-mask output using HEVC hardware encoders (NVENC / AMF).
+- Alpha-mask output using OBS texture HEVC encoders (NVENC / AMF / QSV / VAAPI
+  when the matching OBS encoder is available).
+- HEVC alpha files automatically follow OBS recording containers, including
+  hybrid/fragmented MP4 and MOV profiles.
 - Lossless alpha-mask output in PNG MOV format.
 - Simple switching between encoder settings.
-- Fully synchronized start position and frames between alpha and the main video.
+- Fully synchronized start position and frames between alpha and the main video
+  (verified only with NVENC).
 - Works with OBS on Windows, macOS, and Linux.
 
 ## :rocket: Quick Start
+
+Supported on OBS 32.2 and later.
 
 1. Download the package for your platform from
    [Releases](https://github.com/adzukyat/obs-alpha-recorder-plugin/releases).
@@ -55,7 +62,7 @@ documentation as needed.
 
 ## :gear: Settings
 
-<img width="540" height="581" src="https://github.com/user-attachments/assets/ecfaecf7-79db-4c6d-8e28-62fc2aa7f350" />
+<img width="484" height="676" src="https://github.com/user-attachments/assets/50e99ba1-3ab5-437c-a9fd-f25148015116" />
 
 HEVC controls appear only when the matching encoder can actually open on the
 current machine.
@@ -64,7 +71,7 @@ current machine.
 
 | Symptom                         | Likely reason                                                                |
 | ------------------------------- | ---------------------------------------------------------------------------- |
-| HEVC option is missing          | The matching NVENC or AMF encoder cannot open on this machine                |
+| HEVC option is missing          | The matching OBS texture HEVC encoder is not available on this machine       |
 | No alpha file appears           | "Enabled" is turned off in Alpha Recorder settings                           |
 | Alpha becomes black with Spout2 | Change "Composite Mode" from Opaque to Default in the Spout2 source settings |
 
@@ -72,7 +79,8 @@ current machine.
 
 Alpha Recorder is a C++ OBS plugin and includes OBS as a submodule. Building
 requires CMake and an OBS build environment. The OBS app E2E target also
-requires the Bun runtime.
+requires the Bun runtime. The pinned source and dependency runtime are OBS
+32.2.1, including its FFmpeg 8.1.2 ABI.
 
 ### 1. Initialize OBS
 
@@ -154,12 +162,6 @@ Run focused unit tests:
 ctest --test-dir out/build/windows-x64-msvc -C RelWithDebInfo -L unit --output-on-failure
 ```
 
-Run deterministic E2E tests:
-
-```sh
-cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_run_e2e
-```
-
 Run the real OBS app E2E path:
 
 ```sh
@@ -171,5 +173,6 @@ full flow from recording to frame sync verification through WebSocket.
 Runtime-specific targets that cannot run on the current machine are skipped.
 
 > [!WARNING]
-> AMF targets have not been tested since I do not own a Radeon GPU. Feel free to
-> submit patches if you find any bugs.
+> Currently, I can only test the NVENC path on my machine. Other backends are
+> likely to not have fully synchronized frames, and may not even record
+> properly. If you can verify other backends, please let me know.

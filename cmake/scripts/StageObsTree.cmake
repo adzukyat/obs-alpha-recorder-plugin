@@ -9,6 +9,8 @@ set(OBS_ROOT "$ENV{OBS_ROOT}" CACHE PATH "OBS runtime root")
 set(STAGE_DIR "${REPO_ROOT}/out/stage/obs" CACHE PATH "Portable OBS stage directory")
 set(CONFIGURATION "RelWithDebInfo" CACHE STRING "Build configuration")
 set(PLUGIN_NAME "alpha_recorder" CACHE STRING "Main plugin output name")
+set(TEST_SOURCE_PLUGIN_NAME "alpha_recorder_obs_app_e2e_source" CACHE STRING "OBS app E2E source plugin output name")
+set(INCLUDE_TEST_SOURCE OFF CACHE BOOL "Include the OBS app E2E moving-alpha source plugin")
 set(SKIP_PLUGIN_OVERLAY OFF CACHE BOOL "Skip copying Alpha Recorder plugins into the staged OBS plugin directory")
 set(CONFIG_FILE "${REPO_ROOT}/deps/obs/obs-root.cmake" CACHE FILEPATH "Generated OBS root CMake fragment")
 
@@ -178,7 +180,7 @@ foreach(alpha_recorder_plugin_cleanup_dir IN LISTS alpha_recorder_plugin_cleanup
     if(NOT EXISTS "${alpha_recorder_plugin_cleanup_dir}")
         continue()
     endif()
-    foreach(alpha_recorder_owned_plugin IN ITEMS "${PLUGIN_NAME}" alpha_recorder_e2e)
+    foreach(alpha_recorder_owned_plugin IN ITEMS "${PLUGIN_NAME}" "${TEST_SOURCE_PLUGIN_NAME}" alpha_recorder_e2e)
         foreach(alpha_recorder_owned_plugin_path IN ITEMS
             "${alpha_recorder_plugin_cleanup_dir}/${alpha_recorder_owned_plugin}.plugin"
             "${alpha_recorder_plugin_cleanup_dir}/${alpha_recorder_owned_plugin}.dylib"
@@ -192,12 +194,16 @@ foreach(alpha_recorder_plugin_cleanup_dir IN LISTS alpha_recorder_plugin_cleanup
 endforeach()
 
 set(main_plugin_path "")
-set(e2e_plugin_path "")
+set(test_source_plugin_path "")
 if(NOT SKIP_PLUGIN_OVERLAY)
-    foreach(plugin IN ITEMS "${PLUGIN_NAME}" alpha_recorder_e2e)
+    set(alpha_recorder_plugins_to_overlay "${PLUGIN_NAME}")
+    if(INCLUDE_TEST_SOURCE)
+        list(APPEND alpha_recorder_plugins_to_overlay "${TEST_SOURCE_PLUGIN_NAME}")
+    endif()
+    foreach(plugin IN LISTS alpha_recorder_plugins_to_overlay)
         alpha_recorder_find_plugin(plugin_path "${plugin}")
-        if(plugin STREQUAL "${PLUGIN_NAME}" AND plugin_path STREQUAL "")
-            message(FATAL_ERROR "Failed to locate ${PLUGIN_NAME} in the build tree: ${BUILD_DIR}")
+        if(plugin_path STREQUAL "")
+            message(FATAL_ERROR "Failed to locate ${plugin} in the build tree: ${BUILD_DIR}")
         endif()
         if(NOT plugin_path STREQUAL "")
             if(IS_DIRECTORY "${plugin_path}")
@@ -216,8 +222,8 @@ if(NOT SKIP_PLUGIN_OVERLAY)
             endif()
             if(plugin STREQUAL "${PLUGIN_NAME}")
                 set(main_plugin_path "${plugin_path}")
-            elseif(plugin STREQUAL "alpha_recorder_e2e")
-                set(e2e_plugin_path "${plugin_path}")
+            elseif(plugin STREQUAL "${TEST_SOURCE_PLUGIN_NAME}")
+                set(test_source_plugin_path "${plugin_path}")
             endif()
         endif()
     endforeach()
@@ -229,7 +235,7 @@ alpha_recorder_write_json_manifest("${STAGE_DIR}/stage.manifest.json"
     "stageDir=${STAGE_DIR}"
     "configuration=${CONFIGURATION}"
     "pluginPath=${main_plugin_path}"
-    "e2ePluginPath=${e2e_plugin_path}"
+    "testSourcePluginPath=${test_source_plugin_path}"
 )
 
 message(STATUS "Staged OBS tree at ${STAGE_DIR}")

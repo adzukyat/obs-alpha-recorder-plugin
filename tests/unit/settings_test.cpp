@@ -8,7 +8,7 @@
 
 #include <util/config-file.h>
 
-#include "alpha_recorder/export_worker.hpp"
+#include "alpha_mask_video_writer.hpp"
 #include "alpha_recorder/plugin.hpp"
 
 int main()
@@ -20,8 +20,6 @@ int main()
         defaults.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::NvencP3 ||
         defaults.hevc_encoder.nvenc_tune != alpha_recorder::obs::HevcNvencTune::HighQuality ||
         defaults.hevc_encoder.gop_size != 0U ||
-        defaults.hevc_encoder.b_frames != 0U ||
-        defaults.hevc_encoder.lookahead != 0U ||
         defaults.hevc_encoder.adaptive_quantization ||
         defaults.hevc_encoder.nvenc_split_encode != alpha_recorder::obs::HevcNvencSplitEncodeMode::Auto ||
         defaults.hevc_encoder.nvenc_gpu_index != -1 ||
@@ -38,8 +36,6 @@ int main()
         alpha_recorder::obs::settings_hevc_preset_key() != "hevc_preset" ||
         alpha_recorder::obs::settings_hevc_nvenc_tune_key() != "hevc_nvenc_tune" ||
         alpha_recorder::obs::settings_hevc_gop_size_key() != "hevc_gop_size" ||
-        alpha_recorder::obs::settings_hevc_b_frames_key() != "hevc_b_frames" ||
-        alpha_recorder::obs::settings_hevc_lookahead_key() != "hevc_lookahead" ||
         alpha_recorder::obs::settings_hevc_adaptive_quantization_key() != "hevc_adaptive_quantization" ||
         alpha_recorder::obs::settings_hevc_nvenc_split_encode_key() != "hevc_nvenc_split_encode" ||
         alpha_recorder::obs::settings_hevc_nvenc_gpu_index_key() != "hevc_nvenc_gpu_index" ||
@@ -49,7 +45,7 @@ int main()
         return 2;
     }
 
-    if (alpha_recorder::obs::finalization_format_options.size() != 3U)
+    if (alpha_recorder::obs::finalization_format_options.size() != 5U)
     {
         std::cerr << "unexpected finalization format option count\n";
         return 3;
@@ -57,7 +53,9 @@ int main()
 
     if (alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskPngMov) != alpha_recorder::obs::FinalizationFormat::MaskPngMov ||
         alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc ||
-        alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != alpha_recorder::obs::FinalizationFormat::MaskHevcAmf)
+        alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != alpha_recorder::obs::FinalizationFormat::MaskHevcAmf ||
+        alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskHevcQsv) != alpha_recorder::obs::FinalizationFormat::MaskHevcQsv ||
+        alpha_recorder::obs::normalize_finalization_format(alpha_recorder::obs::FinalizationFormat::MaskHevcVaapi) != alpha_recorder::obs::FinalizationFormat::MaskHevcVaapi)
     {
         std::cerr << "finalization format normalization is incorrect\n";
         return 4;
@@ -65,26 +63,27 @@ int main()
 
     if (!alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskPngMov) ||
         !alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) ||
-        !alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf))
+        !alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) ||
+        !alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskHevcQsv) ||
+        !alpha_recorder::obs::finalization_format_is_supported(alpha_recorder::obs::FinalizationFormat::MaskHevcVaapi))
     {
         std::cerr << "finalization support classification is incorrect\n";
         return 5;
     }
 
-    const std::filesystem::path alpha_sidecar = std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"};
-    if (alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskPngMov) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
-        alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
-        alpha_recorder::obs::finalization_output_path(alpha_sidecar, alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"})
-    {
-        std::cerr << "finalization output path helper returned an unexpected value\n";
-        return 6;
-    }
-
     const std::filesystem::path recording_path = std::filesystem::path{"C:/Recordings/MyRec.mkv"};
     if (alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskPngMov) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
-        alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
-        alpha_recorder::obs::recording_sidecar_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.sidecar"} ||
-        alpha_recorder::obs::recording_manifest_path(recording_path) != std::filesystem::path{"C:/Recordings/MyRec.alpha.manifest.json"})
+        alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mkv"} ||
+        alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskHevcQsv) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mkv"} ||
+        alpha_recorder::obs::recording_alpha_movie_path(recording_path, alpha_recorder::obs::FinalizationFormat::MaskHevcVaapi) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mkv"} ||
+        alpha_recorder::obs::recording_alpha_movie_path(std::filesystem::path{"C:/Recordings/MyRec.mov"}, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
+        alpha_recorder::obs::recording_alpha_movie_path(std::filesystem::path{"C:/Recordings/MyRec.MOV"}, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mov"} ||
+        alpha_recorder::obs::recording_alpha_movie_path(std::filesystem::path{"C:/Recordings/MyRec.custom"}, alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != std::filesystem::path{"C:/Recordings/MyRec.alpha.mp4"} ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("hybrid_mov", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mov ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("fragmented_mov", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mov ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("hybrid_mp4", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mp4 ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("MKV", alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != alpha_recorder::obs::AlphaMovieContainer::Mkv ||
+        alpha_recorder::obs::alpha_movie_container_for_recording_format("mkv", alpha_recorder::obs::FinalizationFormat::MaskPngMov) != alpha_recorder::obs::AlphaMovieContainer::Mov)
     {
         std::cerr << "recording path helpers do not match the expected OBS naming convention\n";
         return 7;
@@ -98,28 +97,24 @@ int main()
 
     if (alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskPngMov) != "mask_png_mov" ||
         alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc) != "mask_hevc_nvenc" ||
-        alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != "mask_hevc_amf")
+        alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskHevcAmf) != "mask_hevc_amf" ||
+        alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskHevcQsv) != "mask_hevc_qsv" ||
+        alpha_recorder::obs::finalization_format_config_value(alpha_recorder::obs::FinalizationFormat::MaskHevcVaapi) != "mask_hevc_vaapi")
     {
         std::cerr << "finalization format config value mismatch\n";
         return 9;
-    }
-
-    if (alpha_recorder::obs::frame_pts_from_elapsed_ns(33366667ULL, 30000U, 1001U) != 1U)
-    {
-        std::cerr << "fractional frame-rate pts conversion did not use fps_den\n";
-        return 10;
-    }
-
-    if (alpha_recorder::obs::frame_pts_from_elapsed_ns(1000000000ULL, 60U, 1U) != 60U)
-    {
-        std::cerr << "integer frame-rate pts conversion mismatch\n";
-        return 11;
     }
 
     alpha_recorder::obs::FinalizationFormat parsed_format = alpha_recorder::obs::FinalizationFormat::MaskPngMov;
     if (!alpha_recorder::obs::try_parse_finalization_format("mask_hevc_amf", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskHevcAmf)
     {
         std::cerr << "failed to parse the hevc amf config value\n";
+        return 12;
+    }
+    if (!alpha_recorder::obs::try_parse_finalization_format("mask_hevc_qsv", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskHevcQsv ||
+        !alpha_recorder::obs::try_parse_finalization_format("mask_hevc_vaapi", parsed_format) || parsed_format != alpha_recorder::obs::FinalizationFormat::MaskHevcVaapi)
+    {
+        std::cerr << "failed to parse qsv or vaapi config values\n";
         return 12;
     }
 
@@ -156,8 +151,6 @@ int main()
         alpha_recorder::obs::hevc_nvenc_split_encode_config_value(alpha_recorder::obs::HevcNvencSplitEncodeMode::Disabled) != "disabled" ||
         alpha_recorder::obs::clamp_hevc_quality_cq(99U) != 51U ||
         alpha_recorder::obs::clamp_hevc_gop_size(1200U) != 1000U ||
-        alpha_recorder::obs::clamp_hevc_b_frames(8U) != 4U ||
-        alpha_recorder::obs::clamp_hevc_lookahead(64U) != 32U ||
         !alpha_recorder::obs::try_normalize_hevc_nvenc_gpu_index(99, normalized_gpu_index) ||
         normalized_gpu_index != 99 ||
         alpha_recorder::obs::try_normalize_hevc_nvenc_gpu_index(-2, normalized_gpu_index) ||
@@ -184,7 +177,7 @@ int main()
     }
 
     config_t *config = nullptr;
-    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=amf_quality\nhevc_nvenc_tune=ull\nhevc_gop_size=1200\nhevc_b_frames=8\nhevc_lookahead=64\nhevc_adaptive_quantization=true\nhevc_nvenc_split_encode=3\nhevc_nvenc_gpu_index=99\ndiagnostic_logging=true\n") != CONFIG_SUCCESS || config == nullptr)
+    if (config_open_string(&config, "[AlphaRecorder]\nenabled=true\nfinalization_format=mask_png_mov\nhevc_quality_profile=fast\nhevc_quality_cq=64\nhevc_preset=amf_quality\nhevc_nvenc_tune=ull\nhevc_gop_size=1200\nhevc_adaptive_quantization=true\nhevc_nvenc_split_encode=3\nhevc_nvenc_gpu_index=99\ndiagnostic_logging=true\n") != CONFIG_SUCCESS || config == nullptr)
     {
         std::cerr << "failed to open an in-memory config string\n";
         return 16;
@@ -198,8 +191,6 @@ int main()
         loaded_settings.hevc_encoder.preset != alpha_recorder::obs::HevcEncoderPreset::AmfQuality ||
         loaded_settings.hevc_encoder.nvenc_tune != alpha_recorder::obs::HevcNvencTune::UltraLowLatency ||
         loaded_settings.hevc_encoder.gop_size != 1000U ||
-        loaded_settings.hevc_encoder.b_frames != 4U ||
-        loaded_settings.hevc_encoder.lookahead != 32U ||
         !loaded_settings.hevc_encoder.adaptive_quantization ||
         loaded_settings.hevc_encoder.nvenc_split_encode != alpha_recorder::obs::HevcNvencSplitEncodeMode::ThreeWay ||
         loaded_settings.hevc_encoder.nvenc_gpu_index != 99 ||
@@ -218,9 +209,9 @@ int main()
     const alpha_recorder::obs::Settings missing_key_settings = alpha_recorder::obs::load_settings(config);
     config_close(config);
     if (!missing_key_settings.enabled ||
-        missing_key_settings.finalization_format != alpha_recorder::obs::preferred_runtime_finalization_format())
+        missing_key_settings.finalization_format != alpha_recorder::obs::finalization_format_default())
     {
-        std::cerr << "missing settings did not use enabled and preferred runtime defaults\n";
+        std::cerr << "missing settings did not use enabled and safe format defaults\n";
         return 19;
     }
 
@@ -250,13 +241,11 @@ int main()
     const alpha_recorder::obs::Settings rewritten_settings = alpha_recorder::obs::load_settings(file_config);
     const char *rewritten_format = config_get_string(file_config, alpha_recorder::obs::settings_section().data(), alpha_recorder::obs::settings_finalization_format_key().data());
     const alpha_recorder::obs::FinalizationFormat expected_rewritten_format =
-        alpha_recorder::obs::finalization_format_runtime_available(alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc)
-            ? alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc
-            : alpha_recorder::obs::preferred_runtime_finalization_format();
+        alpha_recorder::obs::FinalizationFormat::MaskHevcNvenc;
     const std::string expected_rewritten_text{alpha_recorder::obs::finalization_format_config_value(expected_rewritten_format)};
     if (!rewritten_settings.enabled || rewritten_settings.finalization_format != expected_rewritten_format || rewritten_format == nullptr || std::string{rewritten_format} != expected_rewritten_text)
     {
-        std::cerr << "unavailable hevc config values were not normalized in the persisted config\n";
+        std::cerr << "available hevc config values were not preserved in the persisted config\n";
         config_close(file_config);
         return 42;
     }
