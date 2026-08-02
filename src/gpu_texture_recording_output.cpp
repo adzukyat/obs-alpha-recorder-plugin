@@ -3074,6 +3074,57 @@ namespace alpha_recorder::obs
         return true;
     }
 
+    struct BeginDelayedReplayCaptureTask
+    {
+        GpuTextureRecordingOutputContext *context = nullptr;
+        obs_output_t *output = nullptr;
+        bool cts_driven = false;
+        bool can_begin = false;
+        bool began = false;
+        bool pause_succeeded = true;
+        std::uint64_t consume_start_render_time = 0U;
+    };
+
+    void begin_delayed_replay_capture_on_graphics_thread(void *opaque) noexcept
+    {
+        auto *task = static_cast<BeginDelayedReplayCaptureTask *>(opaque);
+        if (task == nullptr || task->context == nullptr ||
+            task->output == nullptr)
+        {
+            return;
+        }
+
+        task->can_begin = obs_output_can_begin_data_capture(task->output, 0);
+        if (!task->can_begin ||
+            !obs_output_begin_data_capture(task->output, 0))
+        {
+            return;
+        }
+        task->began = true;
+
+        bool pause_after_start = false;
+        {
+            std::lock_guard<std::mutex> lock(task->context->mutex);
+            task->context->data_capture_started = true;
+            pause_after_start = task->context->replay_pause_requested;
+            task->consume_start_render_time = obs_get_video_frame_time();
+            task->context->replay_consume_start_render_time =
+                task->cts_driven ? task->consume_start_render_time : 0U;
+            task->context->start_total_frames = obs_get_total_frames();
+            task->context->start_lagged_frames = obs_get_lagged_frames();
+            task->context->state_cv.notify_all();
+        }
+
+        if (pause_after_start && !obs_output_pause(task->output, true))
+        {
+            task->pause_succeeded = false;
+            obs_output_end_data_capture(task->output);
+            std::lock_guard<std::mutex> lock(task->context->mutex);
+            task->context->data_capture_started = false;
+            task->context->replay_configured = false;
+        }
+    }
+
     bool gpu_texture_recording_output_begin_delayed_replay(obs_output_t *output,
                                                            std::int64_t main_first_packet_pts,
                                                            std::uint64_t main_first_packet_cts,
@@ -3244,7 +3295,16 @@ namespace alpha_recorder::obs
             context->replay_emitted_frames = 0U;
         }
 
-        if (!obs_output_can_begin_data_capture(output, 0))
+        BeginDelayedReplayCaptureTask capture_task{};
+        capture_task.context = context;
+        capture_task.output = output;
+        capture_task.cts_driven = cts_driven;
+        obs_queue_task(OBS_TASK_GRAPHICS,
+                       begin_delayed_replay_capture_on_graphics_thread,
+                       &capture_task,
+                       true);
+
+        if (!capture_task.can_begin)
         {
             assign_error(error_message, "Alpha Recorder GPU delayed replay output cannot begin data capture");
             std::lock_guard<std::mutex> lock(context->mutex);
@@ -3252,7 +3312,7 @@ namespace alpha_recorder::obs
             return false;
         }
 
-        if (!obs_output_begin_data_capture(output, 0))
+        if (!capture_task.began)
         {
             assign_error(error_message, "Alpha Recorder GPU delayed replay output failed to begin data capture");
             std::lock_guard<std::mutex> lock(context->mutex);
@@ -3260,28 +3320,10 @@ namespace alpha_recorder::obs
             return false;
         }
 
-        bool pause_after_start = false;
-        {
-            std::lock_guard<std::mutex> lock(context->mutex);
-            context->data_capture_started = true;
-            pause_after_start = context->replay_pause_requested;
-            const std::uint64_t frame_interval_ns = configured_frame_interval_ns(*context);
-            const std::uint64_t current_video_time = obs_get_video_frame_time();
-            context->replay_consume_start_render_time =
-                cts_driven ? current_video_time + frame_interval_ns : 0U;
-            context->start_total_frames = obs_get_total_frames();
-            context->start_lagged_frames = obs_get_lagged_frames();
-            context->state_cv.notify_all();
-        }
-
-        if (pause_after_start && !obs_output_pause(output, true))
+        if (!capture_task.pause_succeeded)
         {
             assign_error(error_message,
                          "Alpha Recorder GPU delayed replay output could not apply its pending pause state");
-            obs_output_end_data_capture(output);
-            std::lock_guard<std::mutex> lock(context->mutex);
-            context->data_capture_started = false;
-            context->replay_configured = false;
             return false;
         }
 
@@ -3293,7 +3335,7 @@ namespace alpha_recorder::obs
              context->replay_texture_count,
              main_texture_encoded ? "live" : "previous",
              cts_driven ? "true" : "false",
-             static_cast<unsigned long long>(context->replay_consume_start_render_time));
+             static_cast<unsigned long long>(capture_task.consume_start_render_time));
         return true;
     }
 

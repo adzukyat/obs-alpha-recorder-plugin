@@ -219,6 +219,9 @@ Common rules:
 2. Retain the active recording output on
    `OBS_FRONTEND_EVENT_RECORDING_STARTING`, classify the main encoder topology,
    and collect its encoded packet timing evidence.
+   Delayed GPU replay begins alpha data capture from the post-frame graphics
+   task boundary, so its first consumed generation is also the first texture
+   submitted to the alpha encoder; it must not use a fixed cadence delay.
 3. Pause alpha admission with the main recording, but keep stop-edge processing
    active until OBS reports recording stopped.
 4. Never decode or modify the RGB recording, and never block or stop it because
@@ -652,10 +655,12 @@ The OBS app E2E target:
   recording container for MP4, MOV, and MKV, `ffprobe` reports `hevc`, and the
   output does not use an alpha pixel format.
 - The MKV NLE-remux regression stream-copies both RGB and alpha video tracks to
-  MP4 and requires identical frame counts, track durations, and average frame
-  rates. This catches a one-millisecond terminal Matroska rounding loss that
-  otherwise makes Adobe applications report a nominal 60 fps alpha track as
-  60.001 fps.
+  MP4 and requires identical frame counts and average frame rates, with track
+  durations differing by no more than one Matroska millisecond. This catches a
+  one-millisecond terminal Matroska rounding loss that otherwise makes Adobe
+  applications report a nominal 60 fps alpha track as 60.001 fps, while
+  allowing the harmless terminal tick difference caused by B-frame RGB and
+  non-reordered alpha tracks using different decode timelines.
 
 The plugin logs one per-segment OBS performance summary covering
 capture/readback CPU time, GPU submission timing, alignment-worker batches,

@@ -694,7 +694,10 @@ function isSevereSkippedFrameLine(line: string): boolean {
     return skippedFrames >= severeSkippedFrameCount;
   }
 
-  return Number(skippedFrameMatch[2]) >= severeSkippedFramePercent;
+  return (
+    skippedFrames >= severeSkippedFrameCount ||
+    Number(skippedFrameMatch[2]) >= severeSkippedFramePercent
+  );
 }
 
 function isSevereRenderLagLine(line: string): boolean {
@@ -2270,16 +2273,24 @@ function videoTimelineSummary(ffprobe: string, path: string): VideoTimelineSumma
   };
 }
 
-function timelineDurationsEqual(left: VideoTimelineSummary, right: VideoTimelineSummary): boolean {
+function timelineDurationsWithinMilliseconds(
+  left: VideoTimelineSummary,
+  right: VideoTimelineSummary,
+  toleranceMilliseconds: bigint,
+): boolean {
   const [leftTimeBaseNumerator, leftTimeBaseDenominator] = rationalParts(left.timeBase);
   const [rightTimeBaseNumerator, rightTimeBaseDenominator] = rationalParts(right.timeBase);
-  return (
+  const difference =
     BigInt(left.durationTs) *
       leftTimeBaseNumerator *
-      rightTimeBaseDenominator ===
+      rightTimeBaseDenominator -
     BigInt(right.durationTs) *
       rightTimeBaseNumerator *
-      leftTimeBaseDenominator
+      leftTimeBaseDenominator;
+  const absoluteDifference = difference < 0n ? -difference : difference;
+  return (
+    absoluteDifference * 1000n <=
+    toleranceMilliseconds * leftTimeBaseDenominator * rightTimeBaseDenominator
   );
 }
 
@@ -2324,7 +2335,7 @@ function verifyStreamCopyRemuxTimeline(
     };
     if (
       summary.rgb.frameCount !== summary.alpha.frameCount ||
-      !timelineDurationsEqual(summary.rgb, summary.alpha) ||
+      !timelineDurationsWithinMilliseconds(summary.rgb, summary.alpha, 1n) ||
       !rationalsEqual(summary.rgb.averageFrameRate, summary.alpha.averageFrameRate)
     ) {
       throw new Error(
