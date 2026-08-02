@@ -74,13 +74,13 @@ jobs:
       matrix:
         include:
           - artifact_suffix: windows-x64
-            runner: windows-latest
+            runner: windows-2022
             configure_preset: windows-x64-msvc
             build_preset: windows-x64-msvc-relwithdebinfo
             archive_format: zip
             archive_ext: zip
           - artifact_suffix: macos-arm64
-            runner: macos-15
+            runner: macos-26
             configure_preset: macos-arm64
             build_preset: macos-arm64-relwithdebinfo
             archive_format: zip
@@ -135,6 +135,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
           brew install ninja
 
       - name: Bootstrap pinned OBS
