@@ -54,7 +54,7 @@ OBS 32.2以降に対応
 
 ## 設定
 
-<img width="540" height="581" src="https://github.com/user-attachments/assets/ecfaecf7-79db-4c6d-8e28-62fc2aa7f350" />
+<img width="484" height="676" src="https://github.com/user-attachments/assets/50e99ba1-3ab5-437c-a9fd-f25148015116" />
 
 ※HEVC関連の設定は対応するOBSテクスチャエンコーダーが利用できる環境でのみ表示されます。
 
