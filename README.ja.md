@@ -12,7 +12,7 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 1. OBSを起動する
 2. OBSの「録画開始」をクリック
 3. お好きなタイミングで録画を停止
-4. 録画した動画と同じ場所に `.alpha.mov`、`.alpha.mp4`、または
+4. 録画した動画と同じ場所と拡張子で `.alpha.mov`、`.alpha.mp4`、または
    `.alpha.mkv` というファイルができています
 
 > [!IMPORTANT]
@@ -23,18 +23,15 @@ Recorderは、OBSでの録画時にアルファを保持した状態で録画で
 
 - OBSのHEVCテクスチャエンコーダー（NVENC / AMF / QSV / VAAPI）を
   使用したアルファマスクの書き出しに対応
-- HEVCのアルファファイルはOBS録画のMP4 / MOV / MKVコンテナに追従
-- PNG MOV形式でのロスレスアルファマスク書き出しにも対応
-- エンコーダーの設定を簡単に切り替え可能
-- アルファとメイン動画の開始位置とフレームが完全に同期
+- コンテナはOBSの録画設定に自動追従（Hybrid/Fragmentedにも対応）
+- PNG MOV形式でのロスレスアルファマスク書き出しも可能
+- エンコーダーの設定を簡単に切り替えできる設定画面
+- アルファとメイン動画の開始位置と各フレームが完全に同期（NVENCのみ保証）
 - Windows、macOS、およびLinux版OBSで動作
 
 ## クイックスタート
 
-リリースパッケージは OBS Studio 32.2.x 向けにビルド・検証しています。Alpha
-Recorder は OBS 同梱の FFmpeg ライブラリにリンクするため、使用中の OBS
-リリース向けにビルドされたパッケージを使用してください。OBS 32.1.x
-向けのパッケージは OBS 32.2.x では読み込めません。
+OBS 32.2以降に対応
 
 1. [Releases](https://github.com/adzukyat/obs-alpha-recorder-plugin/releases)
    から最新版をダウンロードして解凍します。
@@ -68,7 +65,6 @@ Recorder は OBS 同梱の FFmpeg ライブラリにリンクするため、使�
 | HEVCオプションが表示されない       | 対応するOBSテクスチャHEVCエンコーダーが利用できない                 |
 | マスクが出力されない               | Alpha Recorderの設定の「Enabled」がオフになっている                 |
 | Spout2でアルファが黒くなってしまう | Spout2のソース設定で「Composite Mode」をOpaqueからDefaultに変更する |
-| OBS更新後にプラグインを読み込めない | そのOBSリリース向けのAlpha Recorderパッケージをインストールする     |
 
 ## ビルド
 
@@ -164,6 +160,6 @@ cmake --build --preset windows-x64-msvc-relwithdebinfo --target alpha_recorder_r
 アプリケーションE2Eテストでは実際にOBSが起動し、録画からフレーム同期検証までの一連の流れがWebSocket経由で自動で実行されます。全ランタイムでの検証が走りますが、非対応環境はスキップされます。
 
 > [!WARNING]
-> 現在、メンテナー環境で検証済みのハードウェアHEVC経路はWindowsのNVENCのみです。
-> AMF、QSV、VAAPIは対応するOBSテクスチャエンコーダーがある場合だけ表示されますが、
-> 各ハードウェアでの追加検証が必要です。
+> 今のところ私の環境ではNVENCでしか動作をテストできていません。
+> 他のバックエンドではフレームが完全に同期しない可能性が高く、そもそも正常に録画できない可能性もあります。
+> もし他のバックエンドで動作確認ができる方がいれば、教えていただけると助かります。

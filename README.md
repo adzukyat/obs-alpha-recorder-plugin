@@ -13,7 +13,8 @@ Use OBS the way you already do:
 1. Open OBS.
 2. Start Recording.
 3. Stop Recording.
-4. Find an extra `.alpha.mov`, `.alpha.mp4`, or `.alpha.mkv` file beside your video.
+4. Find an extra `.alpha.mov`, `.alpha.mp4`, or `.alpha.mkv` file beside your
+   video. Same location, same extension.
 
 > [!IMPORTANT]
 > Alpha Recorder does not add alpha to the normal recording file. The main video
@@ -24,18 +25,17 @@ Use OBS the way you already do:
 
 - Alpha-mask output using OBS texture HEVC encoders (NVENC / AMF / QSV / VAAPI
   when the matching OBS encoder is available).
-- HEVC alpha files automatically follow OBS MP4, MOV, and MKV recording
-  containers, including hybrid/fragmented MP4 and MOV profiles.
+- HEVC alpha files automatically follow OBS recording containers, including
+  hybrid/fragmented MP4 and MOV profiles.
 - Lossless alpha-mask output in PNG MOV format.
 - Simple switching between encoder settings.
-- Fully synchronized start position and frames between alpha and the main video.
+- Fully synchronized start position and frames between alpha and the main video
+  (verified only with NVENC).
 - Works with OBS on Windows, macOS, and Linux.
 
 ## :rocket: Quick Start
 
-Release packages are built and verified for OBS Studio 32.2.x. Alpha Recorder
-links to OBS's bundled FFmpeg libraries, so use a package built for the OBS
-release you run; packages built for OBS 32.1.x do not load on OBS 32.2.x.
+Supported on OBS 32.2 and later.
 
 1. Download the package for your platform from
    [Releases](https://github.com/adzukyat/obs-alpha-recorder-plugin/releases).
@@ -74,7 +74,6 @@ current machine.
 | HEVC option is missing          | The matching OBS texture HEVC encoder is not available on this machine       |
 | No alpha file appears           | "Enabled" is turned off in Alpha Recorder settings                           |
 | Alpha becomes black with Spout2 | Change "Composite Mode" from Opaque to Default in the Spout2 source settings |
-| Plugin fails to load after OBS update | Install the Alpha Recorder package built for that OBS release           |
 
 ## :hammer_and_wrench: Build
 
@@ -174,6 +173,6 @@ full flow from recording to frame sync verification through WebSocket.
 Runtime-specific targets that cannot run on the current machine are skipped.
 
 > [!WARNING]
-> NVENC is the only hardware HEVC path currently verified by the maintainer's
-> Windows machine. AMF, QSV, and VAAPI use OBS's texture encoder backends and are
-> gated at runtime, but still need backend-specific hardware validation.
+> Currently, I can only test the NVENC path on my machine. Other backends are
+> likely to not have fully synchronized frames, and may not even record
+> properly. If you can verify other backends, please let me know.
