@@ -62,7 +62,7 @@ documentation as needed.
 
 ## :gear: Settings
 
-<img width="540" height="581" src="https://github.com/user-attachments/assets/ecfaecf7-79db-4c6d-8e28-62fc2aa7f350" />
+<img width="484" height="676" src="https://github.com/user-attachments/assets/50e99ba1-3ab5-437c-a9fd-f25148015116" />
 
 HEVC controls appear only when the matching encoder can actually open on the
 current machine.
